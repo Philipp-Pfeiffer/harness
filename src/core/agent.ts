@@ -1,4 +1,44 @@
+import { complete, getModel } from "@mariozechner/pi-ai";
+import type {
+  Context as PiContext,
+  Tool as PiTool,
+  ToolCall as PiToolCall,
+  UserMessage,
+  ToolResultMessage,
+  TextContent,
+} from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
+
+function toPiTool(tool: Tool): PiTool {
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  };
+}
+
+function createUserMessage(content: string): UserMessage {
+  return {
+    role: "user",
+    content,
+    timestamp: Date.now(),
+  };
+}
+
+function createToolResultMessage(
+  toolCall: PiToolCall,
+  result: string,
+  isError: boolean
+): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: toolCall.id,
+    toolName: toolCall.name,
+    content: [{ type: "text", text: result }],
+    isError,
+    timestamp: Date.now(),
+  };
+}
 
 export interface AgentConfig {
   tools: Tool[];
@@ -10,27 +50,65 @@ export interface Agent {
   run(input: string): Promise<string>;
 }
 
+const model = getModel("minimax", "MiniMax-M2.7");
+
 export function createAgent(config: AgentConfig): Agent {
   const { tools, systemPrompt, maxIterations = 10 } = config;
 
   return {
     async run(input: string): Promise<string> {
-      // TODO: implement the agent loop
-      // 1. Build context (system prompt + user input + history)
-      // 2. Call LLM via @mariozechner/pi-ai
-      // 3. Parse tool calls from response
-      // 4. Validate & execute tools
-      // 5. Append results to context
-      // 6. Repeat until maxIterations or stop condition
+      const context: PiContext = {
+        systemPrompt,
+        messages: [createUserMessage(input)],
+        tools: tools.map(toPiTool),
+      };
 
-      console.log(`[Cliffford] Received input: ${input}`);
-      console.log(`[Cliffford] Available tools: ${tools.map((t) => t.name).join(", ")}`);
-      console.log(`[Cliffford] Max iterations: ${maxIterations}`);
-      if (systemPrompt) {
-        console.log(`[Cliffford] System prompt set`);
+      for (let i = 0; i < maxIterations; i++) {
+        const response = await complete(model, context);
+
+        context.messages.push(response);
+
+        if (response.stopReason === "stop" || response.stopReason === "length") {
+          const textParts = response.content
+            .filter((c): c is TextContent => c.type === "text")
+            .map((c) => c.text);
+          return textParts.join("");
+        }
+
+        if (response.stopReason === "toolUse") {
+          const toolCalls = response.content.filter(
+            (c): c is PiToolCall => c.type === "toolCall"
+          );
+
+          for (const toolCall of toolCalls) {
+            const tool = tools.find((t) => t.name === toolCall.name);
+            let result: string;
+            let isError = false;
+
+            if (!tool) {
+              result = `Tool "${toolCall.name}" nicht gefunden.`;
+              isError = true;
+            } else {
+              try {
+                result = await Promise.resolve(tool.execute(toolCall.arguments));
+              } catch (err) {
+                result = err instanceof Error ? err.message : String(err);
+                isError = true;
+              }
+            }
+
+            context.messages.push(createToolResultMessage(toolCall, result, isError));
+          }
+
+          continue;
+        }
+
+        if (response.stopReason === "error" || response.stopReason === "aborted") {
+          return `Fehler: ${response.errorMessage || "Unbekannter Fehler"}`;
+        }
       }
 
-      return "Cliffford V2 is alive but the loop is not wired yet.";
+      return "Maximale Anzahl an Iterationen erreicht.";
     },
   };
 }

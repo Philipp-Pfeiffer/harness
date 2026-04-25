@@ -11,7 +11,8 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.70.2"
+    "@mariozechner/pi-ai": "^0.70.2",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
