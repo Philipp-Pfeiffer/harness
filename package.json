@@ -1,0 +1,25 @@
+{
+  "name": "cliffford-v2",
+  "version": "0.0.1",
+  "description": "Tarnis – Custom Agent Loop built on @mariozechner/pi-ai",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.70.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
