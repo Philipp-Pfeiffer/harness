@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.70.2",
+    "@sinclair/typebox": "^0.34.49",
     "dotenv": "^17.4.2"
   },
   "devDependencies": {

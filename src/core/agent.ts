@@ -1,4 +1,5 @@
 import { complete, getModel } from "@mariozechner/pi-ai";
+import { Value } from "typebox/value";
 import type {
   Context as PiContext,
   Tool as PiTool,
@@ -6,8 +7,19 @@ import type {
   UserMessage,
   ToolResultMessage,
   TextContent,
+  Model,
+  Api,
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
+
+export interface ToolCallLog {
+  name: string;
+  arguments: Record<string, unknown>;
+  result: string;
+  isError: boolean;
+}
+
+export type Logger = (msg: string) => void;
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -44,16 +56,17 @@ export interface AgentConfig {
   tools: Tool[];
   systemPrompt?: string;
   maxIterations?: number;
+  model?: Model<Api>;
+  logger?: Logger;
 }
 
 export interface Agent {
   run(input: string): Promise<string>;
 }
 
-const model = getModel("minimax", "MiniMax-M2.7");
-
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, systemPrompt, maxIterations = 10 } = config;
+  const { tools, systemPrompt, maxIterations = 10, model, logger } = config;
+  const resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
 
   return {
     async run(input: string): Promise<string> {
@@ -64,7 +77,7 @@ export function createAgent(config: AgentConfig): Agent {
       };
 
       for (let i = 0; i < maxIterations; i++) {
-        const response = await complete(model, context);
+        const response = await complete(resolvedModel, context);
 
         context.messages.push(response);
 
@@ -88,12 +101,21 @@ export function createAgent(config: AgentConfig): Agent {
             if (!tool) {
               result = `Tool "${toolCall.name}" nicht gefunden.`;
               isError = true;
+              logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
             } else {
-              try {
-                result = await Promise.resolve(tool.execute(toolCall.arguments));
-              } catch (err) {
-                result = err instanceof Error ? err.message : String(err);
+              if (!Value.Check(tool.parameters, toolCall.arguments)) {
+                result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
                 isError = true;
+                logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
+              } else {
+                try {
+                  result = await Promise.resolve(tool.execute(toolCall.arguments));
+                  logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${result}`);
+                } catch (err) {
+                  result = err instanceof Error ? err.message : String(err);
+                  isError = true;
+                  logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                }
               }
             }
 
@@ -103,8 +125,12 @@ export function createAgent(config: AgentConfig): Agent {
           continue;
         }
 
-        if (response.stopReason === "error" || response.stopReason === "aborted") {
-          return `Fehler: ${response.errorMessage || "Unbekannter Fehler"}`;
+        if (response.stopReason === "error") {
+          throw new Error(response.errorMessage ?? "Unbekannter Fehler");
+        }
+
+        if (response.stopReason === "aborted") {
+          return "Anfrage wurde abgebrochen.";
         }
       }
 
