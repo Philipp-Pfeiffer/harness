@@ -174,11 +174,7 @@ export async function executeExecPty(args: {
       setTimeout(handleYield, args.yieldMs);
     }
 
-    ptyProc.onExit(({ exitCode: code, signal: sig }) => {
-      exitCode = code;
-      signal = sig;
-      clearTimeout(timeoutId);
-
+    const resolveOutput = () => {
       if (yielded) {
         return;
       }
@@ -198,6 +194,10 @@ export async function executeExecPty(args: {
         isError,
         content,
       });
+    };
+
+    ptyProc.onExit(() => {
+      setImmediate(resolveOutput);
     });
   });
 }

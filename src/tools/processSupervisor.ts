@@ -89,7 +89,11 @@ class ProcessSupervisor {
   }
 
   get(handle: string): Session | undefined {
-    return this.sessions.get(handle);
+    const session = this.sessions.get(handle);
+    if (session) {
+      return session;
+    }
+    return undefined;
   }
 
   list(): { running: Session[]; finished: Session[] } {
