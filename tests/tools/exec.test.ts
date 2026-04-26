@@ -96,6 +96,30 @@ describe("exec tool", () => {
       expect(result.content).toContain("trash");
     });
 
+    it("rm file.txt → ok (no destructive flags)", async () => {
+      const result = await executeExec({ command: "rm /tmp/nonexistent_file_xyz" });
+      expect(result.isError).toBe(false);
+      expect(result.content).toContain("--- exit ---");
+    });
+
+    it("rm -rf / → isError, blocked", async () => {
+      const result = await executeExec({ command: "rm -rf /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
+    it("rm -r -f /tmp/test → isError, blocked (separate flags)", async () => {
+      const result = await executeExec({ command: "rm -r -f /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
+    it("rm --recursive --force /tmp/test → isError, blocked (long form)", async () => {
+      const result = await executeExec({ command: "rm --recursive --force /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
     it("11. dd if=/dev/zero of=/tmp/x → isError", async () => {
       const result = await executeExec({ command: "dd if=/dev/zero of=/tmp/x" });
       expect(result.isError).toBe(true);

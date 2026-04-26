@@ -91,7 +91,7 @@ const KILL_GRACE_MS = 5_000;
 
 export const EXEC_NO_FLY_PATTERNS: { pattern: RegExp; reason: string; hint?: string }[] = [
   {
-    pattern: /\brm\s+(-[a-zA-Z]*[rRfF][a-zA-Z]*\s|-[rRfF]\s+-[fFrR]\s)/,
+    pattern: /\brm\b(?=\s+(--recursive\s+--force|--force\s+--recursive|-rf\b|-fr\b|-Rf\b|-fR\b|-[a-zA-Z]*[rR][a-zA-Z]*\s+-[a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*\s+-[a-zA-Z]*[rR]))/,
     reason: "rm with -rf/-fr/-Rf is blocked",
     hint: "Use 'trash' (trash-cli) for safe file deletion.",
   },
