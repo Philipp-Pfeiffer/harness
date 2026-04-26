@@ -1,0 +1,5 @@
+Hello, this is a sample text file.
+Line 3 here.
+Line 4 there.
+Goodbye.
+Last line here.

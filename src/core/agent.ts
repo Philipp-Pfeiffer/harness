@@ -110,7 +110,8 @@ export function createAgent(config: AgentConfig): Agent {
               } else {
                 try {
                   result = await Promise.resolve(tool.execute(toolCall.arguments));
-                  logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${result}`);
+                  const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
+                  logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
                 } catch (err) {
                   result = err instanceof Error ? err.message : String(err);
                   isError = true;
