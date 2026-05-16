@@ -1,6 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { resolve } from "node:path";
-import { expandTilde } from "./path_util.js";
+import { resolveExpandedPath } from "./path_util.js";
 import { atomicWrite } from "./atomic_write.js";
 import { markRead } from "./file_state.js";
 import type { Tool } from "./types.js";
@@ -33,9 +32,11 @@ export const writeTool: Tool<typeof WriteArgs> = {
   name: "write",
   description: "Write content to a file. Supports atomic writes (tmp + rename). Blocks sensitive paths.",
   parameters: WriteArgs,
+  conflictKey(args) {
+    return resolveExpandedPath(args.path);
+  },
   async execute(args) {
-    const expanded = expandTilde(args.path);
-    const absolutePath = resolve(expanded);
+    const absolutePath = resolveExpandedPath(args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {

@@ -1,7 +1,6 @@
 import { Type } from "@sinclair/typebox";
-import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
-import { expandTilde } from "./path_util.js";
+import { resolveExpandedPath } from "./path_util.js";
 import { atomicWrite } from "./atomic_write.js";
 import { markRead, wasRead } from "./file_state.js";
 import { isSensitivePath } from "./write_file.js";
@@ -23,9 +22,11 @@ export const editTool: Tool<typeof EditArgs> = {
   name: "edit",
   description: "Edit a file by finding and replacing text. File must be read before editing. Supports replaceAll.",
   parameters: EditArgs,
+  conflictKey(args) {
+    return resolveExpandedPath(args.path);
+  },
   async execute(args) {
-    const expanded = expandTilde(args.path);
-    const absolutePath = resolve(expanded);
+    const absolutePath = resolveExpandedPath(args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {

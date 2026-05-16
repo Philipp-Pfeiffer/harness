@@ -153,53 +153,97 @@ export function createAgent(config: AgentConfig): Agent {
             (c): c is PiToolCall => c.type === "toolCall"
           );
 
-          for (const toolCall of toolCalls) {
-            // Check 2: Before each tool call
-            if (signal?.aborted) {
-              return { aborted: true, completedTurns: i, reason: "signal" };
-            }
+          // Build buckets: independent calls get their own bucket;
+          // calls sharing the same conflictKey are grouped into one bucket
+          // and executed sequentially in original order.
+          const buckets: { toolCall: PiToolCall; index: number }[][] = [];
+          const conflictMap = new Map<string, { toolCall: PiToolCall; index: number }[]>();
 
+          for (let idx = 0; idx < toolCalls.length; idx++) {
+            const toolCall = toolCalls[idx];
             const tool = tools.find((t) => t.name === toolCall.name);
-            let result: string;
-            let isError = false;
-
-            onEvent?.({
-              type: "tool_call_start",
-              name: toolCall.name,
-              args: toolCall.arguments,
-            });
-
-            if (!tool) {
-              result = `Tool "${toolCall.name}" nicht gefunden.`;
-              isError = true;
-              logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+            const key = tool?.conflictKey?.(toolCall.arguments as never);
+            if (key == null) {
+              buckets.push([{ toolCall, index: idx }]);
             } else {
-              if (!Value.Check(tool.parameters, toolCall.arguments)) {
-                result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
-                isError = true;
-                logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
+              const mapKey = `${toolCall.name}::${key}`;
+              const existing = conflictMap.get(mapKey);
+              if (existing) {
+                existing.push({ toolCall, index: idx });
               } else {
-                try {
-                  // Tool calls are atomic: once started they run to completion
-                  // even if the signal is aborted mid-flight.
-                  result = await Promise.resolve(tool.execute(toolCall.arguments));
-                  const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
-                  logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
-                } catch (err) {
-                  result = err instanceof Error ? err.message : String(err);
-                  isError = true;
-                  logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
-                }
+                const bucket: { toolCall: PiToolCall; index: number }[] = [{ toolCall, index: idx }];
+                conflictMap.set(mapKey, bucket);
+                buckets.push(bucket);
               }
             }
+          }
 
-            context.messages.push(createToolResultMessage(toolCall, result, isError));
+          const bucketPromises = buckets.map(async (bucket) => {
+            const results: { index: number; message: ToolResultMessage }[] = [];
+            for (const { toolCall, index } of bucket) {
+              // Check 2: Before each tool call
+              if (signal?.aborted) {
+                // Bucket ends cleanly; no further tool calls in this bucket.
+                // Parallel buckets are allowed to finish their current calls atomically.
+                break;
+              }
 
-            if (isError) {
-              onEvent?.({ type: "tool_call_error", name: toolCall.name, error: result });
-            } else {
-              onEvent?.({ type: "tool_call_done", name: toolCall.name, result });
+              const tool = tools.find((t) => t.name === toolCall.name);
+              let result: string;
+              let isError = false;
+
+              onEvent?.({
+                type: "tool_call_start",
+                name: toolCall.name,
+                args: toolCall.arguments,
+              });
+
+              if (!tool) {
+                result = `Tool "${toolCall.name}" nicht gefunden.`;
+                isError = true;
+                logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+              } else {
+                if (!Value.Check(tool.parameters, toolCall.arguments)) {
+                  result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
+                  isError = true;
+                  logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
+                } else {
+                  try {
+                    // Tool calls are atomic: once started they run to completion
+                    // even if the signal is aborted mid-flight.
+                    result = await Promise.resolve(tool.execute(toolCall.arguments));
+                    const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
+                    logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
+                  } catch (err) {
+                    result = err instanceof Error ? err.message : String(err);
+                    isError = true;
+                    logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                  }
+                }
+              }
+
+              results.push({ index, message: createToolResultMessage(toolCall, result, isError) });
+
+              if (isError) {
+                onEvent?.({ type: "tool_call_error", name: toolCall.name, error: result });
+              } else {
+                onEvent?.({ type: "tool_call_done", name: toolCall.name, result });
+              }
             }
+            return results;
+          });
+
+          const settled = await Promise.allSettled(bucketPromises);
+          const allResults: { index: number; message: ToolResultMessage }[] = [];
+          for (const s of settled) {
+            if (s.status === "fulfilled") {
+              allResults.push(...s.value);
+            }
+          }
+
+          allResults.sort((a, b) => a.index - b.index);
+          for (const { message } of allResults) {
+            context.messages.push(message);
           }
 
           onEvent?.({ type: "turn_end", turn: i + 1 });
