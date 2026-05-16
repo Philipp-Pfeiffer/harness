@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { createAgent } from "../src/core/agent.js";
+import { createMailbox } from "../src/core/mailbox.js";
 import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../src/tools/types.js";
 import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
@@ -529,6 +530,136 @@ describe("Agent", () => {
       expect(history[0].role).toBe("user");
       expect(history[1].role).toBe("assistant");
       expect(history[2].role).toBe("toolResult");
+    });
+  });
+
+  describe("Mailbox steering", () => {
+    it("drains steering messages after tool calls and before next LLM call", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStream(mockToolCall))
+        .mockImplementationOnce((_, context) => {
+          // Verify the steer system message was injected before this second LLM call
+          const sysMsg = context.messages.find((m: any) => m.role === "system");
+          expect(sysMsg).toBeDefined();
+          expect(sysMsg.content).toContain("steer1");
+          expect(sysMsg.content).toContain("steer2");
+          expect(sysMsg.content).toContain("⚠ Steer");
+          return mockStream(mockFinal);
+        });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute(args) {
+          return args.text;
+        },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const mailbox = createMailbox();
+      const history: Message[] = [makeUserMessage("Call echo")];
+
+      const runPromise = agent.run(history, {
+        mailbox,
+        onEvent: (event) => {
+          if (event.type === "tool_call_start") {
+            mailbox.push("steer1");
+            mailbox.push("steer2");
+          }
+        },
+      });
+
+      const result = await runPromise;
+
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done" });
+      expect(history.length).toBe(5); // user + assistant + toolResult + system + assistant
+      expect(history[3].role).toBe("system");
+    });
+
+    it("drains steering messages after stream ends, before tool calls", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStream(mockToolCall))
+        .mockImplementationOnce((_, context) => {
+          const sysMsg = context.messages.find((m: any) => m.role === "system");
+          expect(sysMsg).toBeDefined();
+          expect(sysMsg.content).toContain("mid-stream steer");
+          return mockStream(mockFinal);
+        });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute(args) {
+          return args.text;
+        },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const mailbox = createMailbox();
+      const history: Message[] = [makeUserMessage("Call echo")];
+
+      const runPromise = agent.run(history, { mailbox });
+
+      // Push steer while the LLM stream is "running" (simulated by immediate return)
+      mailbox.push("mid-stream steer");
+
+      const result = await runPromise;
+
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done" });
+      const sysMsg = history.find((m: any) => m.role === "system");
+      expect(sysMsg).toBeDefined();
+    });
+
+    it("clears mailbox on abort and does not inject steer into history", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() {
+          return "done";
+        },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const mailbox = createMailbox();
+      const history: Message[] = [makeUserMessage("Call echo")];
+
+      const runPromise = agent.run(history, {
+        signal: controller.signal,
+        mailbox,
+        onEvent: (event) => {
+          if (event.type === "tool_call_start") {
+            mailbox.push("steer that should be lost");
+            controller.abort();
+          }
+        },
+      });
+
+      const result = await runPromise;
+
+      expect(result.aborted).toBe(true);
+      expect(mailbox.isEmpty()).toBe(true);
+      expect(history.some((m: any) => m.role === "system")).toBe(false);
     });
   });
 });

@@ -11,6 +11,7 @@ import type {
   Message,
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
+import type { Mailbox } from "./mailbox.js";
 
 export interface ToolCallLog {
   name: string;
@@ -21,6 +22,8 @@ export interface ToolCallLog {
 
 export type Logger = (msg: string) => void;
 
+type SteerMessage = { role: "system"; content: string; timestamp: number };
+
 /**
  * Options passed to a single `run()` invocation.
  */
@@ -29,6 +32,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Optional callback for live stream and lifecycle events. */
   onEvent?: (event: AgentEvent) => void;
+  /** Optional mailbox for runtime steering messages. */
+  mailbox?: Mailbox;
 }
 
 /**
@@ -78,6 +83,29 @@ function createToolResultMessage(
   };
 }
 
+function formatSteerMessage(steers: string[]): string {
+  return (
+    `⚠ Steer während Tool-Call. Behandle als Korrektur/Ergänzung der ursprünglichen Aufgabe:\n` +
+    steers.map((s) => `"${s}"`).join("\n")
+  );
+}
+
+function drainMailbox(mailbox: Mailbox | undefined, messages: Message[]): void {
+  if (!mailbox) return;
+  const steers = mailbox.drainAll();
+  if (steers.length === 0) return;
+  const content = formatSteerMessage(steers);
+  (messages as Array<Message | SteerMessage>).push({
+    role: "system",
+    content,
+    timestamp: Date.now(),
+  });
+}
+
+function discardMailbox(mailbox: Mailbox | undefined): void {
+  mailbox?.drainAll();
+}
+
 export interface AgentConfig {
   tools: Tool[];
   systemPrompt?: string;
@@ -96,18 +124,22 @@ export function createAgent(config: AgentConfig): Agent {
 
   return {
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent } = options;
+      const { signal, onEvent, mailbox } = options;
+      const history = messages as Array<Message | SteerMessage>;
       const context: PiContext = {
         systemPrompt,
-        messages,
+        messages: history as Message[],
         tools: tools.map(toPiTool),
       };
 
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
+          discardMailbox(mailbox);
           return { aborted: true, completedTurns: i, reason: "signal" };
         }
+
+        drainMailbox(mailbox, history as Message[]);
 
         const eventStream = stream(resolvedModel, context, { signal });
         let response: import("@mariozechner/pi-ai").AssistantMessage;
@@ -126,6 +158,7 @@ export function createAgent(config: AgentConfig): Agent {
             signal?.aborted ||
             (err instanceof Error && err.name === "AbortError")
           ) {
+            discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal" };
           }
           throw err;
@@ -136,6 +169,10 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         context.messages.push(response);
+
+        // Drain steering messages after stream ends, before processing stopReason.
+        // This handles steers received during the LLM stream.
+        drainMailbox(mailbox, history as Message[]);
 
         if (response.stopReason === "stop" || response.stopReason === "length") {
           const textParts = response.content
@@ -157,6 +194,7 @@ export function createAgent(config: AgentConfig): Agent {
           // the assistant message so we don't leave dangling tool calls in history.
           if (signal?.aborted) {
             context.messages.pop();
+            discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal" };
           }
 
@@ -257,6 +295,7 @@ export function createAgent(config: AgentConfig): Agent {
 
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
+            discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal" };
           }
 
@@ -264,6 +303,7 @@ export function createAgent(config: AgentConfig): Agent {
         }
       }
 
+      discardMailbox(mailbox);
       return { aborted: true, completedTurns: maxIterations, reason: "maxTurns" };
     },
   };

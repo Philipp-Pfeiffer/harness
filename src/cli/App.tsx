@@ -5,10 +5,12 @@ import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
+import { createMailbox } from "../core/mailbox.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
+import type { Mailbox } from "../core/mailbox.js";
 
 /* ─── marked config ─── */
 
@@ -58,6 +60,7 @@ type ActiveTurn = {
   tools: ToolItem[];
   toolOffsets: number[];
   status: "streaming" | "thinking" | "tool" | "aborted" | "error" | "complete";
+  steers: string[];
 };
 
 /* ─── Helpers ─── */
@@ -214,6 +217,14 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
       {content.length > 0 ? content : null}
+      {turn.steers.length > 0 && (
+        <Box flexDirection="column" marginY={1}>
+          <Text italic color="gray">[steer]</Text>
+          {turn.steers.map((steer, idx) => (
+            <Text key={idx} italic color="gray">  {steer}</Text>
+          ))}
+        </Box>
+      )}
       {turn.status === "aborted" && (
         <Text italic color="gray">
           [abgebrochen]
@@ -513,6 +524,7 @@ export default function App() {
   const userAbortedRef = useRef(false);
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
+  const mailboxRef = useRef<Mailbox>(createMailbox());
 
   const tools = useMemo(() => loadTools(), []);
   const model = useMemo(() => getModel("minimax", "MiniMax-M2.7"), []);
@@ -568,10 +580,22 @@ export default function App() {
         return;
       }
 
+      if (isRunningRef.current) {
+        mailboxRef.current.push(trimmed);
+        if (activeTurnRef.current) {
+          activeTurnRef.current = {
+            ...activeTurnRef.current,
+            steers: [...activeTurnRef.current.steers, trimmed],
+          };
+          forceUpdate();
+        }
+        return;
+      }
+
       setInputHistory((prev) => [...prev, trimmed]);
       historyRef.current.push({ role: "user", content: trimmed, timestamp: Date.now() });
 
-      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking" };
+      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking", steers: [] };
       isRunningRef.current = true;
       forceUpdate();
 
@@ -582,6 +606,7 @@ export default function App() {
       agent
         .run(historyRef.current, {
           signal: controller.signal,
+          mailbox: mailboxRef.current,
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
