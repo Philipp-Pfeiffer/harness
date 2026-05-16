@@ -329,3 +329,34 @@ Diese Datei ist **massiv veraltet** und referenziert Code-Zustände, die nicht m
 4. **`docs/tools/write_edit_registry.md`:** Soll diese Datei überarbeitet oder gelöscht werden? Ihr Inhalt ist fast vollständig in den Einzeldokumentationen `write.md`, `edit.md`, `file_state.md` abgedeckt.
 
 5. **PDF `markRead`:** War das Fehlen von `markRead()` im PDF-Pfad ein Versehen (Omission) oder bewusst? `readFile_extension.md` dokumentiert es als vorhanden.
+
+
+---
+
+## Resolution (Fix-Run A, 2026-05-16)
+
+Dieser Abschnitt dokumentiert den Bearbeitungs-Status der Gap-Liste aus Fix-Run A.
+
+| Prio | Befund | Status | Anmerkung |
+|------|--------|--------|-----------|
+| 🔴 Critical | `readFile` PDF `markRead()` fehlte | ✅ Resolved | `markRead(resolvedPath)` im PDF-Erfolgspfad ergänzt; Test hinzugefügt. |
+| 🔴 Critical | RingBuffer-Größe 64 KB statt 200 KB | ✅ Resolved | `BG_OUTPUT_CAP = 200 * 1024` eingeführt; Background, PTY und Yield-Sessions nutzen 200 KB. Sync bleibt bei 64 KB. |
+| 🔴 Critical | `write_edit_registry.md` veraltet | ✅ Resolved | Datei gelöscht; Inhalt durch `index.md` → "Tool-Registry" ersetzt. |
+| 🟡 Important | Context/Session unbounded growth | ⏳ Doc only | Kein Code-Change in Fix-Run A; Doku reflektiert aktuellen Zustand (kein Pruning). |
+| 🟡 Important | Orphaned `context.ts` + `session.ts` | ✅ Resolved | Beide Dateien + Tests gelöscht. Keine verwaisten Imports. |
+| 🟡 Important | `readFile.md` MVP-Notiz (writeFile/editFile) | ✅ Resolved | Veraltete Zeile entfernt. |
+| 🟡 Important | `write.md`/`edit.md` Path-Resolution-Wording | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
+| 🟡 Important | `exec.md` PTY-Timeout-Format | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
+| 🟡 Important | Beispiel-ADR-Datei fehlt | ❌ Out of scope | ADR-Repo-Spiegel separat geplant (OQ-3). |
+| 🟢 Nice | `yieldMs = 0` Edge-Case | ✅ Resolved | Schema-Minimum auf 1 angehoben; Sync-Fallback entfällt. Test angepasst. |
+| 🟢 Nice | `resolvePromise` Dead Code | ✅ Resolved | Feld aus `Session`-Typ und `register()` entfernt. |
+| 🟢 Nice | Keine Beispiele in `write.md`/`edit.md` | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
+| 🟢 Nice | Streaming (`stream()` statt `complete()`) | ❌ Out of scope | Keine Phase-1-Planung. |
+| 🟢 Nice | Abort / Cancellation-Token | ❌ Out of scope | Keine Phase-1-Planung. |
+
+### Zusammenfassung Fix-Run A
+
+- **Code-Dateien geändert:** 8 (`exec.ts`, `execBackground.ts`, `execPty.ts`, `processSupervisor.ts`, `readFile.ts`, `edit_file.ts`, `limits.ts` neu, `registry.ts` / `index.ts` bereinigt)
+- **Code-Dateien gelöscht:** 4 (`context.ts`, `session.ts`, `echo.ts`, `tests/context.test.ts`)
+- **Tests geändert/ergänzt:** 6 (`readFile.test.ts`, `edit_file.test.ts`, `execPty.test.ts`, `process.test.ts`, `exec.test.ts`, `agent.test.ts`)
+- **Alle 118 Tests grün**, `typecheck` grün, `build` grün.

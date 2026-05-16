@@ -66,6 +66,7 @@ Finaler Inhalt wird via `atomic_write.ts` zurückgeschrieben.
 | `NOT_UNIQUE` | matchCount ≠ 1 (ohne replaceAll) | `NOT_UNIQUE: edit <index> found <count> matches (expected exactly 1)` |
 | `WRITE_FAILED` | tmp-Write oder rename fehlgeschlagen | `WRITE_FAILED: <Original-Fehler>` |
 | `READ_FAILED` | Datei konnte nicht gelesen werden | `READ_FAILED: <Original-Fehler>` |
+| `BINARY_FILE` | PDF (oder andere Binary-Datei) erkannt | `BINARY_FILE: Cannot edit binary file: PDF detected. …` |
 
 ## Output
 

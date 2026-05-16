@@ -20,14 +20,14 @@ Das `exec`-Tool ist das primäre CLI-Ausführungs-Tool. Es kann beliebige Shell-
 | `pty` | `boolean` | Nein | `false` | PTY-Modus für interaktive CLIs (vim, htop, etc.). |
 | `elevated` | `boolean` | Nein | `false` | Prefix mit `sudo -n`. Passwordless sudo nötig. |
 | `background` | `boolean` | Nein | `false` | Sofortiger Background-Start. Gibt Handle zurück. |
-| `yieldMs` | `integer` | Nein | `10000` | Wartezeit bis Auto-Yield. Prozess läuft weiter im Hintergrund. |
+| `yieldMs` | `integer` | Nein | `10000` | Wartezeit bis Auto-Yield (min 1 ms). Prozess läuft weiter im Hintergrund. |
 
 ## Execution-Branches
 
 ```
 executeExec(args)
   ├─ args.background === true  → executeExecBackground()
-  ├─ args.yieldMs > 0           → yield-Übergang (nach yieldMs → Background)
+  ├─ args.yieldMs !== undefined → yield-Übergang (nach yieldMs → Background)
   ├─ args.pty === true          → executeExecPty()
   └─ else                      → executeExecSync()
 ```

@@ -67,7 +67,6 @@ Erkennung via Magic-Bytes (`%PDF-`). Text-Extraktion via `pdfjs-dist/legacy`.
 ## Nicht enthalten (MVP)
 
 - Path-Scoping / Workspace-Root Isolation
-- `writeFile` / `editFile`
 - Logger-Integration
 - Binary-Decode (nur Error bei Null-Byte)
 - Weitere Formate (Word, HTML, etc.)

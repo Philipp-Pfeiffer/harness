@@ -33,11 +33,9 @@ npm start
 ```
 src/
 ├── index.ts          # Entry point
-├── core/             # Agent Loop, Context, Session
-│   ├── agent.ts
-│   ├── context.ts
-│   └── session.ts
-├── tools/            # Custom Tools (Read/Write/Edit/Bash + your own)
+├── core/             # Agent Loop
+│   └── agent.ts
+├── tools/            # Custom Tools (Read/Write/Edit/Exec + your own)
 │   ├── types.ts
 │   └── registry.ts
 ├── extensions/       # Notion, Baileys, Memory, etc.

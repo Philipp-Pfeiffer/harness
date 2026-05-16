@@ -38,14 +38,14 @@ execTool.execute(args)
            │
            ├─ background: true  → executeExecBackground()
            │                         └─ spawn(detached: true)
-           │                         └─ RingBuffer(64KB)
+           │                         └─ RingBuffer(200KB)
            │                         └─ processSupervisor.register()
            │
            ├─ yieldMs > 0  ─┬─ pty: true  → executeExecPty({yieldMs})
            │                 └─ else       → executeExecSyncWithYield()
            │                         └─ spawn(detached: true)
            │                         └─ Timer(yieldMs)
-           │                         └─ RingBuffer(64KB) auf session
+           │                         └─ RingBuffer(200KB) auf session
            │                         └─ processSupervisor.register()
            │
            ├─ pty: true  → executeExecPty()
@@ -133,7 +133,6 @@ type Session = {
   child: spawn | IPty;
   stdoutRing: RingBuffer;
   stderrRing: RingBuffer;
-  resolvePromise?: (value: ExecToolResult) => void;
 }
 ```
 
@@ -316,7 +315,7 @@ executeExecBackground({command, cwd?, env?, elevated?})
 | Sync stdout (einzeln) | 64 KB (kombiniert) |
 | Sync stderr (einzeln) | 64 KB (kombiniert) |
 | RingBuffer (pro Stream) | 200 KB |
-| PTY output (kombiniert) | 64 KB |
+| PTY output (kombiniert) | 200 KB |
 
 ### Truncation-Marker
 
@@ -401,7 +400,7 @@ if (!Value.Check(ExecArgs, args)) {
 |-------|-------|-----------|
 | `exec.test.ts` | 37 | Sync, env, stdin, timeout, yield, elevated, background, no-fly |
 | `execPty.test.ts` | 6 | PTY detection, output cap, timeout, kill |
-| `process.test.ts` | 11 | Lifecycle (poll, kill, stdout capture) |
+| `process.test.ts` | 12 | Lifecycle (poll, kill, stdout capture, >100 KB buffer) |
 | `ringBuffer.test.ts` | 11 | RingBuffer append, overflow, read with offset |
 
 ### Test-Fixtures

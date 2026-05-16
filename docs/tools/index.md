@@ -72,6 +72,23 @@ Blockierte Commands (können nicht ausgeführt werden):
 
 **Erlaubt:** `rm /tmp/foo`, `rm file.txt`, `rm -i file.txt`
 
+## Tool-Registry
+
+```typescript
+// src/tools/registry.ts
+export function loadTools(): Tool[] {
+  return [readFileTool, execTool, processTool, writeTool, editTool];
+}
+```
+
+| Tool | Datei | Zweck (1 Satz) |
+|------|-------|----------------|
+| `readFile` | `src/tools/readFile.ts` | Liest UTF-8-Text und PDF; markiert Datei intern als gelesen. |
+| `exec` | `src/tools/exec.ts` | Führt Shell-Commands aus (sync, PTY, elevated, background, yieldMs). |
+| `process` | `src/tools/process.ts` | Verwaltet Background-Prozesse (list, poll, kill, log, wait). |
+| `write` | `src/tools/write_file.ts` | Atomares Schreiben; blockt sensitive Pfade. |
+| `edit` | `src/tools/edit_file.ts` | Sequentielles Find-and-Replace; erfordert vorheriges Read. |
+
 ## Output-Formate
 
 ### exec (Sync)
