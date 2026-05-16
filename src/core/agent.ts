@@ -1,4 +1,4 @@
-import { complete, getModel } from "@mariozechner/pi-ai";
+import { stream, getModel } from "@mariozechner/pi-ai";
 import { Value } from "typebox/value";
 import type {
   Context as PiContext,
@@ -20,6 +20,40 @@ export interface ToolCallLog {
 }
 
 export type Logger = (msg: string) => void;
+
+/**
+ * Options passed to a single `run()` invocation.
+ */
+export interface RunOptions {
+  /** Optional AbortSignal for cooperative cancellation. */
+  signal?: AbortSignal;
+  /** Optional callback for live stream and lifecycle events. */
+  onEvent?: (event: AgentEvent) => void;
+}
+
+/**
+ * Result shape for `run()`.
+ *
+ * Design rationale: A union type is cleaner than throwing for expected
+ * cancellation outcomes (max turns, user abort). Callers can switch on
+ * `aborted` without a try/catch. Provider-level errors still throw.
+ */
+export type RunResult =
+  | { aborted: false; turns: number; finalMessage: string }
+  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns" };
+
+/**
+ * Events emitted during a streaming run.
+ *
+ * Mirrors pi-ai's `text_delta` as `token` and adds agent-level lifecycle
+ * events for tool calls and turn boundaries.
+ */
+export type AgentEvent =
+  | { type: "token"; text: string }
+  | { type: "tool_call_start"; name: string; args: unknown }
+  | { type: "tool_call_done"; name: string; result: string }
+  | { type: "tool_call_error"; name: string; error: string }
+  | { type: "turn_end"; turn: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -61,7 +95,7 @@ export interface AgentConfig {
 }
 
 export interface Agent {
-  run(input: string): Promise<string>;
+  run(input: string, options?: RunOptions): Promise<RunResult>;
 }
 
 export function createAgent(config: AgentConfig): Agent {
@@ -69,7 +103,8 @@ export function createAgent(config: AgentConfig): Agent {
   const resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
 
   return {
-    async run(input: string): Promise<string> {
+    async run(input: string, options: RunOptions = {}): Promise<RunResult> {
+      const { signal, onEvent } = options;
       const context: PiContext = {
         systemPrompt,
         messages: [createUserMessage(input)],
@@ -77,7 +112,32 @@ export function createAgent(config: AgentConfig): Agent {
       };
 
       for (let i = 0; i < maxIterations; i++) {
-        const response = await complete(resolvedModel, context);
+        // Check 1: Before LLM call (Turn-Start)
+        if (signal?.aborted) {
+          return { aborted: true, completedTurns: i, reason: "signal" };
+        }
+
+        const eventStream = stream(resolvedModel, context, { signal });
+        let response: import("@mariozechner/pi-ai").AssistantMessage;
+
+        try {
+          for await (const event of eventStream) {
+            if (event.type === "text_delta") {
+              onEvent?.({ type: "token", text: event.delta });
+            }
+          }
+          response = await eventStream.result();
+        } catch (err) {
+          // If the signal triggered the cancellation, return gracefully.
+          // pi-ai may throw an AbortError or the signal may simply be set.
+          if (
+            signal?.aborted ||
+            (err instanceof Error && err.name === "AbortError")
+          ) {
+            return { aborted: true, completedTurns: i, reason: "signal" };
+          }
+          throw err;
+        }
 
         context.messages.push(response);
 
@@ -85,7 +145,7 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
-          return textParts.join("");
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join("") };
         }
 
         if (response.stopReason === "toolUse") {
@@ -94,9 +154,20 @@ export function createAgent(config: AgentConfig): Agent {
           );
 
           for (const toolCall of toolCalls) {
+            // Check 2: Before each tool call
+            if (signal?.aborted) {
+              return { aborted: true, completedTurns: i, reason: "signal" };
+            }
+
             const tool = tools.find((t) => t.name === toolCall.name);
             let result: string;
             let isError = false;
+
+            onEvent?.({
+              type: "tool_call_start",
+              name: toolCall.name,
+              args: toolCall.arguments,
+            });
 
             if (!tool) {
               result = `Tool "${toolCall.name}" nicht gefunden.`;
@@ -109,6 +180,8 @@ export function createAgent(config: AgentConfig): Agent {
                 logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
               } else {
                 try {
+                  // Tool calls are atomic: once started they run to completion
+                  // even if the signal is aborted mid-flight.
                   result = await Promise.resolve(tool.execute(toolCall.arguments));
                   const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                   logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
@@ -121,6 +194,19 @@ export function createAgent(config: AgentConfig): Agent {
             }
 
             context.messages.push(createToolResultMessage(toolCall, result, isError));
+
+            if (isError) {
+              onEvent?.({ type: "tool_call_error", name: toolCall.name, error: result });
+            } else {
+              onEvent?.({ type: "tool_call_done", name: toolCall.name, result });
+            }
+          }
+
+          onEvent?.({ type: "turn_end", turn: i + 1 });
+
+          // Check 3: Between iterations (after tool results, before next turn)
+          if (signal?.aborted) {
+            return { aborted: true, completedTurns: i, reason: "signal" };
           }
 
           continue;
@@ -131,11 +217,11 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         if (response.stopReason === "aborted") {
-          return "Anfrage wurde abgebrochen.";
+          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen." };
         }
       }
 
-      return "Maximale Anzahl an Iterationen erreicht.";
+      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns" };
     },
   };
 }
