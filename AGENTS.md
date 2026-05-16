@@ -120,22 +120,21 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ### MVP-Scope (was NICHT drin ist)
 - Kein Path-Scoping / Workspace-Root Isolation (Spec: "keine Path-Restrictions")
-- Kein `writeFile` / `editFile`
 - Kein Logger
 - Kein Binary-Decode (nur Error bei Null-Byte)
 - Keine weiteren Formate (kein Word, kein HTML, etc.)
 
-## Tool: bash (MVP)
+## Tool: exec (MVP)
 
-**File:** `src/tools/bash.ts`
+**File:** `src/tools/exec.ts`
 
 ### Spec (Kurzfassung)
-- Führt Bash-Commands aus via `child_process.spawn` mit `shell: true`.
-- Argument-Schema: `{ command: string (minLength: 1), cwd?: string }`.
+- Führt CLI-Commands aus via `child_process.spawn` mit `shell: true`.
+- Parameter: `command` (req), `cwd?`, `env?`, `stdin?`, `timeout?`, `pty?`, `elevated?`, `background?`, `yieldMs?`.
 - CWD: expandiert `~`, resolved gegen CWD, Validierung dass es ein Directory ist.
 - Output: stdout und stderr separat gesammelt, 64KB cap via Buffer.
 - Timeout: 30s default, SIGTERM → 5s → SIGKILL (Process-Group).
-- No-Fly-List für destruktive Commands (rm -rf, dd, mkfs, Fork-Bombs, etc.).
+- No-Fly-List für destruktive Commands.
 
 ### Output-Format
 ```
@@ -167,8 +166,25 @@ code: {exitCode}, signal: {signal}
 - Spawn-Failure → `Failed to spawn: ...`
 - Timeout → `Command timed out after 30s and was terminated.`
 
+### Extended Features (Phase 2)
+- **pty**: PTY-Modus für interaktive CLIs (vim, htop, etc.) — stdout+stderr merged, ANSI preserved
+- **elevated**: Prefix `sudo -n`, passwordless sudo nötig
+- **background**: Sofortiger detached Start, gibt Handle `bg_[hex]` zurück
+- **yieldMs**: Auto-Yield nach N ms (default 10000), Prozess läuft im Hintergrund weiter
+- **process-Tool**: Management für Background-Prozesse (list, poll, kill, log, wait)
+
 ### MVP-Scope (was NICHT drin ist)
 - Kein Path-Scoping / Workspace-Root Isolation
 - Kein Security-Layer (No-Fly ist best-effort, kein Anti-Bypass)
 - Kein Logger
 - Keine Shell-Builtin-Commands außer Standard-Pipes/-Redirects
+
+## Tools (Detailierte Docs)
+
+Detaillierte Dokumentation für alle Tools liegt im `docs/tools/` Ordner:
+- `exec.md` — Vollständige exec-Dokumentation
+- `readFile.md` — Vollständige readFile-Dokumentation  
+- `write.md` — write-Tool (atomares Write, Sensitive-Path-Block)
+- `edit.md` — edit-Tool (Find-and-Replace, READ_REQUIRED)
+- `process.md` — process-Tool (Background-Lifecycle)
+- `file_state.md` — read-tracking für edit-Validation

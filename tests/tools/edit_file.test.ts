@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 
 const fixturesDir = resolve(process.cwd(), "tests/fixtures");
 const testDir = resolve(fixturesDir, "edit_test");
+const samplePdf = resolve(fixturesDir, "sample.pdf");
 
 async function cleanup(path: string) {
   try {
@@ -119,6 +120,13 @@ describe("edit tool", () => {
       markRead(resolve(path));
       await editTool.execute({ path, edits: [{ oldText: "hello", newText: "bye" }] });
       expect(wasRead(resolve(path))).toBe(true);
+    });
+
+    it("11. blocks editing a PDF with BINARY_FILE error", async () => {
+      markRead(resolve(samplePdf));
+      const result = await editTool.execute({ path: samplePdf, edits: [{ oldText: "Hello", newText: "World" }] });
+      expect(result).toContain("BINARY_FILE");
+      expect(result).toContain("PDF detected");
     });
   });
 });

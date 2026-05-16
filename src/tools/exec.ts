@@ -9,6 +9,7 @@ import { executeExecPty } from "./execPty.js";
 import { executeExecBackground } from "./execBackground.js";
 import { processSupervisor } from "./processSupervisor.js";
 import { RingBuffer, generateHandle } from "./ringBuffer.js";
+import { SYNC_OUTPUT_CAP, BG_OUTPUT_CAP } from "./limits.js";
 import type { Session } from "./processSupervisor.js";
 
 export const ExecArgs = Type.Object({
@@ -64,7 +65,7 @@ export const ExecArgs = Type.Object({
   ),
   yieldMs: Type.Optional(
     Type.Integer({
-      minimum: 0,
+      minimum: 1,
       maximum: 600_000,
       default: 10_000,
       description:
@@ -85,7 +86,6 @@ type ExecArgsType = {
   yieldMs?: number;
 };
 
-const MAX_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 5_000;
 
@@ -229,8 +229,8 @@ export async function executeExecSync(args: {
   child.stdout?.on("data", (chunk: Buffer) => {
     if (truncated) return;
     const chunkSize = chunk.length;
-    if (stdoutSize + stderrSize + chunkSize > MAX_OUTPUT_BYTES) {
-      const remaining = MAX_OUTPUT_BYTES - (stdoutSize + stderrSize);
+    if (stdoutSize + stderrSize + chunkSize > SYNC_OUTPUT_CAP) {
+      const remaining = SYNC_OUTPUT_CAP - (stdoutSize + stderrSize);
       if (remaining > 0) {
         stdoutChunks.push(chunk.subarray(0, remaining));
         stdoutSize += remaining;
@@ -245,8 +245,8 @@ export async function executeExecSync(args: {
   child.stderr?.on("data", (chunk: Buffer) => {
     if (truncated) return;
     const chunkSize = chunk.length;
-    if (stdoutSize + stderrSize + chunkSize > MAX_OUTPUT_BYTES) {
-      const remaining = MAX_OUTPUT_BYTES - (stdoutSize + stderrSize);
+    if (stdoutSize + stderrSize + chunkSize > SYNC_OUTPUT_CAP) {
+      const remaining = SYNC_OUTPUT_CAP - (stdoutSize + stderrSize);
       if (remaining > 0) {
         stderrChunks.push(chunk.subarray(0, remaining));
         stderrSize += remaining;
@@ -332,8 +332,8 @@ function createSession(
   isElevated: boolean,
   child: ReturnType<typeof spawn>
 ): Session {
-  const stdoutRing = new RingBuffer(MAX_OUTPUT_BYTES);
-  const stderrRing = new RingBuffer(MAX_OUTPUT_BYTES);
+  const stdoutRing = new RingBuffer(BG_OUTPUT_CAP);
+  const stderrRing = new RingBuffer(BG_OUTPUT_CAP);
   return {
     handle,
     pid,
@@ -551,7 +551,7 @@ export async function executeExec(args: ExecArgsType): Promise<ExecToolResult> {
     return executeExecBackground(args);
   }
 
-  if (args.yieldMs !== undefined && args.yieldMs > 0) {
+  if (args.yieldMs !== undefined) {
     if (args.pty) {
       return executeExecPty({ ...args, yieldMs: args.yieldMs });
     }

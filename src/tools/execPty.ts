@@ -5,9 +5,10 @@ import { cwd } from "node:process";
 import { EXEC_NO_FLY_PATTERNS, type ExecToolResult } from "./exec.js";
 import { processSupervisor } from "./processSupervisor.js";
 import { RingBuffer, generateHandle } from "./ringBuffer.js";
+import { BG_OUTPUT_CAP } from "./limits.js";
 import type { Session } from "./processSupervisor.js";
 
-const MAX_OUTPUT_BYTES = 64 * 1024;
+
 const KILL_GRACE_MS = 5_000;
 
 function expandTilde(pathStr: string): string {
@@ -94,8 +95,8 @@ export async function executeExecPty(args: {
       return;
     }
     const chunk = Buffer.from(data, "utf-8");
-    if (totalSize + chunk.length > MAX_OUTPUT_BYTES) {
-      const remaining = MAX_OUTPUT_BYTES - totalSize;
+    if (totalSize + chunk.length > BG_OUTPUT_CAP) {
+      const remaining = BG_OUTPUT_CAP - totalSize;
       if (remaining > 0) {
         chunks.push(chunk.subarray(0, remaining));
         totalSize += remaining;
@@ -155,8 +156,8 @@ export async function executeExecPty(args: {
         isPty: true,
         isElevated: args.elevated ?? false,
         child: ptyProc,
-        stdoutRing: new RingBuffer(MAX_OUTPUT_BYTES),
-        stderrRing: new RingBuffer(MAX_OUTPUT_BYTES),
+        stdoutRing: new RingBuffer(BG_OUTPUT_CAP),
+        stderrRing: new RingBuffer(BG_OUTPUT_CAP),
       };
 
       for (const chunk of chunks) {

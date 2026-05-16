@@ -40,13 +40,25 @@ export const editTool: Tool<typeof EditArgs> = {
       return `EMPTY_EDITS: at least one edit is required`;
     }
 
-    let content: string;
+    let buffer: Buffer;
     try {
-      content = await readFile(absolutePath, "utf-8");
+      buffer = await readFile(absolutePath);
     } catch (err) {
       return `READ_FAILED: ${err instanceof Error ? err.message : String(err)}`;
     }
 
+    if (
+      buffer.length >= 5 &&
+      buffer[0] === 0x25 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x44 &&
+      buffer[3] === 0x46 &&
+      buffer[4] === 0x2d
+    ) {
+      return "BINARY_FILE: Cannot edit binary file: PDF detected. The edit tool only supports plain-text files. Use a PDF library (e.g. pdf-lib) for PDF modifications.";
+    }
+
+    const content = buffer.toString("utf-8");
     let working = content;
 
     for (let i = 0; i < args.edits.length; i++) {

@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import type { IPty } from "node-pty";
 import { RingBuffer } from "./ringBuffer.js";
-import type { ExecToolResult } from "./exec.js";
 
 const KILL_GRACE_MS = 5_000;
 const GC_INTERVAL_MS = 5 * 60_000;
@@ -21,7 +20,6 @@ export type Session = {
   child: ReturnType<typeof spawn> | IPty;
   stdoutRing: RingBuffer;
   stderrRing: RingBuffer;
-  resolvePromise?: (value: ExecToolResult) => void;
 };
 
 class ProcessSupervisor {
@@ -47,20 +45,6 @@ class ProcessSupervisor {
         s.exitedAt = new Date();
         s.exitCode = code ?? undefined;
         s.exitSignal = signal ?? undefined;
-      }
-
-      if (session.resolvePromise) {
-        const stdout = session.stdoutRing.getTotalBytes() > 0
-          ? this.readTail(session.stdoutRing, 64 * 1024)
-          : "";
-        const stderr = session.isPty ? "" : (session.stderrRing.getTotalBytes() > 0
-          ? this.readTail(session.stderrRing, 64 * 1024)
-          : "");
-        session.resolvePromise({
-          isError: (code ?? 1) !== 0,
-          content: `--- stdout ---\n${stdout || "(empty)"}\n--- stderr ---\n${stderr || "(empty)"}\n--- exit ---\ncode: ${code ?? "null"}, signal: ${signal ?? "null"}`,
-        });
-        session.resolvePromise = undefined;
       }
 
       setTimeout(() => {

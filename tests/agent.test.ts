@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { Type } from "@sinclair/typebox";
 import { createAgent } from "../src/core/agent.js";
 import { complete, getModel } from "@mariozechner/pi-ai";
+import type { Tool } from "../src/tools/types.js";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
@@ -9,6 +11,8 @@ vi.mock("@mariozechner/pi-ai", async () => {
     complete: vi.fn(),
   };
 });
+
+const echoArgs = Type.Object({ text: Type.String() });
 
 const model = getModel("minimax", "MiniMax-M2.7");
 
@@ -57,7 +61,12 @@ describe("Agent", () => {
       .mockResolvedValueOnce(mockToolCall)
       .mockResolvedValueOnce(mockFinal);
 
-    const { echoTool } = await import("../src/tools/echo.js");
+    const echoTool: Tool<typeof echoArgs> = {
+      name: "echo",
+      description: "Echo for tests",
+      parameters: echoArgs,
+      execute(args) { return args.text; },
+    };
     const agent = createAgent({ tools: [echoTool], model });
 
     const result = await agent.run("Bitte rufe echo auf");
@@ -114,7 +123,12 @@ describe("Agent", () => {
       .mockResolvedValueOnce(mockToolCall)
       .mockResolvedValueOnce(mockFinal);
 
-    const { echoTool } = await import("../src/tools/echo.js");
+    const echoTool: Tool<typeof echoArgs> = {
+      name: "echo",
+      description: "Echo for tests",
+      parameters: echoArgs,
+      execute(args) { return args.text; },
+    };
     const agent = createAgent({ tools: [echoTool], model });
 
     const result = await agent.run("Call echo with bad args");
@@ -131,7 +145,12 @@ describe("Agent", () => {
 
     vi.mocked(complete).mockResolvedValue(mockToolCall);
 
-    const { echoTool } = await import("../src/tools/echo.js");
+    const echoTool: Tool<typeof echoArgs> = {
+      name: "echo",
+      description: "Echo for tests",
+      parameters: echoArgs,
+      execute(args) { return args.text; },
+    };
     const agent = createAgent({ tools: [echoTool], model, maxIterations: 2 });
 
     const result = await agent.run("Keep calling tool");

@@ -5,8 +5,9 @@ import { cwd } from "node:process";
 import { EXEC_NO_FLY_PATTERNS, type ExecToolResult } from "./exec.js";
 import { processSupervisor, type Session } from "./processSupervisor.js";
 import { RingBuffer, generateHandle } from "./ringBuffer.js";
+import { BG_OUTPUT_CAP } from "./limits.js";
 
-const MAX_OUTPUT_BYTES = 64 * 1024;
+
 
 function expandTilde(pathStr: string): string {
   if (pathStr.startsWith("~/") || pathStr === "~") {
@@ -80,8 +81,8 @@ export async function executeExecBackground(args: {
   }
 
   const handle = generateHandle();
-  const stdoutRing = new RingBuffer(MAX_OUTPUT_BYTES);
-  const stderrRing = new RingBuffer(MAX_OUTPUT_BYTES);
+  const stdoutRing = new RingBuffer(BG_OUTPUT_CAP);
+  const stderrRing = new RingBuffer(BG_OUTPUT_CAP);
 
   child.stdout?.on("data", (chunk: Buffer) => {
     stdoutRing.append(chunk);

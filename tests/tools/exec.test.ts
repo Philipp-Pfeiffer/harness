@@ -276,10 +276,11 @@ describe("exec tool", () => {
       expect(result.content).toContain("handle: bg_");
     });
 
-    it("yieldMs: 0 means no yield → long process times out", async () => {
+    it("yieldMs: 0 is rejected by schema validation", async () => {
       const result = await executeExec({ command: "sleep 60", yieldMs: 0, timeout: 2000 });
       expect(result.isError).toBe(true);
-      expect(result.content).toContain("timed out");
+      expect(result.content).toContain("Invalid arguments");
+      expect(result.content).toContain("yieldMs");
     });
   });
 });

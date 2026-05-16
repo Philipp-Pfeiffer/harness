@@ -7,6 +7,8 @@
 | [exec](exec.md) | Phase 1+2 | `src/tools/exec.ts` | CLI-Ausführung mit PTY, elevated, yieldMs, background |
 | [process](process.md) | Phase 2 | `src/tools/process.ts` | Lifecycle-Management für Background-Prozesse |
 | [readFile](readFile.md) | MVP | `src/tools/readFile.ts` | UTF-8 und PDF-Lesen |
+| [write](write.md) | MVP | `src/tools/write_file.ts` | Atomares Write, Sensitive-Path-Block |
+| [edit](edit.md) | MVP | `src/tools/edit_file.ts` | Find-and-Replace, READ_REQUIRED |
 
 ## Quick-Reference
 

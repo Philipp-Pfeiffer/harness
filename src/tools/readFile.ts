@@ -110,6 +110,7 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
         const sizeError = checkSize(text);
         if (sizeError) return sizeError;
 
+        markRead(resolvedPath);
         return `--- PDF, ${doc.numPages} pages ---\n${text}`;
       } catch (err) {
         return `Failed to parse PDF: ${err instanceof Error ? err.message : String(err)}`;

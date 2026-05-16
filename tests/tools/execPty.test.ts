@@ -24,8 +24,8 @@ describe("execPty", () => {
     expect(result.content).toContain("timed out");
   });
 
-  it("output cap > 64 KB → truncated", async () => {
-    const result = await executeExecPty({ command: "head -c 100000 /dev/urandom | base64" });
+  it("output cap > 200 KB → truncated", async () => {
+    const result = await executeExecPty({ command: "head -c 300000 /dev/urandom | base64" });
     expect(result.content).toContain("[...truncated");
   });
 

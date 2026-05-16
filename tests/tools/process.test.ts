@@ -111,5 +111,21 @@ describe("process tool", () => {
       const pollResult = await executeProcess({ action: "poll", sessionId: handle });
       expect(pollResult.content).toContain("hello world");
     });
+
+    it("background process buffers >100 KB output (200 KB cap)", async () => {
+      const execResult = await executeExec({ command: "head -c 80000 /dev/urandom | base64", background: true });
+      expect(execResult.content).toContain("handle: bg_");
+
+      const handleMatch = execResult.content.match(/handle: (bg_[a-f0-9]+)/);
+      const handle = handleMatch![1];
+
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      const logResult = await executeProcess({ action: "log", sessionId: handle, offset: 0, limit: 64000 });
+      expect(logResult.isError).toBe(false);
+      const totalBytesMatch = logResult.content.match(/total_bytes: (\d+)/);
+      expect(totalBytesMatch).not.toBeNull();
+      expect(Number(totalBytesMatch![1])).toBeGreaterThan(64 * 1024);
+    });
   });
 });

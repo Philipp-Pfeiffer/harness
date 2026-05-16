@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileTool } from "../../src/tools/readFile.ts";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { wasRead } from "../../src/tools/file_state.ts";
 
 const fixtures = resolve(process.cwd(), "tests/fixtures");
 const sampleTxt = resolve(fixtures, "sample.txt");
@@ -87,6 +88,11 @@ describe("readFile tool", () => {
     it("applies line range to PDF text", async () => {
       const result = await readFileTool.execute({ path: samplePdf, lineStart: 1, lineEnd: 1 });
       expect(result).toContain("--- PDF, 1 pages ---");
+    });
+
+    it("marks PDF as read so edit does not fail on READ_REQUIRED", async () => {
+      await readFileTool.execute({ path: samplePdf });
+      expect(wasRead(samplePdf)).toBe(true);
     });
   });
 
