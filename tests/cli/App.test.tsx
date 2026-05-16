@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
 import App from "../../src/cli/App.js";
+import { createAgent } from "../../src/core/agent.js";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -11,7 +12,7 @@ vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
   return {
     ...actual,
-    getModel: vi.fn(() => ({ id: "test-model", contextWindow: 100000 })),
+    getModel: vi.fn((provider: string, modelId: string) => ({ id: `${provider}-${modelId}`, contextWindow: 100000 })),
   };
 });
 
@@ -20,6 +21,7 @@ const mockRun = vi.fn();
 vi.mock("../../src/core/agent.js", () => ({
   createAgent: vi.fn(() => ({
     run: mockRun,
+    setModel: vi.fn(),
   })),
 }));
 
@@ -41,7 +43,7 @@ describe("CLI App", () => {
     const { lastFrame } = render(<App />);
     const frame = lastFrame();
     expect(frame).toContain("harness");
-    expect(frame).toContain("test-model");
+    expect(frame).toContain("minimax-MiniMax-M2.7");
     expect(frame).toContain("ready");
     expect(frame).toContain("❯");
   });
@@ -546,6 +548,77 @@ describe("CLI App", () => {
 
       const frame = lastFrame();
       expect(frame).toContain("97.0k / 100.0k");
+    });
+  });
+
+  describe("/model command", () => {
+    it("opens model picker and shows fallback models", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Picker consumes first Enter to complete command, press again to submit
+      stdin.write("\r");
+      await delay(100);
+
+      const frame = lastFrame();
+      expect(frame).toContain("Select model:");
+      expect(frame).toContain("MiniMax M2.7");
+    });
+
+    it("switches model and updates header", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /model command
+      stdin.write("\r");
+      await delay(100);
+
+      // Press Enter to select first model
+      stdin.write("\r");
+      await delay(100);
+
+      const frame = lastFrame();
+      // getModel mock returns `${provider}-${modelId}`
+      expect(frame).toContain("minimax-MiniMax-M2.7");
+    });
+
+    it("calls setModel on agent when switching", async () => {
+      const setModelSpy = vi.fn();
+      vi.mocked(createAgent).mockReturnValueOnce({
+        run: mockRun,
+        setModel: setModelSpy,
+      } as any);
+
+      const { stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /model command
+      stdin.write("\r");
+      await delay(100);
+
+      // Select first model
+      stdin.write("\r");
+      await delay(100);
+
+      expect(setModelSpy).toHaveBeenCalled();
     });
   });
 });

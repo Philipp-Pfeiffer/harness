@@ -4,10 +4,11 @@ import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createAgent } from "../core/agent.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 
@@ -589,8 +590,34 @@ export default function App() {
   const isRunningRef = useRef(false);
 
   const tools = useMemo(() => loadTools(), []);
-  const model = useMemo(() => getModel("minimax", "MiniMax-M2.7"), []);
-  const agent = useMemo(() => createAgent({ tools, model }), [tools, model]);
+  const [activeModel, setActiveModel] = useState<Model<Api>>(() => getModel("minimax", "MiniMax-M2.7"));
+  const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
+  useEffect(() => {
+    agent.setModel(activeModel);
+  }, [agent, activeModel]);
+
+  const [configModels, setConfigModels] = useState<{ provider: string; model: string; alias: string }[]>([]);
+  const [configError, setConfigError] = useState<string | undefined>(undefined);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [modelPickerIndex, setModelPickerIndex] = useState(0);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await readFile("harness.config.json", "utf-8");
+        const config = JSON.parse(raw) as { models?: { provider: string; model: string; alias: string }[] };
+        if (config.models && Array.isArray(config.models) && config.models.length > 0) {
+          setConfigModels(config.models);
+        } else {
+          setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
+          setConfigError("Config has no models, using default");
+        }
+      } catch {
+        setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
+        setConfigError("No harness.config.json found, using default model");
+      }
+    })();
+  }, []);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
@@ -611,6 +638,11 @@ export default function App() {
       if (trimmed === "/quit") {
         exit();
         process.exit(0);
+        return;
+      }
+      if (trimmed === "/model") {
+        setShowModelPicker(true);
+        setModelPickerIndex(0);
         return;
       }
       if (trimmed === "/help") {
@@ -801,6 +833,48 @@ export default function App() {
   }, [pastTurns, forceUpdate]);
 
   useInput((inputStr, key) => {
+    if (showModelPicker) {
+      if (key.upArrow) {
+        setModelPickerIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setModelPickerIndex((i) => Math.min(configModels.length - 1, i + 1));
+        return;
+      }
+      if (key.escape) {
+        setShowModelPicker(false);
+        return;
+      }
+      if (key.return || key.tab) {
+        const selected = configModels[modelPickerIndex];
+        if (selected) {
+          try {
+            const newModel = (getModel as unknown as (provider: string, modelId: string) => Model<Api>)(
+              selected.provider,
+              selected.model
+            );
+            setActiveModel(newModel);
+          } catch {
+            const errorTurn: CompletedTurn = {
+              id: randomUUID(),
+              userText: "/model",
+              assistantText: "",
+              assistantRendered: false,
+              tools: [],
+              toolOffsets: [],
+              aborted: false,
+              error: `Failed to switch to model ${selected.provider}/${selected.model}`,
+            };
+            setPastTurns((prev) => [...prev, errorTurn]);
+          }
+        }
+        setShowModelPicker(false);
+        return;
+      }
+      return;
+    }
+
     if (key.ctrl && inputStr === "c") {
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
@@ -834,7 +908,20 @@ export default function App() {
 
   return (
     <Box flexDirection="column" width={process.stdout.columns || 80}>
-      <Header modelId={model.id} status={status} usage={sessionUsage} contextWindow={model.contextWindow} />
+      <Header modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
+      {configError && (
+        <Text color="yellow">Warning: {configError}</Text>
+      )}
+      {showModelPicker && configModels.length > 0 && (
+        <Box flexDirection="column" marginY={1} paddingLeft={2}>
+          <Text bold>Select model:</Text>
+          {configModels.map((m, idx) => (
+            <Text key={`${m.provider}-${m.model}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
+              {m.alias} ({m.provider}/{m.model})
+            </Text>
+          ))}
+        </Box>
+      )}
       {pastTurns.map((turn) => (
         <TurnView key={turn.id} turn={turn} />
       ))}

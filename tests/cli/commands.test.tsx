@@ -20,6 +20,7 @@ const mockRun = vi.fn();
 vi.mock("../../src/core/agent.js", () => ({
   createAgent: vi.fn(() => ({
     run: mockRun,
+    setModel: vi.fn(),
   })),
 }));
 
@@ -119,7 +120,9 @@ describe("Slash command autocomplete picker", () => {
     let frame = lastFrame();
     expect(frame).toContain("/clear");
 
-    // Press down twice to reach /quit
+    // Press down three times to reach /quit (clear → help → model → quit)
+    stdin.write("\x1b[B");
+    await delay(50);
     stdin.write("\x1b[B");
     await delay(50);
     stdin.write("\x1b[B");

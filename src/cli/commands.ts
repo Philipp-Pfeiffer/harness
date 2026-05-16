@@ -6,6 +6,7 @@ export interface SlashCommandInfo {
 export const slashCommands: SlashCommandInfo[] = [
   { name: "/clear", description: "Clear history" },
   { name: "/help", description: "Show this help" },
+  { name: "/model", description: "Switch model" },
   { name: "/quit", description: "Exit" },
 ];
 

@@ -10,6 +10,7 @@ import type {
   Api,
   Message,
 } from "@mariozechner/pi-ai";
+
 import type { Tool } from "../tools/types.js";
 
 export interface ToolCallLog {
@@ -95,13 +96,17 @@ export interface AgentConfig {
 
 export interface Agent {
   run(messages: Message[], options?: RunOptions): Promise<RunResult>;
+  setModel(model: Model<Api>): void;
 }
 
 export function createAgent(config: AgentConfig): Agent {
   const { tools, systemPrompt, maxIterations = 10, model, logger } = config;
-  const resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
+  let resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
 
   return {
+    setModel(newModel: Model<Api>) {
+      resolvedModel = newModel;
+    },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent } = options;
       const context: PiContext = {
@@ -120,7 +125,7 @@ export function createAgent(config: AgentConfig): Agent {
           return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
-        const eventStream = stream(resolvedModel, context, { signal });
+        const eventStream = stream(resolvedModel as Model<Api>, context, { signal });
         let response: import("@mariozechner/pi-ai").AssistantMessage;
 
         try {
