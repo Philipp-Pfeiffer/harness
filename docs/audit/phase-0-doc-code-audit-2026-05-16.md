@@ -345,12 +345,12 @@ Dieser Abschnitt dokumentiert den Bearbeitungs-Status der Gap-Liste aus Fix-Run 
 | 🟡 Important | Context/Session unbounded growth | ⏳ Doc only | Kein Code-Change in Fix-Run A; Doku reflektiert aktuellen Zustand (kein Pruning). |
 | 🟡 Important | Orphaned `context.ts` + `session.ts` | ✅ Resolved | Beide Dateien + Tests gelöscht. Keine verwaisten Imports. |
 | 🟡 Important | `readFile.md` MVP-Notiz (writeFile/editFile) | ✅ Resolved | Veraltete Zeile entfernt. |
-| 🟡 Important | `write.md`/`edit.md` Path-Resolution-Wording | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
-| 🟡 Important | `exec.md` PTY-Timeout-Format | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
+| 🟡 Important | `write.md`/`edit.md` Path-Resolution-Wording | ✅ Resolved | Formulierung korrigiert: `path.resolve(expanded)` mit Hinweis auf implizites cwd. |
+| 🟡 Important | `exec.md` PTY-Timeout-Format | ✅ Resolved | Separater PTY-Timeout-Block mit `--- output ---` hinzugefügt. |
 | 🟡 Important | Beispiel-ADR-Datei fehlt | ❌ Out of scope | ADR-Repo-Spiegel separat geplant (OQ-3). |
 | 🟢 Nice | `yieldMs = 0` Edge-Case | ✅ Resolved | Schema-Minimum auf 1 angehoben; Sync-Fallback entfällt. Test angepasst. |
 | 🟢 Nice | `resolvePromise` Dead Code | ✅ Resolved | Feld aus `Session`-Typ und `register()` entfernt. |
-| 🟢 Nice | Keine Beispiele in `write.md`/`edit.md` | ⏳ Doc only | In Fix-Run B (Doc-Sync) angegangen. |
+| 🟢 Nice | Keine Beispiele in `write.md`/`edit.md` | ✅ Resolved | Kurze TypeScript-Beispiele für beide Tools ergänzt. |
 | 🟢 Nice | Streaming (`stream()` statt `complete()`) | ❌ Out of scope | Keine Phase-1-Planung. |
 | 🟢 Nice | Abort / Cancellation-Token | ❌ Out of scope | Keine Phase-1-Planung. |
 

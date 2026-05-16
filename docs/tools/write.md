@@ -19,7 +19,7 @@ Schreibt Inhalt in eine Datei. Atomares Write via `tmp + rename`. Sensitive Path
 
 ### Tilde-Expansion
 
-`~` oder `~/` → `$HOME` via `path_util.expandTilde()`. Danach `path.resolve(cwd(), expanded)`.
+`~` oder `~/` → `$HOME` via `path_util.expandTilde()`. Danach `path.resolve(expanded)` (resolved implizit gegen `process.cwd()`).
 
 ### Sensitive-Path-Guard
 
@@ -75,6 +75,16 @@ Bei Erfolg: `ok`
 | `path_util.ts` | `expandTilde()` |
 | `atomic_write.ts` | tmp-Write + rename + cleanup |
 | `file_state.ts` | `markRead()` |
+
+## Beispiel
+
+```typescript
+await writeTool.execute({
+  path: "config.json",
+  content: '{"key": "value"}',
+});
+// → "ok"
+```
 
 ## Fixtures (Tests)
 

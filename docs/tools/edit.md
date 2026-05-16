@@ -27,7 +27,7 @@ Editiert eine Datei durch sequenzielle Find-and-Replace-Operationen. File muss v
 
 ### Tilde-Expansion
 
-`~` oder `~/` → `$HOME` via `path_util.expandTilde()`. Danach `path.resolve(cwd(), expanded)`.
+`~` oder `~/` → `$HOME` via `path_util.expandTilde()`. Danach `path.resolve(expanded)` (resolved implizit gegen `process.cwd()`).
 
 ### Sensitive-Path-Guard
 
@@ -73,6 +73,19 @@ Finaler Inhalt wird via `atomic_write.ts` zurückgeschrieben.
 Bei Erfolg: `ok: <anzahl der angewandten edits>`
 
 **Beispiel:** `ok: 3`
+
+## Beispiel
+
+```typescript
+// Datei muss vorher gelesen oder geschrieben worden sein
+await editTool.execute({
+  path: "config.json",
+  edits: [
+    { oldText: '"key": "value"', newText: '"key": "updated"' },
+  ],
+});
+// → "ok: 1"
+```
 
 ## Nicht enthalten (MVP)
 

@@ -73,7 +73,7 @@ code: 0, signal: null
 code: 0, signal: null
 ```
 
-### Timeout
+### Timeout (Sync)
 
 ```
 Command timed out after 30s and was terminated.
@@ -84,6 +84,18 @@ Command timed out after 30s and was terminated.
 --- exit ---
 code: 143, signal: null
 ```
+
+### Timeout (PTY)
+
+```
+Command timed out after 30s and was terminated.
+--- output ---
+...
+--- exit ---
+code: 143, signal: null
+```
+
+**Hinweis:** PTY-Timeouts verwenden `--- output ---` (merged stdout/stderr), nicht `--- stdout --- / --- stderr ---`.
 
 ### Background-Start
 
