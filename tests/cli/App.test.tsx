@@ -339,4 +339,108 @@ describe("CLI App", () => {
     expect(beforeIdx).toBeLessThan(toolIdx);
     expect(toolIdx).toBeLessThan(afterIdx);
   });
+
+  describe("PromptInput editing", () => {
+    it("deletes a word with Ctrl+Backspace (kitty protocol)", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello world test");
+      await delay(50);
+
+      // Kitty protocol: delete with ctrl modifier
+      stdin.write("\x1b[127;5u");
+      await delay(50);
+
+      const frame = lastFrame();
+      // Should show "hello world " (test removed)
+      expect(frame).toContain("hello world");
+      expect(frame).not.toContain("world test");
+    });
+
+    it("deletes a word with Alt+Backspace", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello world test");
+      await delay(50);
+
+      // Alt+Backspace = ESC + DEL
+      stdin.write("\x1b\x7f");
+      await delay(50);
+
+      const frame = lastFrame();
+      expect(frame).toContain("hello world");
+      expect(frame).not.toContain("world test");
+    });
+
+    it("selects text with Shift+Left/Right arrows", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello");
+      await delay(50);
+
+      // Shift+Left twice (rxvt sequences)
+      stdin.write("\x1b[d");
+      await delay(30);
+      stdin.write("\x1b[d");
+      await delay(30);
+
+      const frame = lastFrame();
+      // The selected chars "lo" should be highlighted
+      expect(frame).toContain("hello");
+    });
+
+    it("replaces selected text on typing", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello world");
+      await delay(50);
+
+      // Move cursor to position 6 (start of "world"): Left 5x
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[D");
+        await delay(10);
+      }
+
+      // Select "world" with Shift+Right 5x
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[c");
+        await delay(10);
+      }
+
+      // Type "moon"
+      stdin.write("moon");
+      await delay(50);
+
+      const frame = lastFrame();
+      expect(frame).toContain("hello moon");
+      expect(frame).not.toContain("world");
+    });
+
+    it("deletes selected text with Backspace", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello world");
+      await delay(50);
+
+      // Move cursor to position 6 (start of "world"): Left 5x
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[D");
+        await delay(10);
+      }
+
+      // Select "world" with Shift+Right 5x
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[c");
+        await delay(10);
+      }
+
+      // Backspace deletes selection
+      stdin.write("\x7f");
+      await delay(50);
+
+      const frame = lastFrame();
+      expect(frame).toContain("hello");
+      expect(frame).not.toContain("world");
+    });
+  });
 });

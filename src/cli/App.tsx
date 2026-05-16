@@ -228,10 +228,14 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
   );
 }
 
+/* ─── PromptInput with selection + Ctrl+Backspace ─── */
+
 function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; history: string[] }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
   const cursorOffsetRef = useRef(0);
+  const selStartRef = useRef(-1);
+  const selEndRef = useRef(-1);
   const historyIndexRef = useRef(-1);
   const blinkRef = useRef(true);
   const historyRef = useRef(history);
@@ -248,6 +252,45 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
     return () => clearInterval(id);
   }, []);
 
+  function hasSelection(): boolean {
+    return selStartRef.current !== -1 && selEndRef.current !== -1 && selStartRef.current !== selEndRef.current;
+  }
+
+  function selectionRange(): [number, number] {
+    if (!hasSelection()) return [cursorOffsetRef.current, cursorOffsetRef.current];
+    const s = Math.min(selStartRef.current, selEndRef.current);
+    const e = Math.max(selStartRef.current, selEndRef.current);
+    return [s, e];
+  }
+
+  function clearSelection() {
+    selStartRef.current = -1;
+    selEndRef.current = -1;
+  }
+
+  function deleteSelection(): boolean {
+    if (!hasSelection()) return false;
+    const [s, e] = selectionRange();
+    const before = valueRef.current.slice(0, s);
+    const after = valueRef.current.slice(e);
+    valueRef.current = before + after;
+    cursorOffsetRef.current = s;
+    clearSelection();
+    return true;
+  }
+
+  function deleteWordBeforeCursor() {
+    const text = valueRef.current;
+    let pos = cursorOffsetRef.current;
+    if (pos <= 0) return;
+    // delete trailing whitespace
+    while (pos > 0 && /\s/.test(text[pos - 1])) pos--;
+    // delete word chars
+    while (pos > 0 && !/\s/.test(text[pos - 1])) pos--;
+    valueRef.current = text.slice(0, pos) + text.slice(cursorOffsetRef.current);
+    cursorOffsetRef.current = pos;
+  }
+
   useInput((inputStr, key) => {
     if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o")) {
       return;
@@ -256,51 +299,115 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
     let changed = false;
     const currentValue = valueRef.current;
 
-    if (key.return && key.shift) {
-      const before = currentValue.slice(0, cursorOffsetRef.current);
-      const after = currentValue.slice(cursorOffsetRef.current);
+    // Ctrl+Backspace or Alt+Backspace → delete word
+    if ((key.ctrl || key.meta) && (key.backspace || key.delete)) {
+      if (deleteSelection()) {
+        changed = true;
+      } else {
+        deleteWordBeforeCursor();
+        changed = true;
+      }
+    } else if (key.ctrl && inputStr === "a") {
+      // Ctrl+A → select all
+      selStartRef.current = 0;
+      selEndRef.current = currentValue.length;
+      cursorOffsetRef.current = currentValue.length;
+      changed = true;
+    } else if (key.return && key.shift) {
+      if (deleteSelection()) changed = true;
+      const before = valueRef.current.slice(0, cursorOffsetRef.current);
+      const after = valueRef.current.slice(cursorOffsetRef.current);
       valueRef.current = before + "\n" + after;
       cursorOffsetRef.current++;
+      clearSelection();
       changed = true;
     } else if (key.return) {
       onSubmit(currentValue);
       valueRef.current = "";
       cursorOffsetRef.current = 0;
+      clearSelection();
       historyIndexRef.current = -1;
       changed = true;
     } else if (key.upArrow) {
-      const newIndex = Math.min(historyIndexRef.current + 1, historyRef.current.length - 1);
-      if (newIndex >= 0 && newIndex !== historyIndexRef.current) {
-        historyIndexRef.current = newIndex;
-        valueRef.current = historyRef.current[historyRef.current.length - 1 - newIndex];
-        cursorOffsetRef.current = valueRef.current.length;
+      if (key.shift) {
+        if (!hasSelection()) {
+          selStartRef.current = cursorOffsetRef.current;
+        }
+        // Move cursor to previous line start or up one line
+        const prevNewline = currentValue.lastIndexOf("\n", cursorOffsetRef.current - 1);
+        cursorOffsetRef.current = prevNewline >= 0 ? prevNewline : 0;
+        selEndRef.current = cursorOffsetRef.current;
         changed = true;
+      } else {
+        const newIndex = Math.min(historyIndexRef.current + 1, historyRef.current.length - 1);
+        if (newIndex >= 0 && newIndex !== historyIndexRef.current) {
+          historyIndexRef.current = newIndex;
+          valueRef.current = historyRef.current[historyRef.current.length - 1 - newIndex];
+          cursorOffsetRef.current = valueRef.current.length;
+          clearSelection();
+          changed = true;
+        }
       }
     } else if (key.downArrow) {
-      const newIndex = Math.max(historyIndexRef.current - 1, -1);
-      historyIndexRef.current = newIndex;
-      valueRef.current = newIndex === -1 ? "" : historyRef.current[historyRef.current.length - 1 - newIndex];
-      cursorOffsetRef.current = valueRef.current.length;
-      changed = true;
+      if (key.shift) {
+        if (!hasSelection()) {
+          selStartRef.current = cursorOffsetRef.current;
+        }
+        const nextNewline = currentValue.indexOf("\n", cursorOffsetRef.current);
+        cursorOffsetRef.current = nextNewline >= 0 ? nextNewline + 1 : currentValue.length;
+        selEndRef.current = cursorOffsetRef.current;
+        changed = true;
+      } else {
+        const newIndex = Math.max(historyIndexRef.current - 1, -1);
+        historyIndexRef.current = newIndex;
+        valueRef.current = newIndex === -1 ? "" : historyRef.current[historyRef.current.length - 1 - newIndex];
+        cursorOffsetRef.current = valueRef.current.length;
+        clearSelection();
+        changed = true;
+      }
     } else if (key.leftArrow) {
-      cursorOffsetRef.current = Math.max(0, cursorOffsetRef.current - 1);
-      changed = true;
+      if (key.shift) {
+        if (!hasSelection()) {
+          selStartRef.current = cursorOffsetRef.current;
+        }
+        cursorOffsetRef.current = Math.max(0, cursorOffsetRef.current - 1);
+        selEndRef.current = cursorOffsetRef.current;
+        changed = true;
+      } else {
+        cursorOffsetRef.current = Math.max(0, cursorOffsetRef.current - 1);
+        clearSelection();
+        changed = true;
+      }
     } else if (key.rightArrow) {
-      cursorOffsetRef.current = Math.min(currentValue.length, cursorOffsetRef.current + 1);
-      changed = true;
+      if (key.shift) {
+        if (!hasSelection()) {
+          selStartRef.current = cursorOffsetRef.current;
+        }
+        cursorOffsetRef.current = Math.min(currentValue.length, cursorOffsetRef.current + 1);
+        selEndRef.current = cursorOffsetRef.current;
+        changed = true;
+      } else {
+        cursorOffsetRef.current = Math.min(currentValue.length, cursorOffsetRef.current + 1);
+        clearSelection();
+        changed = true;
+      }
     } else if (key.backspace || key.delete) {
-      if (cursorOffsetRef.current > 0) {
-        const before = currentValue.slice(0, cursorOffsetRef.current - 1);
-        const after = currentValue.slice(cursorOffsetRef.current);
+      if (deleteSelection()) {
+        changed = true;
+      } else if (cursorOffsetRef.current > 0) {
+        const before = valueRef.current.slice(0, cursorOffsetRef.current - 1);
+        const after = valueRef.current.slice(cursorOffsetRef.current);
         valueRef.current = before + after;
         cursorOffsetRef.current--;
         changed = true;
       }
     } else if (inputStr && !key.ctrl && !key.meta) {
-      const before = currentValue.slice(0, cursorOffsetRef.current);
-      const after = currentValue.slice(cursorOffsetRef.current);
+      if (deleteSelection()) changed = true;
+      const before = valueRef.current.slice(0, cursorOffsetRef.current);
+      const after = valueRef.current.slice(cursorOffsetRef.current);
       valueRef.current = before + inputStr + after;
       cursorOffsetRef.current += inputStr.length;
+      clearSelection();
       changed = true;
     }
 
@@ -309,26 +416,72 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
     }
   });
 
-  const lines = valueRef.current.split("\n");
-  const cursorLineIndex = valueRef.current.slice(0, cursorOffsetRef.current).split("\n").length - 1;
-  const lineStartOffset = valueRef.current.slice(0, cursorOffsetRef.current).lastIndexOf("\n") + 1;
-  const cursorCol = cursorOffsetRef.current - lineStartOffset;
+  // Build display lines with selection highlighting
+  const fullText = valueRef.current;
+  const lines = fullText.split("\n");
+  const [selStart, selEnd] = selectionRange();
+  const cursorOffset = cursorOffsetRef.current;
 
   return (
     <Box flexDirection="column">
-      {lines.map((line, i) => {
-        const isCursorLine = i === cursorLineIndex;
-        let displayLine = line;
-        if (isCursorLine) {
-          const before = line.slice(0, cursorCol);
-          const char = line[cursorCol] || " ";
-          const after = line.slice(cursorCol + 1);
-          displayLine = before + (blinkRef.current ? chalk.inverse(char) : char) + after;
+      {lines.map((line, lineIndex) => {
+        const lineStartOffset = fullText.split("\n").slice(0, lineIndex).join("\n").length + (lineIndex > 0 ? 1 : 0);
+        const lineEndOffset = lineStartOffset + line.length;
+        const isCursorLine = cursorOffset >= lineStartOffset && cursorOffset <= lineEndOffset;
+        const lineCursorCol = cursorOffset - lineStartOffset;
+
+        // Determine selection within this line
+        const lineSelStart = Math.max(0, selStart - lineStartOffset);
+        const lineSelEnd = Math.min(line.length, selEnd - lineStartOffset);
+        const hasLineSel = lineSelStart < lineSelEnd;
+
+        // Build segments: [normal, selected, normal, cursor, normal]
+        type Segment = { text: string; selected: boolean; isCursor: boolean };
+        const segments: Segment[] = [];
+
+        if (!hasLineSel && !isCursorLine) {
+          segments.push({ text: line, selected: false, isCursor: false });
+        } else if (!hasLineSel && isCursorLine) {
+          const before = line.slice(0, lineCursorCol);
+          const char = line[lineCursorCol] || " ";
+          const after = line.slice(lineCursorCol + 1);
+          if (before) segments.push({ text: before, selected: false, isCursor: false });
+          segments.push({ text: char, selected: false, isCursor: true });
+          if (after) segments.push({ text: after, selected: false, isCursor: false });
+        } else if (hasLineSel && !isCursorLine) {
+          if (lineSelStart > 0) segments.push({ text: line.slice(0, lineSelStart), selected: false, isCursor: false });
+          segments.push({ text: line.slice(lineSelStart, lineSelEnd), selected: true, isCursor: false });
+          if (lineSelEnd < line.length) segments.push({ text: line.slice(lineSelEnd), selected: false, isCursor: false });
+        } else {
+          // Both selection and cursor on this line
+          const parts = [0, lineSelStart, lineSelEnd, lineCursorCol, lineCursorCol + 1, line.length].filter((v, i, a) => v >= 0 && v <= line.length && (i === 0 || v >= a[i - 1])).sort((a, b) => a - b);
+          const uniqueParts = Array.from(new Set(parts));
+          for (let i = 0; i < uniqueParts.length - 1; i++) {
+            const start = uniqueParts[i];
+            const end = uniqueParts[i + 1];
+            const text = line.slice(start, end);
+            const selected = start >= lineSelStart && end <= lineSelEnd;
+            const isCursor = start === lineCursorCol;
+            if (text || isCursor) {
+              segments.push({ text: text || " ", selected, isCursor });
+            }
+          }
         }
+
         return (
-          <Box key={i} flexDirection="row">
+          <Box key={lineIndex} flexDirection="row">
             <Text color="cyan">❯ </Text>
-            <Text>{displayLine}</Text>
+            {segments.map((seg, segIdx) => {
+              if (seg.isCursor) {
+                return (
+                  <Text key={segIdx}>{blinkRef.current ? chalk.inverse(seg.text) : seg.text}</Text>
+                );
+              }
+              if (seg.selected) {
+                return <Text key={segIdx}>{chalk.bgWhite.black(seg.text)}</Text>;
+              }
+              return <Text key={segIdx}>{seg.text}</Text>;
+            })}
           </Box>
         );
       })}
