@@ -1,17 +1,18 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { createAgent } from "../../src/core/agent.js";
-import { complete, getModel } from "@mariozechner/pi-ai";
+import { stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../../src/tools/types.js";
 import { writeTool } from "../../src/tools/write_file.js";
 import { editTool } from "../../src/tools/edit_file.js";
 import { resolveExpandedPath } from "../../src/tools/path_util.js";
+import type { AssistantMessageEventStream } from "@mariozechner/pi-ai";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
   return {
     ...actual,
-    complete: vi.fn(),
+    stream: vi.fn(),
   };
 });
 
@@ -36,6 +37,38 @@ function makeAssistantMessage(
     timestamp: Date.now(),
     errorMessage,
   };
+}
+
+function mockStream(finalMessage: any, tokens?: string[], signal?: AbortSignal): AssistantMessageEventStream {
+  const events: any[] = [];
+  if (tokens) {
+    for (const token of tokens) {
+      events.push({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: token,
+        partial: makeAssistantMessage([], "stop"),
+      });
+    }
+  }
+  events.push({ type: "done", reason: finalMessage.stopReason, message: finalMessage });
+
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const event of events) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        yield event;
+      }
+    },
+    async result() {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      return finalMessage;
+    },
+  } as unknown as AssistantMessageEventStream;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -92,7 +125,7 @@ const orderTool: Tool<typeof orderArgs> = {
 
 describe("Parallel tool execution", () => {
   afterEach(() => {
-    vi.mocked(complete).mockReset();
+    vi.mocked(stream).mockReset();
   });
 
   it("runs 3 independent tools in parallel (< 200 ms total)", async () => {
@@ -106,7 +139,7 @@ describe("Parallel tool execution", () => {
     );
     const mockFinal = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
 
-    vi.mocked(complete).mockResolvedValueOnce(mockToolCall).mockResolvedValueOnce(mockFinal);
+    vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [delayTool], model });
     const start = Date.now();
@@ -114,7 +147,7 @@ describe("Parallel tool execution", () => {
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(200);
-    expect(complete).toHaveBeenCalledTimes(2);
+    expect(stream).toHaveBeenCalledTimes(2);
   });
 
   it("serializes tools with identical conflictKey", async () => {
@@ -144,7 +177,7 @@ describe("Parallel tool execution", () => {
     );
     const mockFinal = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
 
-    vi.mocked(complete).mockResolvedValueOnce(mockToolCall).mockResolvedValueOnce(mockFinal);
+    vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [trackingSerialTool], model });
     await agent.run("test");
@@ -180,7 +213,7 @@ describe("Parallel tool execution", () => {
     );
     const mockFinal = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
 
-    vi.mocked(complete).mockResolvedValueOnce(mockToolCall).mockResolvedValueOnce(mockFinal);
+    vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [parallelSerialTool], model });
     const start = Date.now();
@@ -203,12 +236,12 @@ describe("Parallel tool execution", () => {
     );
     const mockFinal = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
 
-    vi.mocked(complete).mockResolvedValueOnce(mockToolCall).mockResolvedValueOnce(mockFinal);
+    vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [failTool], model });
     await agent.run("test");
 
-    const secondCall = vi.mocked(complete).mock.calls[1];
+    const secondCall = vi.mocked(stream).mock.calls[1];
     const context = secondCall[1] as {
       messages: Array<{ role: string; isError?: boolean; content?: Array<{ type: string; text: string }> }>;
     };
@@ -230,12 +263,12 @@ describe("Parallel tool execution", () => {
     );
     const mockFinal = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
 
-    vi.mocked(complete).mockResolvedValueOnce(mockToolCall).mockResolvedValueOnce(mockFinal);
+    vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [orderTool], model });
     await agent.run("test");
 
-    const secondCall = vi.mocked(complete).mock.calls[1];
+    const secondCall = vi.mocked(stream).mock.calls[1];
     const context = secondCall[1] as {
       messages: Array<{ role: string; content?: Array<{ type: string; text: string }> }>;
     };
