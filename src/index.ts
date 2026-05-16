@@ -57,9 +57,20 @@ async function loop() {
 
     abortController = new AbortController();
     isRunning = true;
+    let liveOutput = false;
 
     try {
-      const result = await agent.run(input, { signal: abortController.signal });
+      const result = await agent.run(input, {
+        signal: abortController.signal,
+        onEvent: (event) => {
+          if (event.type === "token") {
+            process.stdout.write(event.text);
+            liveOutput = true;
+          } else if (event.type === "tool_call_start") {
+            process.stdout.write(`\n→ tool: ${event.name}(${JSON.stringify(event.args)})\n`);
+          }
+        },
+      });
 
       if (result.aborted) {
         console.log(`\n[Abgebrochen: ${result.reason}]\n`);
@@ -67,7 +78,11 @@ async function loop() {
         break;
       }
 
-      console.log(`Cliffford: ${result.finalMessage}\n`);
+      if (liveOutput) {
+        console.log("\n");
+      } else {
+        console.log(`Cliffford: ${result.finalMessage}\n`);
+      }
     } catch (err) {
       console.error(`[Fehler]: ${err instanceof Error ? err.message : err}\n`);
     }

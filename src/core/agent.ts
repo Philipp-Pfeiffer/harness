@@ -1,4 +1,4 @@
-import { complete, getModel } from "@mariozechner/pi-ai";
+import { stream, getModel } from "@mariozechner/pi-ai";
 import { Value } from "typebox/value";
 import type {
   Context as PiContext,
@@ -27,6 +27,8 @@ export type Logger = (msg: string) => void;
 export interface RunOptions {
   /** Optional AbortSignal for cooperative cancellation. */
   signal?: AbortSignal;
+  /** Optional callback for live stream and lifecycle events. */
+  onEvent?: (event: AgentEvent) => void;
 }
 
 /**
@@ -39,6 +41,19 @@ export interface RunOptions {
 export type RunResult =
   | { aborted: false; turns: number; finalMessage: string }
   | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns" };
+
+/**
+ * Events emitted during a streaming run.
+ *
+ * Mirrors pi-ai's `text_delta` as `token` and adds agent-level lifecycle
+ * events for tool calls and turn boundaries.
+ */
+export type AgentEvent =
+  | { type: "token"; text: string }
+  | { type: "tool_call_start"; name: string; args: unknown }
+  | { type: "tool_call_done"; name: string; result: string }
+  | { type: "tool_call_error"; name: string; error: string }
+  | { type: "turn_end"; turn: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -89,7 +104,7 @@ export function createAgent(config: AgentConfig): Agent {
 
   return {
     async run(input: string, options: RunOptions = {}): Promise<RunResult> {
-      const { signal } = options;
+      const { signal, onEvent } = options;
       const context: PiContext = {
         systemPrompt,
         messages: [createUserMessage(input)],
@@ -102,7 +117,27 @@ export function createAgent(config: AgentConfig): Agent {
           return { aborted: true, completedTurns: i, reason: "signal" };
         }
 
-        const response = await complete(resolvedModel, context);
+        const eventStream = stream(resolvedModel, context, { signal });
+        let response: import("@mariozechner/pi-ai").AssistantMessage;
+
+        try {
+          for await (const event of eventStream) {
+            if (event.type === "text_delta") {
+              onEvent?.({ type: "token", text: event.delta });
+            }
+          }
+          response = await eventStream.result();
+        } catch (err) {
+          // If the signal triggered the cancellation, return gracefully.
+          // pi-ai may throw an AbortError or the signal may simply be set.
+          if (
+            signal?.aborted ||
+            (err instanceof Error && err.name === "AbortError")
+          ) {
+            return { aborted: true, completedTurns: i, reason: "signal" };
+          }
+          throw err;
+        }
 
         context.messages.push(response);
 
@@ -127,6 +162,12 @@ export function createAgent(config: AgentConfig): Agent {
             const tool = tools.find((t) => t.name === toolCall.name);
             let result: string;
             let isError = false;
+
+            onEvent?.({
+              type: "tool_call_start",
+              name: toolCall.name,
+              args: toolCall.arguments,
+            });
 
             if (!tool) {
               result = `Tool "${toolCall.name}" nicht gefunden.`;
@@ -153,7 +194,15 @@ export function createAgent(config: AgentConfig): Agent {
             }
 
             context.messages.push(createToolResultMessage(toolCall, result, isError));
+
+            if (isError) {
+              onEvent?.({ type: "tool_call_error", name: toolCall.name, error: result });
+            } else {
+              onEvent?.({ type: "tool_call_done", name: toolCall.name, result });
+            }
           }
+
+          onEvent?.({ type: "turn_end", turn: i + 1 });
 
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
