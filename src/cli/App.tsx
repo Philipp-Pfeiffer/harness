@@ -9,6 +9,7 @@ import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
+import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 
 /* ─── marked config ─── */
 
@@ -139,9 +140,9 @@ function HelpCard() {
   return (
     <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="single" borderColor="gray">
       <Text bold>Commands</Text>
-      <Text>  /clear  – Clear history</Text>
-      <Text>  /quit   – Exit</Text>
-      <Text>  /help   – Show this help</Text>
+      {slashCommands.map((cmd) => (
+        <Text key={cmd.name}>  {cmd.name}  – {cmd.description}</Text>
+      ))}
       <Text bold>Keybinds</Text>
       <Text>  Ctrl+O  – Toggle last tool card</Text>
       <Text>  Ctrl+L  – Clear screen</Text>
@@ -230,7 +231,7 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
 
 /* ─── PromptInput with selection + Ctrl+Backspace ─── */
 
-function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; history: string[] }) {
+function PromptInput({ onSubmit, history, commands }: { onSubmit: (v: string) => void; history: string[]; commands?: SlashCommandInfo[] }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
   const cursorOffsetRef = useRef(0);
@@ -239,6 +240,8 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
   const historyIndexRef = useRef(-1);
   const blinkRef = useRef(true);
   const historyRef = useRef(history);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerIndex, setPickerIndex] = useState(0);
 
   useEffect(() => {
     historyRef.current = history;
@@ -298,6 +301,33 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
 
     let changed = false;
     const currentValue = valueRef.current;
+
+    if (commands && pickerOpen) {
+      const filtered = filterCommands(valueRef.current);
+      if (key.upArrow && !key.shift) {
+        setPickerIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow && !key.shift) {
+        setPickerIndex((i) => Math.min(filtered.length - 1, i + 1));
+        return;
+      }
+      if (key.escape) {
+        setPickerOpen(false);
+        setPickerIndex(0);
+        return;
+      }
+      if ((key.return || key.tab) && filtered.length > 0) {
+        const cmd = filtered[pickerIndex] ?? filtered[0];
+        valueRef.current = cmd.name;
+        cursorOffsetRef.current = cmd.name.length;
+        clearSelection();
+        setPickerOpen(false);
+        setPickerIndex(0);
+        setRenderTick((t) => t + 1);
+        return;
+      }
+    }
 
     // Ctrl+Backspace / Alt+Backspace / Ctrl+H → delete word
     // Note: many terminals send \x08 (BS) for Ctrl+Backspace, which Ink parses as input='h' + ctrl=true
@@ -423,8 +453,20 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
 
     if (changed) {
       setRenderTick((t) => t + 1);
+      if (commands) {
+        const shouldOpen = valueRef.current.startsWith("/") && !valueRef.current.includes(" ") && filterCommands(valueRef.current).length > 0;
+        if (shouldOpen && !pickerOpen) {
+          setPickerOpen(true);
+          setPickerIndex(0);
+        } else if (!shouldOpen && pickerOpen) {
+          setPickerOpen(false);
+          setPickerIndex(0);
+        }
+      }
     }
   });
+
+  const filteredCommands = pickerOpen && commands ? filterCommands(valueRef.current) : [];
 
   // Build display lines with selection highlighting
   const fullText = valueRef.current;
@@ -495,6 +537,15 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
           </Box>
         );
       })}
+      {pickerOpen && filteredCommands.length > 0 && (
+        <Box flexDirection="column" marginTop={1} paddingLeft={2}>
+          {filteredCommands.map((cmd, idx) => (
+            <Text key={cmd.name} color={idx === pickerIndex ? "cyan" : "gray"} bold={idx === pickerIndex}>
+              {cmd.name}  – {cmd.description}
+            </Text>
+          ))}
+        </Box>
+      )}
     </Box>
   );
 }
@@ -760,7 +811,7 @@ export default function App() {
         <TurnView key={turn.id} turn={turn} />
       ))}
       {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
-      {!isRunningRef.current && <PromptInput onSubmit={handleSubmit} history={inputHistory} />}
+      {!isRunningRef.current && <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />}
     </Box>
   );
 }

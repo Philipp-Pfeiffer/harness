@@ -182,6 +182,9 @@ describe("CLI App", () => {
     await delay(50);
     stdin.write("\r");
     await delay(100);
+    // Picker consumes first Enter to complete command, press again to submit
+    stdin.write("\r");
+    await delay(100);
 
     const allFrames = frames.join("\n");
     expect(allFrames).toContain("Commands");
@@ -194,6 +197,9 @@ describe("CLI App", () => {
 
     stdin.write("/quit");
     await delay(50);
+    stdin.write("\r");
+    await delay(100);
+    // Picker consumes first Enter to complete command, press again to submit
     stdin.write("\r");
     await delay(100);
 
