@@ -472,4 +472,121 @@ describe("CLI App", () => {
       expect(frame).not.toContain("world test");
     });
   });
+
+  describe("Persistent input and status bar", () => {
+    it("shows status bar at bottom with model, status and cwd", () => {
+      const { lastFrame } = render(<App />);
+      const frame = lastFrame();
+      // Status bar should contain model, harness label, ready status, and cwd
+      expect(frame).toContain("harness");
+      expect(frame).toContain("test-model");
+      expect(frame).toContain("ready");
+      expect(frame).toContain(process.cwd());
+      // Input prompt should be visible
+      expect(frame).toContain("❯");
+    });
+
+    it("keeps input visible during streaming", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "streaming" });
+        await delay(500);
+        return { aborted: false, turns: 1, finalMessage: "streaming" };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("test");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      const frame = lastFrame();
+      // Input should still be visible while streaming
+      expect(frame).toContain("❯");
+      expect(frame).toContain("streaming");
+    });
+
+    it("allows typing during streaming", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "first" });
+        await delay(500);
+        return { aborted: false, turns: 1, finalMessage: "first" };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("run");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      // Type while streaming
+      stdin.write("next");
+      await delay(50);
+
+      const frame = lastFrame();
+      // Typed text should appear in the input line
+      expect(frame).toContain("next");
+    });
+
+    it("blocks Enter during streaming", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "first" });
+        await delay(500);
+        return { aborted: false, turns: 1, finalMessage: "first" };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("run");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      // Type and press Enter while streaming
+      stdin.write("blocked");
+      await delay(50);
+      stdin.write("\r");
+      await delay(50);
+
+      const frame = lastFrame();
+      // Text should still be in input, not submitted as a new turn
+      expect(frame).toContain("blocked");
+      // mockRun should only be called once (for the first submit)
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    });
+
+    it("preserves multi-line input with Shift+Enter during streaming", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "stream" });
+        await delay(500);
+        return { aborted: false, turns: 1, finalMessage: "stream" };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("run");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      // Type multi-line during streaming
+      stdin.write("line1");
+      await delay(20);
+      // Shift+Enter = newline
+      stdin.write("\x1b[13;2u");
+      await delay(20);
+      stdin.write("line2");
+      await delay(50);
+
+      const frame = lastFrame();
+      // Both lines should be visible
+      expect(frame).toContain("line1");
+      expect(frame).toContain("line2");
+    });
+  });
 });
