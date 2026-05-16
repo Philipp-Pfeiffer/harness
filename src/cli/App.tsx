@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp, useStdout } from "ink";
+import { Box, Text, useInput, useApp, useStdout, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -779,10 +779,16 @@ export default function App() {
     }
   });
 
+  const staticTurns = pastTurns.slice(0, -1);
+  const liveTurns = pastTurns.slice(-1);
+
   return (
-    <Box flexDirection="column" width={termSize.columns} height={termSize.rows}>
-      <Box flexDirection="column" flexGrow={1} overflow="hidden">
-        {pastTurns.map((turn) => (
+    <Box flexDirection="column" width={termSize.columns}>
+      <Static items={staticTurns}>
+        {(turn) => <TurnView key={turn.id} turn={turn} />}
+      </Static>
+      <Box flexDirection="column" flexGrow={1}>
+        {liveTurns.map((turn) => (
           <TurnView key={turn.id} turn={turn} />
         ))}
         {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
