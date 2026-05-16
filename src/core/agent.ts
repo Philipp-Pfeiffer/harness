@@ -4,11 +4,11 @@ import type {
   Context as PiContext,
   Tool as PiTool,
   ToolCall as PiToolCall,
-  UserMessage,
   ToolResultMessage,
   TextContent,
   Model,
   Api,
+  Message,
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
 
@@ -63,14 +63,6 @@ function toPiTool(tool: Tool): PiTool {
   };
 }
 
-function createUserMessage(content: string): UserMessage {
-  return {
-    role: "user",
-    content,
-    timestamp: Date.now(),
-  };
-}
-
 function createToolResultMessage(
   toolCall: PiToolCall,
   result: string,
@@ -95,7 +87,7 @@ export interface AgentConfig {
 }
 
 export interface Agent {
-  run(input: string, options?: RunOptions): Promise<RunResult>;
+  run(messages: Message[], options?: RunOptions): Promise<RunResult>;
 }
 
 export function createAgent(config: AgentConfig): Agent {
@@ -103,11 +95,11 @@ export function createAgent(config: AgentConfig): Agent {
   const resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
 
   return {
-    async run(input: string, options: RunOptions = {}): Promise<RunResult> {
+    async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent } = options;
       const context: PiContext = {
         systemPrompt,
-        messages: [createUserMessage(input)],
+        messages,
         tools: tools.map(toPiTool),
       };
 
@@ -139,6 +131,10 @@ export function createAgent(config: AgentConfig): Agent {
           throw err;
         }
 
+        if (response.stopReason === "error") {
+          throw new Error(response.errorMessage ?? "Unbekannter Fehler");
+        }
+
         context.messages.push(response);
 
         if (response.stopReason === "stop" || response.stopReason === "length") {
@@ -148,10 +144,21 @@ export function createAgent(config: AgentConfig): Agent {
           return { aborted: false, turns: i + 1, finalMessage: textParts.join("") };
         }
 
+        if (response.stopReason === "aborted") {
+          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen." };
+        }
+
         if (response.stopReason === "toolUse") {
           const toolCalls = response.content.filter(
             (c): c is PiToolCall => c.type === "toolCall"
           );
+
+          // Check 2: Before any tool execution — if already aborted, roll back
+          // the assistant message so we don't leave dangling tool calls in history.
+          if (signal?.aborted) {
+            context.messages.pop();
+            return { aborted: true, completedTurns: i, reason: "signal" };
+          }
 
           // Build buckets: independent calls get their own bucket;
           // calls sharing the same conflictKey are grouped into one bucket
@@ -181,7 +188,7 @@ export function createAgent(config: AgentConfig): Agent {
           const bucketPromises = buckets.map(async (bucket) => {
             const results: { index: number; message: ToolResultMessage }[] = [];
             for (const { toolCall, index } of bucket) {
-              // Check 2: Before each tool call
+              // Check 2b: Before each tool call
               if (signal?.aborted) {
                 // Bucket ends cleanly; no further tool calls in this bucket.
                 // Parallel buckets are allowed to finish their current calls atomically.
@@ -254,14 +261,6 @@ export function createAgent(config: AgentConfig): Agent {
           }
 
           continue;
-        }
-
-        if (response.stopReason === "error") {
-          throw new Error(response.errorMessage ?? "Unbekannter Fehler");
-        }
-
-        if (response.stopReason === "aborted") {
-          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen." };
         }
       }
 

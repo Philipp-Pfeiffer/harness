@@ -6,7 +6,7 @@ import type { Tool } from "../../src/tools/types.js";
 import { writeTool } from "../../src/tools/write_file.js";
 import { editTool } from "../../src/tools/edit_file.js";
 import { resolveExpandedPath } from "../../src/tools/path_util.js";
-import type { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
@@ -36,6 +36,14 @@ function makeAssistantMessage(
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     timestamp: Date.now(),
     errorMessage,
+  };
+}
+
+function makeUserMessage(content: string): Message {
+  return {
+    role: "user",
+    content,
+    timestamp: Date.now(),
   };
 }
 
@@ -143,7 +151,7 @@ describe("Parallel tool execution", () => {
 
     const agent = createAgent({ tools: [delayTool], model });
     const start = Date.now();
-    await agent.run("test");
+    await agent.run([makeUserMessage("test")]);
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(200);
@@ -180,7 +188,7 @@ describe("Parallel tool execution", () => {
     vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [trackingSerialTool], model });
-    await agent.run("test");
+    await agent.run([makeUserMessage("test")]);
 
     expect(timestamps).toHaveLength(2);
     expect(timestamps[1].start).toBeGreaterThanOrEqual(timestamps[0].end - 5);
@@ -217,7 +225,7 @@ describe("Parallel tool execution", () => {
 
     const agent = createAgent({ tools: [parallelSerialTool], model });
     const start = Date.now();
-    await agent.run("test");
+    await agent.run([makeUserMessage("test")]);
     const elapsed = Date.now() - start;
 
     expect(elapsed).toBeLessThan(150);
@@ -239,7 +247,7 @@ describe("Parallel tool execution", () => {
     vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [failTool], model });
-    await agent.run("test");
+    await agent.run([makeUserMessage("test")]);
 
     const secondCall = vi.mocked(stream).mock.calls[1];
     const context = secondCall[1] as {
@@ -266,7 +274,7 @@ describe("Parallel tool execution", () => {
     vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall)).mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [orderTool], model });
-    await agent.run("test");
+    await agent.run([makeUserMessage("test")]);
 
     const secondCall = vi.mocked(stream).mock.calls[1];
     const context = secondCall[1] as {

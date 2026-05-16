@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { createAgent } from "../src/core/agent.js";
 import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../src/tools/types.js";
-import type { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
@@ -17,6 +17,14 @@ vi.mock("@mariozechner/pi-ai", async () => {
 const echoArgs = Type.Object({ text: Type.String() });
 
 const model = getModel("minimax", "MiniMax-M2.7");
+
+function makeUserMessage(content: string): Message {
+  return {
+    role: "user",
+    content,
+    timestamp: Date.now(),
+  };
+}
 
 function makeAssistantMessage(
   content: Array<{ type: "text"; text: string } | { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }>,
@@ -79,7 +87,7 @@ describe("Agent", () => {
     vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
 
     const agent = createAgent({ tools: [], model });
-    const result = await agent.run("Hi");
+    const result = await agent.run([makeUserMessage("Hi")]);
 
     expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!" });
     expect(stream).toHaveBeenCalledTimes(1);
@@ -104,7 +112,7 @@ describe("Agent", () => {
     };
     const agent = createAgent({ tools: [echoTool], model });
 
-    const result = await agent.run("Bitte rufe echo auf");
+    const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
     expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!" });
     expect(stream).toHaveBeenCalledTimes(2);
@@ -116,7 +124,7 @@ describe("Agent", () => {
 
     const agent = createAgent({ tools: [], model });
 
-    await expect(agent.run("Hi")).rejects.toThrow("Rate limit exceeded");
+    await expect(agent.run([makeUserMessage("Hi")])).rejects.toThrow("Rate limit exceeded");
   });
 
   it("returns message when stopReason is aborted", async () => {
@@ -124,7 +132,7 @@ describe("Agent", () => {
     vi.mocked(stream).mockReturnValueOnce(mockStream(abortedResponse));
 
     const agent = createAgent({ tools: [], model });
-    const result = await agent.run("Hi");
+    const result = await agent.run([makeUserMessage("Hi")]);
 
     expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen." });
   });
@@ -141,7 +149,7 @@ describe("Agent", () => {
       .mockReturnValueOnce(mockStream(mockFinal));
 
     const agent = createAgent({ tools: [], model });
-    const result = await agent.run("Call nonexistent tool");
+    const result = await agent.run([makeUserMessage("Call nonexistent tool")]);
 
     expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts" });
     expect(stream).toHaveBeenCalledTimes(2);
@@ -166,7 +174,7 @@ describe("Agent", () => {
     };
     const agent = createAgent({ tools: [echoTool], model });
 
-    const result = await agent.run("Call echo with bad args");
+    const result = await agent.run([makeUserMessage("Call echo with bad args")]);
 
     expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation" });
     expect(stream).toHaveBeenCalledTimes(2);
@@ -188,7 +196,7 @@ describe("Agent", () => {
     };
     const agent = createAgent({ tools: [echoTool], model, maxIterations: 2 });
 
-    const result = await agent.run("Keep calling tool");
+    const result = await agent.run([makeUserMessage("Keep calling tool")]);
 
     expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns" });
     expect(stream).toHaveBeenCalledTimes(2);
@@ -200,7 +208,7 @@ describe("Agent", () => {
       controller.abort();
 
       const agent = createAgent({ tools: [], model });
-      const result = await agent.run("Hi", { signal: controller.signal });
+      const result = await agent.run([makeUserMessage("Hi")], { signal: controller.signal });
 
       expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
       expect(stream).not.toHaveBeenCalled();
@@ -225,7 +233,7 @@ describe("Agent", () => {
         execute() { return "should-not-run"; },
       };
       const agent = createAgent({ tools: [echoTool], model });
-      const result = await agent.run("Call echo", { signal: controller.signal });
+      const result = await agent.run([makeUserMessage("Call echo")], { signal: controller.signal });
 
       expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
       expect(stream).toHaveBeenCalledTimes(1);
@@ -259,7 +267,7 @@ describe("Agent", () => {
       vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
 
       const agent = createAgent({ tools: [slowTool], model });
-      const result = await agent.run("Call slow", { signal: controller.signal });
+      const result = await agent.run([makeUserMessage("Call slow")], { signal: controller.signal });
 
       expect(toolRuns).toBe(1);
       expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
@@ -275,7 +283,7 @@ describe("Agent", () => {
 
       const events: import("../src/core/agent.js").AgentEvent[] = [];
       const agent = createAgent({ tools: [], model });
-      const result = await agent.run("Hi", {
+      const result = await agent.run([makeUserMessage("Hi")], {
         onEvent: (e) => events.push(e),
       });
 
@@ -294,7 +302,7 @@ describe("Agent", () => {
 
       const events: import("../src/core/agent.js").AgentEvent[] = [];
       const agent = createAgent({ tools: [], model });
-      await agent.run("Hi", { onEvent: (e) => events.push(e) });
+      await agent.run([makeUserMessage("Hi")], { onEvent: (e) => events.push(e) });
 
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBeGreaterThanOrEqual(2);
@@ -319,7 +327,7 @@ describe("Agent", () => {
       };
       const agent = createAgent({ tools: [echoTool], model });
 
-      const result = await agent.run("Bitte rufe echo auf");
+      const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
       expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!" });
       expect(stream).toHaveBeenCalledTimes(2);
@@ -348,7 +356,7 @@ describe("Agent", () => {
       });
 
       const agent = createAgent({ tools: [], model });
-      const result = await agent.run("Hi", {
+      const result = await agent.run([makeUserMessage("Hi")], {
         signal: controller.signal,
         onEvent: (e) => events.push(e),
       });
@@ -379,7 +387,7 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [echoTool], model });
 
       const events: import("../src/core/agent.js").AgentEvent[] = [];
-      await agent.run("Call echo", { onEvent: (e) => events.push(e) });
+      await agent.run([makeUserMessage("Call echo")], { onEvent: (e) => events.push(e) });
 
       expect(events).toContainEqual({ type: "tool_call_start", name: "echo", args: { text: "hi" } });
       expect(events).toContainEqual({ type: "tool_call_done", name: "echo", result: "hi" });
@@ -399,13 +407,128 @@ describe("Agent", () => {
 
       const agent = createAgent({ tools: [], model });
       const events: import("../src/core/agent.js").AgentEvent[] = [];
-      await agent.run("Call missing", { onEvent: (e) => events.push(e) });
+      await agent.run([makeUserMessage("Call missing")], { onEvent: (e) => events.push(e) });
 
       expect(events).toContainEqual({
         type: "tool_call_error",
         name: "missing",
         error: 'Tool "missing" nicht gefunden.',
       });
+    });
+  });
+
+  describe("Conversation History", () => {
+    it("preserves messages across multiple turns", async () => {
+      const history: Message[] = [];
+      const agent = createAgent({ tools: [], model });
+
+      const response1 = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(response1));
+
+      history.push(makeUserMessage("Hi"));
+      const result1 = await agent.run(history);
+
+      expect(result1.aborted).toBe(false);
+      expect(history.length).toBe(2);
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+
+      const response2 = makeAssistantMessage([{ type: "text", text: "Nice to meet you!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.messages.length).toBe(3);
+        expect(context.messages[0].role).toBe("user");
+        expect(context.messages[1].role).toBe("assistant");
+        expect(context.messages[2].role).toBe("user");
+        expect((context.messages[2] as any).content).toBe("What's your name?");
+        return mockStream(response2);
+      });
+
+      history.push(makeUserMessage("What's your name?"));
+      const result2 = await agent.run(history);
+
+      expect(result2.finalMessage).toBe("Nice to meet you!");
+      expect(history.length).toBe(4);
+      expect(history[3].role).toBe("assistant");
+    });
+
+    it("prepends system prompt to context but never stores it in the message array", async () => {
+      const history: Message[] = [];
+      const response = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe("You are a test agent");
+        expect(context.messages).toBe(history);
+        expect(context.messages.some((m: any) => m.role === "system")).toBe(false);
+        return mockStream(response);
+      });
+
+      const agent = createAgent({ tools: [], model, systemPrompt: "You are a test agent" });
+      history.push(makeUserMessage("Test"));
+      await agent.run(history);
+    });
+
+    it("removes dangling assistant message when aborted before tool execution", async () => {
+      const history: Message[] = [];
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      vi.mocked(stream).mockImplementationOnce(() => {
+        controller.abort();
+        return mockStream(mockToolCall);
+      });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() { return "done"; },
+      };
+
+      const agent = createAgent({ tools: [echoTool], model });
+      history.push(makeUserMessage("Call echo"));
+      const result = await agent.run(history, { signal: controller.signal });
+
+      expect(result.aborted).toBe(true);
+      expect(history.length).toBe(1);
+      expect(history[0].role).toBe("user");
+    });
+
+    it("keeps assistant + tool results in history when aborted after tool results", async () => {
+      const history: Message[] = [];
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      let toolExecuted = false;
+
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() {
+          toolExecuted = true;
+          controller.abort();
+          return "done";
+        },
+      };
+
+      const agent = createAgent({ tools: [echoTool], model });
+      history.push(makeUserMessage("Call echo"));
+      const result = await agent.run(history, { signal: controller.signal });
+
+      expect(result.aborted).toBe(true);
+      expect(toolExecuted).toBe(true);
+      expect(history.length).toBe(3); // user + assistant + toolResult
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect(history[2].role).toBe("toolResult");
     });
   });
 });

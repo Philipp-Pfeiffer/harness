@@ -4,6 +4,7 @@ import { createAgent } from "./core/agent.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "./tools/registry.js";
 import { createInterface } from "node:readline";
+import type { Message } from "@mariozechner/pi-ai";
 
 const tools = loadTools();
 const model = getModel("minimax", "MiniMax-M2.7");
@@ -31,6 +32,7 @@ function ask(question: string): Promise<string> {
   });
 }
 
+const history: Message[] = [];
 let isRunning = false;
 let abortController = new AbortController();
 
@@ -55,12 +57,13 @@ async function loop() {
 
     console.log("\n[Agent denkt...]\n");
 
+    history.push({ role: "user", content: input, timestamp: Date.now() });
     abortController = new AbortController();
     isRunning = true;
     let liveOutput = false;
 
     try {
-      const result = await agent.run(input, {
+      const result = await agent.run(history, {
         signal: abortController.signal,
         onEvent: (event) => {
           if (event.type === "token") {
@@ -73,12 +76,8 @@ async function loop() {
       });
 
       if (result.aborted) {
-        console.log(`\n[Abgebrochen: ${result.reason}]\n`);
-        rl.close();
-        break;
-      }
-
-      if (liveOutput) {
+        console.log("\n[abgebrochen]\n");
+      } else if (liveOutput) {
         console.log("\n");
       } else {
         console.log(`Cliffford: ${result.finalMessage}\n`);
