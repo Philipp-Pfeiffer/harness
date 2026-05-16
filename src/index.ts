@@ -24,31 +24,59 @@ const rl = createInterface({
   output: process.stdout,
 });
 
-function ask(question: string): Promise<string> {
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      resolve(answer.trim());
-    });
-  });
-}
-
 const history: Message[] = [];
 let isRunning = false;
 let abortController = new AbortController();
+let lastSigintTime = 0;
+let sigintHandledByRl = false;
+let currentResolve: ((value: string) => void) | null = null;
+let userAborted = false;
 
-process.on("SIGINT", () => {
+function handleSigint() {
+  const now = Date.now();
+  if (now - lastSigintTime < 500) {
+    process.exit(130);
+  }
+  lastSigintTime = now;
+
   if (isRunning) {
+    userAborted = true;
     abortController.abort();
   } else {
-    console.log("\nTschüss!");
-    rl.close();
-    process.exit(0);
+    console.log();
+    rl.prompt();
+  }
+}
+
+rl.on("SIGINT", () => {
+  sigintHandledByRl = true;
+  handleSigint();
+  setTimeout(() => {
+    sigintHandledByRl = false;
+  }, 10);
+});
+
+process.on("SIGINT", () => {
+  if (!sigintHandledByRl) {
+    handleSigint();
+  }
+});
+
+rl.on("line", (line) => {
+  if (currentResolve) {
+    currentResolve(line.trim());
+    currentResolve = null;
   }
 });
 
 async function loop() {
+  rl.setPrompt("Du: ");
   while (true) {
-    const input = await ask("Du: ");
+    rl.prompt();
+    const input = await new Promise<string>((resolve) => {
+      currentResolve = resolve;
+    });
+
     if (!input || input.toLowerCase() === "exit") {
       console.log("Tschüss!");
       rl.close();
@@ -75,7 +103,7 @@ async function loop() {
         },
       });
 
-      if (result.aborted) {
+      if (result.aborted || userAborted) {
         console.log("\n[abgebrochen]\n");
       } else if (liveOutput) {
         console.log("\n");
@@ -84,9 +112,10 @@ async function loop() {
       }
     } catch (err) {
       console.error(`[Fehler]: ${err instanceof Error ? err.message : err}\n`);
+    } finally {
+      userAborted = false;
+      isRunning = false;
     }
-
-    isRunning = false;
   }
 }
 
