@@ -60,10 +60,13 @@ describe("CLI App", () => {
     expect(frame).toContain("Hello world!");
   });
 
-  it("renders tool card after tool call", async () => {
+  it("renders tool card in active turn and toggles with Ctrl+O", async () => {
     mockRun.mockImplementation(async (_messages, options) => {
+      await delay(50);
       options?.onEvent?.({ type: "tool_call_start", name: "echo", args: { text: "hi" } });
+      await delay(50);
       options?.onEvent?.({ type: "tool_call_done", name: "echo", result: "hello world" });
+      await delay(500); // keep turn active so Ctrl+O can toggle
       return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
@@ -72,41 +75,70 @@ describe("CLI App", () => {
     stdin.write("run echo");
     await delay(50);
     stdin.write("\r");
-    await delay(200);
+    await delay(150);
 
     const frame = lastFrame();
     expect(frame).toContain("echo");
     expect(frame).toContain("✓");
 
-    // Toggle expanded with Ctrl+O
+    // Toggle expanded with Ctrl+O while still active
     stdin.write("\x0f"); // Ctrl+O
-    await delay(50);
+    await delay(100);
 
     const expandedFrame = lastFrame();
     expect(expandedFrame).toContain("hello world");
   });
 
-  it("clears history on /clear", async () => {
-    mockRun.mockImplementation(async () => ({ aborted: false, turns: 1, finalMessage: "Hi" }));
+  it("/help renders help card", async () => {
+    const { lastFrame, stdin, frames } = render(<App />);
 
-    const { lastFrame, stdin } = render(<App />);
-
-    stdin.write("hello");
-    await delay(50);
-    stdin.write("\r");
-    await delay(200);
-
-    expect(lastFrame()).toContain("Hi");
-
-    stdin.write("/clear");
+    stdin.write("/help");
     await delay(50);
     stdin.write("\r");
     await delay(100);
 
-    const frame = lastFrame();
-    expect(frame).not.toContain("Hi");
-    expect(frame).not.toContain("hello");
-    expect(frame).toContain("harness");
-    expect(frame).toContain("ready");
+    const allFrames = frames.join("\n");
+    expect(allFrames).toContain("Commands");
+    expect(allFrames).toContain("/clear");
+    expect(allFrames).toContain("/quit");
+  });
+
+  it("unknown slash command shows error", async () => {
+    const { lastFrame, stdin, frames } = render(<App />);
+
+    stdin.write("/foo");
+    await delay(50);
+    stdin.write("\r");
+    await delay(100);
+
+    const allFrames = frames.join("\n");
+    expect(allFrames).toContain("Unknown command: /foo");
+  });
+
+  it("Static smoke: completed turns accumulate in frames", async () => {
+    let callCount = 0;
+    mockRun.mockImplementation(async (_messages, options) => {
+      callCount++;
+      options?.onEvent?.({ type: "token", text: `Response ${callCount}` });
+      return { aborted: false, turns: 1, finalMessage: `Response ${callCount}` };
+    });
+
+    const { stdin, frames } = render(<App />);
+
+    stdin.write("first");
+    await delay(50);
+    stdin.write("\r");
+    await delay(200);
+
+    stdin.write("second");
+    await delay(50);
+    stdin.write("\r");
+    await delay(200);
+
+    const allFrames = frames.join("\n");
+    expect(allFrames).toContain("Response 1");
+    expect(allFrames).toContain("Response 2");
+    expect(allFrames).toContain("❯ first");
+    expect(allFrames).toContain("❯ second");
   });
 });

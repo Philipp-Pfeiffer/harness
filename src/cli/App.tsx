@@ -1,61 +1,96 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp } from "ink";
+import { Box, Text, useInput, useApp, Static } from "ink";
 import chalk from "chalk";
+import { marked } from "marked";
+import { markedTerminal } from "marked-terminal";
 import { createAgent } from "../core/agent.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 
-type UiItem =
-  | { type: "user"; text: string }
-  | { type: "assistant"; text: string }
-  | { type: "tool"; name: string; status: "pending" | "done" | "error"; preview: string; expanded?: boolean }
-  | { type: "abort" }
-  | { type: "error"; message: string }
-  | { type: "help" };
+/* ─── marked config ─── */
 
-type MarkdownPart = { type: "text" | "bold" | "italic" | "code"; text: string };
+marked.use(
+  (markedTerminal({
+    heading: chalk.cyan.bold,
+    firstHeading: chalk.cyan.bold,
+    strong: chalk.bold,
+    em: chalk.italic,
+    codespan: chalk.dim,
+    code: chalk.dim,
+    blockquote: chalk.gray.italic,
+    listitem: chalk.reset,
+    hr: chalk.gray,
+    table: chalk.reset,
+    link: chalk.blue,
+    href: chalk.blue.underline,
+    width: process.stdout.columns || 80,
+  }) as any)
+);
+
+/* ─── Types ─── */
+
+type ToolItem = {
+  id: string;
+  name: string;
+  status: "pending" | "done" | "error";
+  preview: string;
+  expanded?: boolean;
+};
+
+type CompletedTurn = {
+  id: string;
+  userText: string;
+  assistantText: string;
+  assistantRendered: boolean;
+  tools: ToolItem[];
+  aborted: boolean;
+  error?: string;
+  help?: boolean;
+};
+
+type ActiveTurn = {
+  userText: string;
+  assistantText: string;
+  tools: ToolItem[];
+  status: "streaming" | "thinking" | "tool" | "aborted" | "error" | "complete";
+};
+
+/* ─── Helpers ─── */
 
 function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max) + "..." : str;
 }
 
-function parseMarkdown(text: string): MarkdownPart[] {
-  const parts: MarkdownPart[] = [];
-  const regex = /(\*\*([^*]+)\*\*)|(\*([^*]+)\*)|(`([^`]+)`)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ type: "text", text: text.slice(lastIndex, match.index) });
+function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
+  for (let i = tools.length - 1; i >= 0; i--) {
+    if (tools[i].name === name && tools[i].status === "pending") {
+      return i;
     }
-    if (match[1]) {
-      parts.push({ type: "bold", text: match[2] });
-    } else if (match[3]) {
-      parts.push({ type: "italic", text: match[4] });
-    } else if (match[5]) {
-      parts.push({ type: "code", text: match[6] });
-    }
-    lastIndex = regex.lastIndex;
   }
+  return -1;
+}
 
-  if (lastIndex < text.length) {
-    parts.push({ type: "text", text: text.slice(lastIndex) });
-  }
-
-  return parts;
+function useForceUpdate() {
+  const [, setState] = useState(0);
+  return useCallback(() => setState((s) => s + 1), []);
 }
 
 /* ─── Sub-components ─── */
 
 function Header({ modelId, status }: { modelId: string; status: string }) {
   const statusColor =
-    status === "ready" ? "green" : status === "thinking" ? "yellow" : status === "aborted" ? "gray" : "cyan";
+    status === "ready"
+      ? "green"
+      : status === "thinking"
+        ? "yellow"
+        : status === "aborted"
+          ? "gray"
+          : "cyan";
 
   return (
-    <Box marginBottom={1}>
+    <Box marginBottom={1} width={process.stdout.columns || 80}>
       <Text bold color="cyan">
         harness
       </Text>
@@ -67,44 +102,11 @@ function Header({ modelId, status }: { modelId: string; status: string }) {
   );
 }
 
-function AssistantText({ text }: { text: string }) {
-  const parts = parseMarkdown(text);
-  if (parts.length === 0) return <Text />;
-
-  return (
-    <Box flexDirection="row" flexWrap="wrap">
-      {parts.map((part, i) => {
-        switch (part.type) {
-          case "bold":
-            return (
-              <Text key={i} bold>
-                {part.text}
-              </Text>
-            );
-          case "italic":
-            return (
-              <Text key={i} italic>
-                {part.text}
-              </Text>
-            );
-          case "code":
-            return (
-              <Text key={i} backgroundColor="gray" color="white">
-                {" "}{part.text}{" "}
-              </Text>
-            );
-          default:
-            return <Text key={i}>{part.text}</Text>;
-        }
-      })}
-    </Box>
-  );
-}
-
-function ToolCard({ item, isLast }: { item: Extract<UiItem, { type: "tool" }>; isLast: boolean }) {
+function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) {
   const symbol = item.status === "pending" ? "▸" : item.status === "done" ? "✓" : "✗";
   const borderFn = item.status === "error" ? chalk.red : item.status === "done" ? chalk.green : chalk.gray;
   const iconColor = item.status === "error" ? "red" : item.status === "done" ? "green" : "yellow";
+  const width = Math.max(20, (process.stdout.columns || 80) - 4);
 
   const titleLine = `${borderFn("┌─")} ${symbol} ${item.name}${isLast ? borderFn(" ── Ctrl+O ─") : ""} ${borderFn("┐")}`;
 
@@ -116,7 +118,7 @@ function ToolCard({ item, isLast }: { item: Extract<UiItem, { type: "tool" }>; i
           <Text>
             {borderFn("│")} {item.preview}
           </Text>
-          <Text>{borderFn("└───────────────────────────┘")}</Text>
+          <Text>{borderFn("└" + "─".repeat(width) + "┘")}</Text>
         </>
       )}
     </Box>
@@ -138,14 +140,70 @@ function HelpCard() {
   );
 }
 
+function TurnView({ turn }: { turn: CompletedTurn }) {
+  return (
+    <Box flexDirection="column">
+      <Text color="cyan">❯ {turn.userText}</Text>
+      {turn.tools.map((tool) => (
+        <ToolCard key={tool.id} item={tool} isLast={false} />
+      ))}
+      {turn.error && (
+        <Text color="red">
+          [Fehler]: {turn.error}
+        </Text>
+      )}
+      {turn.aborted && (
+        <Text italic color="gray">
+          [abgebrochen]
+        </Text>
+      )}
+      {turn.help && <HelpCard />}
+      {turn.assistantText && (
+        <Text>{turn.assistantRendered ? (marked.parse(turn.assistantText) as string) : turn.assistantText}</Text>
+      )}
+    </Box>
+  );
+}
+
+function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
+  return (
+    <Box flexDirection="column">
+      <Text color="cyan">❯ {turn.userText}</Text>
+      {turn.tools.map((tool, i) => (
+        <ToolCard key={tool.id} item={tool} isLast={i === turn.tools.length - 1} />
+      ))}
+      {turn.status === "aborted" && (
+        <Text italic color="gray">
+          [abgebrochen]
+        </Text>
+      )}
+      {turn.status === "error" && (
+        <Text color="red">
+          [Fehler]
+        </Text>
+      )}
+      {turn.assistantText && <Text>{turn.assistantText}</Text>}
+    </Box>
+  );
+}
+
 function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; history: string[] }) {
-  const [value, setValue] = useState("");
-  const [cursorOffset, setCursorOffset] = useState(0);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-  const [blink, setBlink] = useState(true);
+  const [, setRenderTick] = useState(0);
+  const valueRef = useRef("");
+  const cursorOffsetRef = useRef(0);
+  const historyIndexRef = useRef(-1);
+  const blinkRef = useRef(true);
+  const historyRef = useRef(history);
 
   useEffect(() => {
-    const id = setInterval(() => setBlink((b) => !b), 530);
+    historyRef.current = history;
+  }, [history]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      blinkRef.current = !blinkRef.current;
+      setRenderTick((t) => t + 1);
+    }, 530);
     return () => clearInterval(id);
   }, []);
 
@@ -154,74 +212,66 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
       return;
     }
 
+    let changed = false;
+    const currentValue = valueRef.current;
+
     if (key.return && key.shift) {
-      const before = value.slice(0, cursorOffset);
-      const after = value.slice(cursorOffset);
-      setValue(before + "\n" + after);
-      setCursorOffset(cursorOffset + 1);
-      return;
-    }
-
-    if (key.return) {
-      onSubmit(value);
-      setValue("");
-      setCursorOffset(0);
-      setHistoryIndex(-1);
-      return;
-    }
-
-    if (key.upArrow) {
-      const newIndex = Math.min(historyIndex + 1, history.length - 1);
-      if (newIndex >= 0 && newIndex !== historyIndex) {
-        setHistoryIndex(newIndex);
-        const newValue = history[history.length - 1 - newIndex];
-        setValue(newValue);
-        setCursorOffset(newValue.length);
+      const before = currentValue.slice(0, cursorOffsetRef.current);
+      const after = currentValue.slice(cursorOffsetRef.current);
+      valueRef.current = before + "\n" + after;
+      cursorOffsetRef.current++;
+      changed = true;
+    } else if (key.return) {
+      onSubmit(currentValue);
+      valueRef.current = "";
+      cursorOffsetRef.current = 0;
+      historyIndexRef.current = -1;
+      changed = true;
+    } else if (key.upArrow) {
+      const newIndex = Math.min(historyIndexRef.current + 1, historyRef.current.length - 1);
+      if (newIndex >= 0 && newIndex !== historyIndexRef.current) {
+        historyIndexRef.current = newIndex;
+        valueRef.current = historyRef.current[historyRef.current.length - 1 - newIndex];
+        cursorOffsetRef.current = valueRef.current.length;
+        changed = true;
       }
-      return;
-    }
-
-    if (key.downArrow) {
-      const newIndex = Math.max(historyIndex - 1, -1);
-      setHistoryIndex(newIndex);
-      const newValue = newIndex === -1 ? "" : history[history.length - 1 - newIndex];
-      setValue(newValue);
-      setCursorOffset(newValue.length);
-      return;
-    }
-
-    if (key.leftArrow) {
-      setCursorOffset(Math.max(0, cursorOffset - 1));
-      return;
-    }
-
-    if (key.rightArrow) {
-      setCursorOffset(Math.min(value.length, cursorOffset + 1));
-      return;
-    }
-
-    if (key.backspace || key.delete) {
-      if (cursorOffset > 0) {
-        const before = value.slice(0, cursorOffset - 1);
-        const after = value.slice(cursorOffset);
-        setValue(before + after);
-        setCursorOffset(cursorOffset - 1);
+    } else if (key.downArrow) {
+      const newIndex = Math.max(historyIndexRef.current - 1, -1);
+      historyIndexRef.current = newIndex;
+      valueRef.current = newIndex === -1 ? "" : historyRef.current[historyRef.current.length - 1 - newIndex];
+      cursorOffsetRef.current = valueRef.current.length;
+      changed = true;
+    } else if (key.leftArrow) {
+      cursorOffsetRef.current = Math.max(0, cursorOffsetRef.current - 1);
+      changed = true;
+    } else if (key.rightArrow) {
+      cursorOffsetRef.current = Math.min(currentValue.length, cursorOffsetRef.current + 1);
+      changed = true;
+    } else if (key.backspace || key.delete) {
+      if (cursorOffsetRef.current > 0) {
+        const before = currentValue.slice(0, cursorOffsetRef.current - 1);
+        const after = currentValue.slice(cursorOffsetRef.current);
+        valueRef.current = before + after;
+        cursorOffsetRef.current--;
+        changed = true;
       }
-      return;
+    } else if (inputStr && !key.ctrl && !key.meta) {
+      const before = currentValue.slice(0, cursorOffsetRef.current);
+      const after = currentValue.slice(cursorOffsetRef.current);
+      valueRef.current = before + inputStr + after;
+      cursorOffsetRef.current += inputStr.length;
+      changed = true;
     }
 
-    if (inputStr && !key.ctrl && !key.meta) {
-      const before = value.slice(0, cursorOffset);
-      const after = value.slice(cursorOffset);
-      setValue(before + inputStr + after);
-      setCursorOffset(cursorOffset + inputStr.length);
+    if (changed) {
+      setRenderTick((t) => t + 1);
     }
   });
 
-  const lines = value.split("\n");
-  const cursorLineIndex = value.slice(0, cursorOffset).split("\n").length - 1;
-  const lineStartOffset = value.slice(0, cursorOffset).lastIndexOf("\n") + 1;
-  const cursorCol = cursorOffset - lineStartOffset;
+  const lines = valueRef.current.split("\n");
+  const cursorLineIndex = valueRef.current.slice(0, cursorOffsetRef.current).split("\n").length - 1;
+  const lineStartOffset = valueRef.current.slice(0, cursorOffsetRef.current).lastIndexOf("\n") + 1;
+  const cursorCol = cursorOffsetRef.current - lineStartOffset;
 
   return (
     <Box flexDirection="column">
@@ -232,7 +282,7 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
           const before = line.slice(0, cursorCol);
           const char = line[cursorCol] || " ";
           const after = line.slice(cursorCol + 1);
-          displayLine = before + (blink ? chalk.inverse(char) : char) + after;
+          displayLine = before + (blinkRef.current ? chalk.inverse(char) : char) + after;
         }
         return (
           <Box key={i} flexDirection="row">
@@ -249,32 +299,26 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
 
 export default function App() {
   const { exit } = useApp();
-  const [items, setItems] = useState<UiItem[]>([]);
-  const [status, setStatus] = useState<string>("ready");
-  const [isRunning, setIsRunning] = useState(false);
+  const [pastTurns, setPastTurns] = useState<CompletedTurn[]>([]);
+  const activeTurnRef = useRef<ActiveTurn | null>(null);
+  const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
 
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const userAbortedRef = useRef(false);
   const lastSigintRef = useRef(0);
+  const isRunningRef = useRef(false);
 
   const tools = useMemo(() => loadTools(), []);
   const model = useMemo(() => getModel("minimax", "MiniMax-M2.7"), []);
   const agent = useMemo(() => createAgent({ tools, model }), [tools, model]);
 
-  const findLastPendingToolIndex = useCallback(
-    (items: UiItem[], name: string): number => {
-      for (let i = items.length - 1; i >= 0; i--) {
-        const item = items[i];
-        if (item.type === "tool" && item.name === name && item.status === "pending") {
-          return i;
-        }
-      }
-      return -1;
-    },
-    []
-  );
+  const status = activeTurnRef.current
+    ? activeTurnRef.current.status === "tool"
+      ? `tool: ${activeTurnRef.current.tools[activeTurnRef.current.tools.length - 1]?.name || ""}`
+      : activeTurnRef.current.status
+    : "ready";
 
   const handleSubmit = useCallback(
     (value: string) => {
@@ -282,9 +326,8 @@ export default function App() {
       if (!trimmed) return;
 
       if (trimmed === "/clear") {
-        setItems([]);
+        setPastTurns([]);
         historyRef.current = [];
-        setStatus("ready");
         return;
       }
       if (trimmed === "/quit") {
@@ -292,176 +335,192 @@ export default function App() {
         return;
       }
       if (trimmed === "/help") {
-        setItems((prev) => [...prev, { type: "help" }]);
+        const helpTurn: CompletedTurn = {
+          id: String(Date.now()),
+          userText: trimmed,
+          assistantText: "",
+          assistantRendered: false,
+          tools: [],
+          aborted: false,
+          help: true,
+        };
+        setPastTurns((prev) => [...prev, helpTurn]);
         return;
       }
       if (trimmed.startsWith("/")) {
-        setItems((prev) => [...prev, { type: "error", message: `Unbekannter Befehl: ${trimmed}` }]);
+        const errorTurn: CompletedTurn = {
+          id: String(Date.now()),
+          userText: trimmed,
+          assistantText: "",
+          assistantRendered: false,
+          tools: [],
+          aborted: false,
+          error: `Unknown command: ${trimmed}. Try /help.`,
+        };
+        setPastTurns((prev) => [...prev, errorTurn]);
         return;
       }
 
-      setItems((prev) => [...prev, { type: "user", text: trimmed }]);
       setInputHistory((prev) => [...prev, trimmed]);
-      setIsRunning(true);
-      setStatus("thinking");
-
       historyRef.current.push({ role: "user", content: trimmed, timestamp: Date.now() });
+
+      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], status: "thinking" };
+      isRunningRef.current = true;
+      forceUpdate();
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
       userAbortedRef.current = false;
-
-      let liveOutput = false;
 
       agent
         .run(historyRef.current, {
           signal: controller.signal,
           onEvent: (event: AgentEvent) => {
             if (event.type === "token") {
-              liveOutput = true;
-              setStatus("thinking");
-              setItems((prev) => {
-                const last = prev[prev.length - 1];
-                if (last?.type === "assistant") {
-                  return [...prev.slice(0, -1), { ...last, text: last.text + event.text }];
-                }
-                return [...prev, { type: "assistant", text: event.text }];
-              });
+              if (activeTurnRef.current) {
+                activeTurnRef.current = {
+                  ...activeTurnRef.current,
+                  assistantText: activeTurnRef.current.assistantText + event.text,
+                  status: "streaming",
+                };
+                forceUpdate();
+              }
             } else if (event.type === "tool_call_start") {
-              setStatus(`tool: ${event.name}`);
-              setItems((prev) => [
-                ...prev,
-                { type: "tool", name: event.name, status: "pending", preview: "" },
-              ]);
+              if (activeTurnRef.current) {
+                activeTurnRef.current = {
+                  ...activeTurnRef.current,
+                  tools: [
+                    ...activeTurnRef.current.tools,
+                    { id: String(Date.now()), name: event.name, status: "pending", preview: "" },
+                  ],
+                  status: "tool",
+                };
+                forceUpdate();
+              }
             } else if (event.type === "tool_call_done") {
-              setStatus("ready");
-              setItems((prev) => {
-                const idx = findLastPendingToolIndex(prev, event.name);
-                if (idx === -1) return prev;
-                const next = [...prev];
-                const item = next[idx];
-                if (item.type === "tool") {
-                  next[idx] = { ...item, status: "done", preview: truncate(event.result, 80) };
+              if (activeTurnRef.current) {
+                const idx = findLastPendingToolIndex(activeTurnRef.current.tools, event.name);
+                if (idx !== -1) {
+                  const newTools = [...activeTurnRef.current.tools];
+                  newTools[idx] = {
+                    ...newTools[idx],
+                    status: "done",
+                    preview: truncate(event.result, 80),
+                  };
+                  activeTurnRef.current = { ...activeTurnRef.current, tools: newTools, status: "complete" };
                 }
-                return next;
-              });
+                forceUpdate();
+              }
             } else if (event.type === "tool_call_error") {
-              setStatus("ready");
-              setItems((prev) => {
-                const idx = findLastPendingToolIndex(prev, event.name);
-                if (idx === -1) return prev;
-                const next = [...prev];
-                const item = next[idx];
-                if (item.type === "tool") {
-                  next[idx] = { ...item, status: "error", preview: truncate(event.error, 80), expanded: true };
+              if (activeTurnRef.current) {
+                const idx = findLastPendingToolIndex(activeTurnRef.current.tools, event.name);
+                if (idx !== -1) {
+                  const newTools = [...activeTurnRef.current.tools];
+                  newTools[idx] = {
+                    ...newTools[idx],
+                    status: "error",
+                    preview: truncate(event.error, 80),
+                    expanded: true,
+                  };
+                  activeTurnRef.current = { ...activeTurnRef.current, tools: newTools, status: "error" };
                 }
-                return next;
-              });
+                forceUpdate();
+              }
             } else if (event.type === "turn_end") {
-              setStatus("ready");
+              if (activeTurnRef.current) {
+                activeTurnRef.current = { ...activeTurnRef.current, status: "complete" };
+                forceUpdate();
+              }
             }
           },
         })
         .then((result: RunResult) => {
-          if (result.aborted || userAbortedRef.current) {
-            setItems((prev) => [...prev, { type: "abort" }]);
-            setStatus("aborted");
-          } else if (!liveOutput) {
-            setItems((prev) => [...prev, { type: "assistant", text: result.finalMessage }]);
+          if (activeTurnRef.current) {
+            const turn = activeTurnRef.current;
+            const completedTurn: CompletedTurn = {
+              id: String(Date.now()),
+              userText: turn.userText,
+              assistantText: turn.assistantText || (!result.aborted ? result.finalMessage : ""),
+              assistantRendered: !result.aborted && !userAbortedRef.current && turn.status !== "error",
+              tools: turn.tools,
+              aborted: result.aborted || userAbortedRef.current,
+              error: turn.status === "error" ? turn.tools.find((t) => t.status === "error")?.preview : undefined,
+            };
+            setPastTurns((prev) => [...prev, completedTurn]);
+            activeTurnRef.current = null;
+            isRunningRef.current = false;
+            forceUpdate();
           }
-          setIsRunning(false);
           abortControllerRef.current = null;
           userAbortedRef.current = false;
         })
         .catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          setItems((prev) => [...prev, { type: "error", message }]);
-          setIsRunning(false);
-          setStatus("ready");
+          if (activeTurnRef.current) {
+            const turn = activeTurnRef.current;
+            const completedTurn: CompletedTurn = {
+              id: String(Date.now()),
+              userText: turn.userText,
+              assistantText: turn.assistantText,
+              assistantRendered: false,
+              tools: turn.tools,
+              aborted: false,
+              error: err instanceof Error ? err.message : String(err),
+            };
+            setPastTurns((prev) => [...prev, completedTurn]);
+            activeTurnRef.current = null;
+            isRunningRef.current = false;
+            forceUpdate();
+          }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
         });
     },
-    [agent, exit, findLastPendingToolIndex]
+    [agent, exit, forceUpdate]
   );
 
   useInput((inputStr, key) => {
     if (key.ctrl && inputStr === "c") {
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
-        if (!isRunning) {
+        if (!isRunningRef.current) {
           process.exit(130);
         }
       }
       lastSigintRef.current = now;
 
-      if (isRunning && abortControllerRef.current) {
+      if (isRunningRef.current && abortControllerRef.current) {
         userAbortedRef.current = true;
         abortControllerRef.current.abort();
       }
-      // idle: no-op
       return;
     }
 
     if (key.ctrl && inputStr === "l") {
-      setItems([]);
+      setPastTurns([]);
       return;
     }
 
     if (key.ctrl && inputStr === "o") {
-      setItems((prev) => {
-        let lastToolIndex = -1;
-        for (let i = prev.length - 1; i >= 0; i--) {
-          if (prev[i].type === "tool") {
-            lastToolIndex = i;
-            break;
-          }
+      if (activeTurnRef.current) {
+        const tools = activeTurnRef.current.tools;
+        const lastToolIndex = tools.length - 1;
+        if (lastToolIndex >= 0) {
+          const newTools = [...tools];
+          newTools[lastToolIndex] = { ...newTools[lastToolIndex], expanded: !newTools[lastToolIndex].expanded };
+          activeTurnRef.current = { ...activeTurnRef.current, tools: newTools };
+          forceUpdate();
         }
-        if (lastToolIndex === -1) return prev;
-        const next = [...prev];
-        const item = next[lastToolIndex];
-        if (item.type === "tool") {
-          next[lastToolIndex] = { ...item, expanded: !item.expanded };
-        }
-        return next;
-      });
+      }
       return;
     }
   });
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={process.stdout.columns || 80}>
       <Header modelId={model.id} status={status} />
-      {items.map((item, index) => {
-        const isLast = index === items.length - 1;
-        switch (item.type) {
-          case "user":
-            return (
-              <Text key={index} color="cyan">
-                ❯ {item.text}
-              </Text>
-            );
-          case "assistant":
-            return <AssistantText key={index} text={item.text} />;
-          case "tool":
-            return <ToolCard key={index} item={item} isLast={isLast} />;
-          case "abort":
-            return (
-              <Text key={index} italic color="gray">
-                [abgebrochen]
-              </Text>
-            );
-          case "error":
-            return (
-              <Text key={index} color="red">
-                [Fehler]: {item.message}
-              </Text>
-            );
-          case "help":
-            return <HelpCard key={index} />;
-        }
-      })}
-      {!isRunning && <PromptInput onSubmit={handleSubmit} history={inputHistory} />}
+      <Static items={pastTurns}>{(turn) => <TurnView key={turn.id} turn={turn} />}</Static>
+      {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
+      {!isRunningRef.current && <PromptInput onSubmit={handleSubmit} history={inputHistory} />}
     </Box>
   );
 }
