@@ -3,6 +3,7 @@ import { Box, Text, useInput, useApp, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
+import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
@@ -36,6 +37,7 @@ type ToolItem = {
   name: string;
   status: "pending" | "done" | "error";
   preview: string;
+  result?: string;
   expanded?: boolean;
 };
 
@@ -108,19 +110,21 @@ function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) {
   const iconColor = item.status === "error" ? "red" : item.status === "done" ? "green" : "yellow";
   const width = Math.max(20, (process.stdout.columns || 80) - 4);
 
-  const titleLine = `${borderFn("┌─")} ${symbol} ${item.name}${isLast ? borderFn(" ── Ctrl+O ─") : ""} ${borderFn("┐")}`;
+  const titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
+  const titleLine = `${borderFn("┌─")} ${titleContent} ${borderFn("─".repeat(Math.max(0, width - titleContent.length - 5)) + "┐")}`;
+  const bottomLine = borderFn("└" + "─".repeat(width) + "┘");
+
+  const body = item.expanded && item.result
+    ? item.result.split("\n").map((line) => `${borderFn("│")} ${line}`).join("\n")
+    : item.expanded && item.preview
+      ? `${borderFn("│")} ${item.preview}`
+      : null;
 
   return (
     <Box flexDirection="column" marginY={1}>
       <Text color={iconColor}>{titleLine}</Text>
-      {item.expanded && (
-        <>
-          <Text>
-            {borderFn("│")} {item.preview}
-          </Text>
-          <Text>{borderFn("└" + "─".repeat(width) + "┘")}</Text>
-        </>
-      )}
+      {body && <Text>{body}</Text>}
+      <Text>{bottomLine}</Text>
     </Box>
   );
 }
@@ -159,7 +163,9 @@ function TurnView({ turn }: { turn: CompletedTurn }) {
       )}
       {turn.help && <HelpCard />}
       {turn.assistantText && (
-        <Text>{turn.assistantRendered ? (marked.parse(turn.assistantText) as string) : turn.assistantText}</Text>
+        <Box marginTop={1}>
+          <Text>{turn.assistantRendered ? (marked.parse(turn.assistantText) as string) : turn.assistantText}</Text>
+        </Box>
       )}
     </Box>
   );
@@ -182,7 +188,11 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
           [Fehler]
         </Text>
       )}
-      {turn.assistantText && <Text>{turn.assistantText}</Text>}
+      {turn.assistantText && (
+        <Box marginTop={1}>
+          <Text>{turn.assistantText}</Text>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -332,11 +342,12 @@ export default function App() {
       }
       if (trimmed === "/quit") {
         exit();
+        process.exit(0);
         return;
       }
       if (trimmed === "/help") {
         const helpTurn: CompletedTurn = {
-          id: String(Date.now()),
+          id: randomUUID(),
           userText: trimmed,
           assistantText: "",
           assistantRendered: false,
@@ -349,7 +360,7 @@ export default function App() {
       }
       if (trimmed.startsWith("/")) {
         const errorTurn: CompletedTurn = {
-          id: String(Date.now()),
+          id: randomUUID(),
           userText: trimmed,
           assistantText: "",
           assistantRendered: false,
@@ -376,6 +387,8 @@ export default function App() {
         .run(historyRef.current, {
           signal: controller.signal,
           onEvent: (event: AgentEvent) => {
+            if (userAbortedRef.current) return;
+
             if (event.type === "token") {
               if (activeTurnRef.current) {
                 activeTurnRef.current = {
@@ -391,7 +404,7 @@ export default function App() {
                   ...activeTurnRef.current,
                   tools: [
                     ...activeTurnRef.current.tools,
-                    { id: String(Date.now()), name: event.name, status: "pending", preview: "" },
+                    { id: randomUUID(), name: event.name, status: "pending", preview: "" },
                   ],
                   status: "tool",
                 };
@@ -406,6 +419,7 @@ export default function App() {
                     ...newTools[idx],
                     status: "done",
                     preview: truncate(event.result, 80),
+                    result: event.result,
                   };
                   activeTurnRef.current = { ...activeTurnRef.current, tools: newTools, status: "complete" };
                 }
@@ -420,6 +434,7 @@ export default function App() {
                     ...newTools[idx],
                     status: "error",
                     preview: truncate(event.error, 80),
+                    result: event.error,
                     expanded: true,
                   };
                   activeTurnRef.current = { ...activeTurnRef.current, tools: newTools, status: "error" };
@@ -438,7 +453,7 @@ export default function App() {
           if (activeTurnRef.current) {
             const turn = activeTurnRef.current;
             const completedTurn: CompletedTurn = {
-              id: String(Date.now()),
+              id: randomUUID(),
               userText: turn.userText,
               assistantText: turn.assistantText || (!result.aborted ? result.finalMessage : ""),
               assistantRendered: !result.aborted && !userAbortedRef.current && turn.status !== "error",
@@ -458,7 +473,7 @@ export default function App() {
           if (activeTurnRef.current) {
             const turn = activeTurnRef.current;
             const completedTurn: CompletedTurn = {
-              id: String(Date.now()),
+              id: randomUUID(),
               userText: turn.userText,
               assistantText: turn.assistantText,
               assistantRendered: false,
@@ -491,6 +506,10 @@ export default function App() {
       if (isRunningRef.current && abortControllerRef.current) {
         userAbortedRef.current = true;
         abortControllerRef.current.abort();
+        if (activeTurnRef.current) {
+          activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
+          forceUpdate();
+        }
       }
       return;
     }
