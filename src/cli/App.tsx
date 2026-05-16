@@ -67,6 +67,11 @@ function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max) + "..." : str;
 }
 
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
 function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
   for (let i = tools.length - 1; i >= 0; i--) {
     if (tools[i].name === name && tools[i].status === "pending") {
@@ -83,7 +88,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function Header({ modelId, status }: { modelId: string; status: string }) {
+function Header({ modelId, status, usage, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; contextWindow?: number }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -92,6 +97,17 @@ function Header({ modelId, status }: { modelId: string; status: string }) {
         : status === "aborted"
           ? "gray"
           : "cyan";
+
+  const used = usage?.totalTokens ?? 0;
+  const usedStr = formatTokens(used);
+  const maxStr = contextWindow ? formatTokens(contextWindow) : "?";
+
+  let counterColor: string | undefined;
+  if (contextWindow) {
+    const ratio = used / contextWindow;
+    if (ratio > 0.95) counterColor = "red";
+    else if (ratio > 0.8) counterColor = "yellow";
+  }
 
   return (
     <Box marginBottom={1} width={process.stdout.columns || 80}>
@@ -102,6 +118,12 @@ function Header({ modelId, status }: { modelId: string; status: string }) {
       <Text dimColor>{modelId}</Text>
       <Text dimColor> · </Text>
       <Text color={statusColor}>{status}</Text>
+      {usage !== undefined && (
+        <>
+          <Text dimColor> · </Text>
+          <Text color={counterColor}>{usedStr} / {maxStr}</Text>
+        </>
+      )}
     </Box>
   );
 }
@@ -558,6 +580,7 @@ export default function App() {
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
+  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined>(undefined);
 
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -695,6 +718,8 @@ export default function App() {
                 activeTurnRef.current = { ...activeTurnRef.current, status: "complete" };
                 forceUpdate();
               }
+            } else if (event.type === "usage") {
+              setSessionUsage({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.totalTokens });
             }
           },
         })
@@ -715,6 +740,9 @@ export default function App() {
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
+          }
+          if (result.usage) {
+            setSessionUsage(result.usage);
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
@@ -806,7 +834,7 @@ export default function App() {
 
   return (
     <Box flexDirection="column" width={process.stdout.columns || 80}>
-      <Header modelId={model.id} status={status} />
+      <Header modelId={model.id} status={status} usage={sessionUsage} contextWindow={model.contextWindow} />
       {pastTurns.map((turn) => (
         <TurnView key={turn.id} turn={turn} />
       ))}
