@@ -4,13 +4,15 @@ import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { getModel } from "@mariozechner/pi-ai";
 import { loadTools } from "../tools/registry.js";
-import type { Message } from "@mariozechner/pi-ai";
+import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
+import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 
 /* ─── marked config ─── */
 
@@ -69,6 +71,11 @@ function truncate(str: string, max: number): string {
   return str.length > max ? str.slice(0, max) + "..." : str;
 }
 
+function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
 function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
   for (let i = tools.length - 1; i >= 0; i--) {
     if (tools[i].name === name && tools[i].status === "pending") {
@@ -85,7 +92,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function StatusBar({ modelId, status }: { modelId: string; status: string }) {
+function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; contextWindow?: number }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -96,6 +103,16 @@ function StatusBar({ modelId, status }: { modelId: string; status: string }) {
           : "cyan";
 
   const cwd = process.cwd();
+  const used = usage?.totalTokens ?? 0;
+  const usedStr = formatTokens(used);
+  const maxStr = contextWindow ? formatTokens(contextWindow) : "?";
+
+  let counterColor: string | undefined;
+  if (contextWindow) {
+    const ratio = used / contextWindow;
+    if (ratio > 0.95) counterColor = "red";
+    else if (ratio > 0.8) counterColor = "yellow";
+  }
 
   return (
     <Box width="100%" height={1}>
@@ -106,6 +123,12 @@ function StatusBar({ modelId, status }: { modelId: string; status: string }) {
       <Text dimColor>{modelId}</Text>
       <Text dimColor> · </Text>
       <Text color={statusColor}>{status}</Text>
+      {usage !== undefined && (
+        <>
+          <Text dimColor> · </Text>
+          <Text color={counterColor}>{usedStr} / {maxStr}</Text>
+        </>
+      )}
       <Text dimColor> · </Text>
       <Text dimColor>{cwd}</Text>
     </Box>
@@ -146,9 +169,9 @@ function HelpCard() {
   return (
     <Box flexDirection="column" marginY={1} paddingX={1} borderStyle="single" borderColor="gray">
       <Text bold>Commands</Text>
-      <Text>  /clear  – Clear history</Text>
-      <Text>  /quit   – Exit</Text>
-      <Text>  /help   – Show this help</Text>
+      {slashCommands.map((cmd) => (
+        <Text key={cmd.name}>  {cmd.name}  – {cmd.description}</Text>
+      ))}
       <Text bold>Keybinds</Text>
       <Text>  Ctrl+O  – Toggle last tool card</Text>
       <Text>  Ctrl+L  – Clear screen</Text>
@@ -249,10 +272,12 @@ function PromptInput({
   onSubmit,
   history,
   isRunning,
+  commands,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
   isRunning: boolean;
+  commands?: SlashCommandInfo[];
 }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
@@ -262,6 +287,8 @@ function PromptInput({
   const historyIndexRef = useRef(-1);
   const blinkRef = useRef(true);
   const historyRef = useRef(history);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerIndex, setPickerIndex] = useState(0);
 
   useEffect(() => {
     historyRef.current = history;
@@ -321,6 +348,33 @@ function PromptInput({
 
     let changed = false;
     const currentValue = valueRef.current;
+
+    if (commands && pickerOpen) {
+      const filtered = filterCommands(valueRef.current);
+      if (key.upArrow && !key.shift) {
+        setPickerIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow && !key.shift) {
+        setPickerIndex((i) => Math.min(filtered.length - 1, i + 1));
+        return;
+      }
+      if (key.escape) {
+        setPickerOpen(false);
+        setPickerIndex(0);
+        return;
+      }
+      if ((key.return || key.tab) && filtered.length > 0) {
+        const cmd = filtered[pickerIndex] ?? filtered[0];
+        valueRef.current = cmd.name;
+        cursorOffsetRef.current = cmd.name.length;
+        clearSelection();
+        setPickerOpen(false);
+        setPickerIndex(0);
+        setRenderTick((t) => t + 1);
+        return;
+      }
+    }
 
     // Ctrl+Backspace / Alt+Backspace / Ctrl+H → delete word
     // Note: many terminals send \x08 (BS) for Ctrl+Backspace, which Ink parses as input='h' + ctrl=true
@@ -448,8 +502,20 @@ function PromptInput({
 
     if (changed) {
       setRenderTick((t) => t + 1);
+      if (commands) {
+        const shouldOpen = valueRef.current.startsWith("/") && !valueRef.current.includes(" ") && filterCommands(valueRef.current).length > 0;
+        if (shouldOpen && !pickerOpen) {
+          setPickerOpen(true);
+          setPickerIndex(0);
+        } else if (!shouldOpen && pickerOpen) {
+          setPickerOpen(false);
+          setPickerIndex(0);
+        }
+      }
     }
   });
+
+  const filteredCommands = pickerOpen && commands ? filterCommands(valueRef.current) : [];
 
   // Build display lines with selection highlighting
   const fullText = valueRef.current;
@@ -520,6 +586,15 @@ function PromptInput({
           </Box>
         );
       })}
+      {pickerOpen && filteredCommands.length > 0 && (
+        <Box flexDirection="column" marginTop={1} paddingLeft={2}>
+          {filteredCommands.map((cmd, idx) => (
+            <Text key={cmd.name} color={idx === pickerIndex ? "cyan" : "gray"} bold={idx === pickerIndex}>
+              {cmd.name}  – {cmd.description}
+            </Text>
+          ))}
+        </Box>
+      )}
     </Box>
   );
 }
@@ -534,6 +609,7 @@ export default function App() {
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
+  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined>(undefined);
 
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -553,8 +629,34 @@ export default function App() {
   }, [stdout]);
 
   const tools = useMemo(() => loadTools(), []);
-  const model = useMemo(() => getModel("minimax", "MiniMax-M2.7"), []);
-  const agent = useMemo(() => createAgent({ tools, model }), [tools, model]);
+  const [activeModel, setActiveModel] = useState<Model<Api>>(() => getModel("minimax", "MiniMax-M2.7"));
+  const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
+  useEffect(() => {
+    agent.setModel(activeModel);
+  }, [agent, activeModel]);
+
+  const [configModels, setConfigModels] = useState<{ provider: string; model: string; alias: string }[]>([]);
+  const [configError, setConfigError] = useState<string | undefined>(undefined);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [modelPickerIndex, setModelPickerIndex] = useState(0);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await readFile("harness.config.json", "utf-8");
+        const config = JSON.parse(raw) as { models?: { provider: string; model: string; alias: string }[] };
+        if (config.models && Array.isArray(config.models) && config.models.length > 0) {
+          setConfigModels(config.models);
+        } else {
+          setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
+          setConfigError("Config has no models, using default");
+        }
+      } catch {
+        setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
+        setConfigError("No harness.config.json found, using default model");
+      }
+    })();
+  }, []);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
@@ -575,6 +677,11 @@ export default function App() {
       if (trimmed === "/quit") {
         exit();
         process.exit(0);
+        return;
+      }
+      if (trimmed === "/model") {
+        setShowModelPicker(true);
+        setModelPickerIndex(0);
         return;
       }
       if (trimmed === "/help") {
@@ -695,6 +802,8 @@ export default function App() {
                 activeTurnRef.current = { ...activeTurnRef.current, status: "complete" };
                 forceUpdate();
               }
+            } else if (event.type === "usage") {
+              setSessionUsage({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.totalTokens });
             }
           },
         })
@@ -715,6 +824,9 @@ export default function App() {
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
+          }
+          if (result.usage) {
+            setSessionUsage(result.usage);
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
@@ -773,6 +885,48 @@ export default function App() {
   }, [pastTurns, forceUpdate]);
 
   useInput((inputStr, key) => {
+    if (showModelPicker) {
+      if (key.upArrow) {
+        setModelPickerIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setModelPickerIndex((i) => Math.min(configModels.length - 1, i + 1));
+        return;
+      }
+      if (key.escape) {
+        setShowModelPicker(false);
+        return;
+      }
+      if (key.return || key.tab) {
+        const selected = configModels[modelPickerIndex];
+        if (selected) {
+          try {
+            const newModel = (getModel as unknown as (provider: string, modelId: string) => Model<Api>)(
+              selected.provider,
+              selected.model
+            );
+            setActiveModel(newModel);
+          } catch {
+            const errorTurn: CompletedTurn = {
+              id: randomUUID(),
+              userText: "/model",
+              assistantText: "",
+              assistantRendered: false,
+              tools: [],
+              toolOffsets: [],
+              aborted: false,
+              error: `Failed to switch to model ${selected.provider}/${selected.model}`,
+            };
+            setPastTurns((prev) => [...prev, errorTurn]);
+          }
+        }
+        setShowModelPicker(false);
+        return;
+      }
+      return;
+    }
+
     if (key.ctrl && inputStr === "c") {
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
@@ -817,9 +971,22 @@ export default function App() {
           <TurnView key={turn.id} turn={turn} />
         ))}
         {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
+        {configError && (
+          <Text color="yellow">Warning: {configError}</Text>
+        )}
+        {showModelPicker && configModels.length > 0 && (
+          <Box flexDirection="column" marginY={1} paddingLeft={2}>
+            <Text bold>Select model:</Text>
+            {configModels.map((m, idx) => (
+              <Text key={`${m.provider}-${m.model}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
+                {m.alias} ({m.provider}/{m.model})
+              </Text>
+            ))}
+          </Box>
+        )}
       </Box>
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} isRunning={isRunningRef.current} />
-      <StatusBar modelId={model.id} status={status} />
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} isRunning={isRunningRef.current} commands={slashCommands} />
+      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
     </Box>
   );
 }

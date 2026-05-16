@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "alias": "MiniMax M2.7"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-5.2",
+      "alias": "GPT 5.2"
+    }
+  ]
+}
