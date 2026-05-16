@@ -152,6 +152,29 @@ describe("CLI App", () => {
     expect(frame).toContain("└");
   });
 
+  it("shows tool preview between borders when collapsed", async () => {
+    mockRun.mockImplementation(async (_messages, options) => {
+      await delay(50);
+      options?.onEvent?.({ type: "tool_call_start", name: "exec", args: { cmd: "echo hello" } });
+      await delay(50);
+      options?.onEvent?.({ type: "tool_call_done", name: "exec", result: "hello" });
+      await delay(500);
+      return { aborted: false, turns: 1, finalMessage: "Done" };
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+
+    stdin.write("run exec");
+    await delay(50);
+    stdin.write("\r");
+    await delay(150);
+
+    const frame = lastFrame();
+    // Preview should be visible between top and bottom border
+    expect(frame).toContain("hello");
+    expect(frame).toContain("│");
+  });
+
   it("/help renders help card", async () => {
     const { lastFrame, stdin, frames } = render(<App />);
 
@@ -189,7 +212,7 @@ describe("CLI App", () => {
     expect(allFrames).toContain("Unknown command: /foo");
   });
 
-  it("Static smoke: completed turns accumulate in frames", async () => {
+  it("completed turns accumulate in frames", async () => {
     let callCount = 0;
     mockRun.mockImplementation(async (_messages, options) => {
       callCount++;
@@ -216,7 +239,7 @@ describe("CLI App", () => {
     expect(allFrames).toContain("❯ second");
   });
 
-  it("shows [abgebrochen] and moves turn to static after abort", async () => {
+  it("shows [abgebrochen] and moves turn to completed after abort", async () => {
     let resolveRun: (value: { aborted: boolean; turns: number; finalMessage: string }) => void;
     const runPromise = new Promise<{ aborted: boolean; turns: number; finalMessage: string }>((resolve) => {
       resolveRun = resolve;
@@ -256,28 +279,64 @@ describe("CLI App", () => {
     resolveRun!({ aborted: true, turns: 0, finalMessage: "" });
     await delay(200);
 
-    // Turn should now be in static with abort marker
+    // Turn should now be in completed turns with abort marker
     const allFrames = frames.join("\n");
     expect(allFrames).toContain("[abgebrochen]");
     expect(allFrames).toContain("❯ run slow");
   });
 
-  it("adds spacing between user message and assistant reply", async () => {
+  it("toggles completed turn tool card with Ctrl+O", async () => {
     mockRun.mockImplementation(async (_messages, options) => {
-      options?.onEvent?.({ type: "token", text: "Reply text" });
-      return { aborted: false, turns: 1, finalMessage: "Reply text" };
+      await delay(50);
+      options?.onEvent?.({ type: "tool_call_start", name: "read", args: { path: "x.txt" } });
+      await delay(50);
+      options?.onEvent?.({ type: "tool_call_done", name: "read", result: "secret content" });
+      return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
     const { lastFrame, stdin } = render(<App />);
 
-    stdin.write("hello");
+    stdin.write("run read");
     await delay(50);
     stdin.write("\r");
     await delay(200);
 
+    // Turn is completed; toggle its tool card
+    stdin.write("\x0f"); // Ctrl+O
+    await delay(100);
+
     const frame = lastFrame();
-    // There should be spacing between ❯ hello and Reply text
-    // Since the turn is now completed and in static, check the rendered output
-    expect(frame).toContain("Reply text");
+    expect(frame).toContain("secret content");
+  });
+
+  it("renders assistant text before and after tools in correct order", async () => {
+    mockRun.mockImplementation(async (_messages, options) => {
+      options?.onEvent?.({ type: "token", text: "Before tools. " });
+      await delay(20);
+      options?.onEvent?.({ type: "tool_call_start", name: "exec", args: { cmd: "date" } });
+      await delay(20);
+      options?.onEvent?.({ type: "tool_call_done", name: "exec", result: "Sat May 16" });
+      await delay(20);
+      options?.onEvent?.({ type: "token", text: "After tools." });
+      return { aborted: false, turns: 1, finalMessage: "Before tools. After tools." };
+    });
+
+    const { lastFrame, stdin } = render(<App />);
+
+    stdin.write("run date");
+    await delay(50);
+    stdin.write("\r");
+    await delay(300);
+
+    const frame = lastFrame();
+    expect(frame).toContain("Before tools.");
+    expect(frame).toContain("After tools.");
+    expect(frame).toContain("Sat May 16");
+    // "Before tools" should appear before the tool card in the frame
+    const beforeIdx = frame.indexOf("Before tools");
+    const toolIdx = frame.indexOf("exec");
+    const afterIdx = frame.indexOf("After tools");
+    expect(beforeIdx).toBeLessThan(toolIdx);
+    expect(toolIdx).toBeLessThan(afterIdx);
   });
 });

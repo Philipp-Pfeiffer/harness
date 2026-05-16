@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp, Static } from "ink";
+import { Box, Text, useInput, useApp } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -21,7 +21,6 @@ marked.use(
     codespan: chalk.dim,
     code: chalk.dim,
     blockquote: chalk.gray.italic,
-    listitem: chalk.reset,
     hr: chalk.gray,
     table: chalk.reset,
     link: chalk.blue,
@@ -47,6 +46,7 @@ type CompletedTurn = {
   assistantText: string;
   assistantRendered: boolean;
   tools: ToolItem[];
+  toolOffsets: number[];
   aborted: boolean;
   error?: string;
   help?: boolean;
@@ -56,6 +56,7 @@ type ActiveTurn = {
   userText: string;
   assistantText: string;
   tools: ToolItem[];
+  toolOffsets: number[];
   status: "streaming" | "thinking" | "tool" | "aborted" | "error" | "complete";
 };
 
@@ -120,9 +121,14 @@ function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) {
       ? `${borderFn("│")} ${item.preview}`
       : null;
 
+  const previewLine = !item.expanded && item.preview
+    ? `${borderFn("│")} ${item.preview}`
+    : null;
+
   return (
     <Box flexDirection="column" marginY={1}>
       <Text color={iconColor}>{titleLine}</Text>
+      {previewLine && <Text>{previewLine}</Text>}
       {body && <Text>{body}</Text>}
       <Text>{bottomLine}</Text>
     </Box>
@@ -144,13 +150,48 @@ function HelpCard() {
   );
 }
 
+function renderTurnContent(
+  assistantText: string,
+  tools: ToolItem[],
+  toolOffsets: number[],
+  assistantRendered: boolean
+): React.ReactNode[] {
+  const elements: React.ReactNode[] = [];
+  let textStart = 0;
+
+  for (let i = 0; i < tools.length; i++) {
+    const offset = toolOffsets[i] ?? textStart;
+    const textSlice = assistantText.slice(textStart, offset);
+    if (textSlice) {
+      elements.push(
+        <Box key={`pre-${tools[i].id}`}>
+          <Text>{assistantRendered ? (marked.parse(textSlice) as string) : textSlice}</Text>
+        </Box>
+      );
+    }
+    elements.push(<ToolCard key={tools[i].id} item={tools[i]} isLast={i === tools.length - 1} />);
+    textStart = offset;
+  }
+
+  const remainingText = assistantText.slice(textStart);
+  if (remainingText) {
+    elements.push(
+      <Box key="post" marginTop={elements.length > 0 ? 0 : 1}>
+        <Text>{assistantRendered ? (marked.parse(remainingText) as string) : remainingText}</Text>
+      </Box>
+    );
+  }
+
+  return elements;
+}
+
 function TurnView({ turn }: { turn: CompletedTurn }) {
+  const content = renderTurnContent(turn.assistantText, turn.tools, turn.toolOffsets, turn.assistantRendered);
+
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
-      {turn.tools.map((tool) => (
-        <ToolCard key={tool.id} item={tool} isLast={false} />
-      ))}
+      {content.length > 0 ? content : null}
       {turn.error && (
         <Text color="red">
           [Fehler]: {turn.error}
@@ -162,22 +203,17 @@ function TurnView({ turn }: { turn: CompletedTurn }) {
         </Text>
       )}
       {turn.help && <HelpCard />}
-      {turn.assistantText && (
-        <Box marginTop={1}>
-          <Text>{turn.assistantRendered ? (marked.parse(turn.assistantText) as string) : turn.assistantText}</Text>
-        </Box>
-      )}
     </Box>
   );
 }
 
 function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
+  const content = renderTurnContent(turn.assistantText, turn.tools, turn.toolOffsets, false);
+
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
-      {turn.tools.map((tool, i) => (
-        <ToolCard key={tool.id} item={tool} isLast={i === turn.tools.length - 1} />
-      ))}
+      {content.length > 0 ? content : null}
       {turn.status === "aborted" && (
         <Text italic color="gray">
           [abgebrochen]
@@ -187,11 +223,6 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
         <Text color="red">
           [Fehler]
         </Text>
-      )}
-      {turn.assistantText && (
-        <Box marginTop={1}>
-          <Text>{turn.assistantText}</Text>
-        </Box>
       )}
     </Box>
   );
@@ -352,6 +383,7 @@ export default function App() {
           assistantText: "",
           assistantRendered: false,
           tools: [],
+          toolOffsets: [],
           aborted: false,
           help: true,
         };
@@ -365,6 +397,7 @@ export default function App() {
           assistantText: "",
           assistantRendered: false,
           tools: [],
+          toolOffsets: [],
           aborted: false,
           error: `Unknown command: ${trimmed}. Try /help.`,
         };
@@ -375,7 +408,7 @@ export default function App() {
       setInputHistory((prev) => [...prev, trimmed]);
       historyRef.current.push({ role: "user", content: trimmed, timestamp: Date.now() });
 
-      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], status: "thinking" };
+      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking" };
       isRunningRef.current = true;
       forceUpdate();
 
@@ -400,12 +433,14 @@ export default function App() {
               }
             } else if (event.type === "tool_call_start") {
               if (activeTurnRef.current) {
+                const currentTextLen = activeTurnRef.current.assistantText.length;
                 activeTurnRef.current = {
                   ...activeTurnRef.current,
                   tools: [
                     ...activeTurnRef.current.tools,
                     { id: randomUUID(), name: event.name, status: "pending", preview: "" },
                   ],
+                  toolOffsets: [...activeTurnRef.current.toolOffsets, currentTextLen],
                   status: "tool",
                 };
                 forceUpdate();
@@ -458,6 +493,7 @@ export default function App() {
               assistantText: turn.assistantText || (!result.aborted ? result.finalMessage : ""),
               assistantRendered: !result.aborted && !userAbortedRef.current && turn.status !== "error",
               tools: turn.tools,
+              toolOffsets: turn.toolOffsets,
               aborted: result.aborted || userAbortedRef.current,
               error: turn.status === "error" ? turn.tools.find((t) => t.status === "error")?.preview : undefined,
             };
@@ -478,6 +514,7 @@ export default function App() {
               assistantText: turn.assistantText,
               assistantRendered: false,
               tools: turn.tools,
+              toolOffsets: turn.toolOffsets,
               aborted: false,
               error: err instanceof Error ? err.message : String(err),
             };
@@ -492,6 +529,34 @@ export default function App() {
     },
     [agent, exit, forceUpdate]
   );
+
+  const toggleLastTool = useCallback(() => {
+    if (activeTurnRef.current && activeTurnRef.current.tools.length > 0) {
+      const tools = activeTurnRef.current.tools;
+      const lastToolIndex = tools.length - 1;
+      const newTools = [...tools];
+      newTools[lastToolIndex] = { ...newTools[lastToolIndex], expanded: !newTools[lastToolIndex].expanded };
+      activeTurnRef.current = { ...activeTurnRef.current, tools: newTools };
+      forceUpdate();
+      return true;
+    }
+
+    const turns = pastTurns;
+    if (turns.length > 0) {
+      const lastTurnIndex = turns.length - 1;
+      const lastTurn = turns[lastTurnIndex];
+      if (lastTurn.tools.length > 0) {
+        const lastToolIndex = lastTurn.tools.length - 1;
+        const newTools = [...lastTurn.tools];
+        newTools[lastToolIndex] = { ...newTools[lastToolIndex], expanded: !newTools[lastToolIndex].expanded };
+        const newTurns = [...turns];
+        newTurns[lastTurnIndex] = { ...lastTurn, tools: newTools };
+        setPastTurns(newTurns);
+        return true;
+      }
+    }
+    return false;
+  }, [pastTurns, forceUpdate]);
 
   useInput((inputStr, key) => {
     if (key.ctrl && inputStr === "c") {
@@ -520,16 +585,7 @@ export default function App() {
     }
 
     if (key.ctrl && inputStr === "o") {
-      if (activeTurnRef.current) {
-        const tools = activeTurnRef.current.tools;
-        const lastToolIndex = tools.length - 1;
-        if (lastToolIndex >= 0) {
-          const newTools = [...tools];
-          newTools[lastToolIndex] = { ...newTools[lastToolIndex], expanded: !newTools[lastToolIndex].expanded };
-          activeTurnRef.current = { ...activeTurnRef.current, tools: newTools };
-          forceUpdate();
-        }
-      }
+      toggleLastTool();
       return;
     }
   });
@@ -537,7 +593,9 @@ export default function App() {
   return (
     <Box flexDirection="column" width={process.stdout.columns || 80}>
       <Header modelId={model.id} status={status} />
-      <Static items={pastTurns}>{(turn) => <TurnView key={turn.id} turn={turn} />}</Static>
+      {pastTurns.map((turn) => (
+        <TurnView key={turn.id} turn={turn} />
+      ))}
       {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
       {!isRunningRef.current && <PromptInput onSubmit={handleSubmit} history={inputHistory} />}
     </Box>
