@@ -38,7 +38,7 @@ function makeAssistantMessage(
     provider: "minimax" as const,
     api: "anthropic-messages" as const,
     model: "MiniMax-M2.7",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     timestamp: Date.now(),
     errorMessage,
   };
@@ -89,7 +89,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Hi")]);
 
-    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!" });
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     expect(stream).toHaveBeenCalledTimes(1);
   });
 
@@ -114,7 +114,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!" });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -134,7 +134,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Hi")]);
 
-    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen." });
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
   });
 
   it("returns error when tool is not found", async () => {
@@ -151,7 +151,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Call nonexistent tool")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts" });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -176,7 +176,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Call echo with bad args")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation" });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -198,7 +198,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Keep calling tool")]);
 
-    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns" });
+    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -210,7 +210,7 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [], model });
       const result = await agent.run([makeUserMessage("Hi")], { signal: controller.signal });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       expect(stream).not.toHaveBeenCalled();
     });
 
@@ -235,7 +235,7 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [echoTool], model });
       const result = await agent.run([makeUserMessage("Call echo")], { signal: controller.signal });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       expect(stream).toHaveBeenCalledTimes(1);
     });
 
@@ -270,7 +270,7 @@ describe("Agent", () => {
       const result = await agent.run([makeUserMessage("Call slow")], { signal: controller.signal });
 
       expect(toolRuns).toBe(1);
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       expect(stream).toHaveBeenCalledTimes(1);
     });
   });
@@ -287,7 +287,7 @@ describe("Agent", () => {
         onEvent: (e) => events.push(e),
       });
 
-      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, world!" });
+      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, world!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBeGreaterThanOrEqual(2);
       expect(tokenEvents.map((e) => e.text).join("")).toBe("Hello, world!");
@@ -329,7 +329,7 @@ describe("Agent", () => {
 
       const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!" });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       expect(stream).toHaveBeenCalledTimes(2);
     });
 
@@ -361,7 +361,7 @@ describe("Agent", () => {
         onEvent: (e) => events.push(e),
       });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBe(1);
       expect(tokenEvents[0].text).toBe("First");
@@ -392,6 +392,58 @@ describe("Agent", () => {
       expect(events).toContainEqual({ type: "tool_call_start", name: "echo", args: { text: "hi" } });
       expect(events).toContainEqual({ type: "tool_call_done", name: "echo", result: "hi" });
       expect(events).toContainEqual({ type: "turn_end", turn: 1 });
+    });
+
+    it("aggregates usage across multiple turns", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+      // Override usage for first turn
+      (mockToolCall as any).usage = { input: 10, output: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+      (mockFinal as any).usage = { input: 20, output: 10, totalTokens: 30, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStream(mockToolCall))
+        .mockReturnValueOnce(mockStream(mockFinal));
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute(args) { return args.text; },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+
+      const events: import("../src/core/agent.js").AgentEvent[] = [];
+      const result = await agent.run([makeUserMessage("Call echo")], { onEvent: (e) => events.push(e) });
+
+      expect(result).toEqual({
+        aborted: false,
+        turns: 2,
+        finalMessage: "Done",
+        usage: { inputTokens: 30, outputTokens: 15, totalTokens: 45 },
+      });
+
+      const usageEvents = events.filter((e) => e.type === "usage");
+      expect(usageEvents).toHaveLength(2);
+      expect(usageEvents[0]).toEqual({ type: "usage", inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+      expect(usageEvents[1]).toEqual({ type: "usage", inputTokens: 30, outputTokens: 15, totalTokens: 45 });
+    });
+
+    it("emits usage event even for single text response", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      (mockResponse as any).usage = { input: 5, output: 3, totalTokens: 8, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
+
+      const events: import("../src/core/agent.js").AgentEvent[] = [];
+      const agent = createAgent({ tools: [], model });
+      const result = await agent.run([makeUserMessage("Hi")], { onEvent: (e) => events.push(e) });
+
+      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello!", usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 } });
+      expect(events).toContainEqual({ type: "usage", inputTokens: 5, outputTokens: 3, totalTokens: 8 });
     });
 
     it("emits tool_call_error event for missing tool", async () => {
