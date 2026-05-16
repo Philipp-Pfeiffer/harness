@@ -299,8 +299,16 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
     let changed = false;
     const currentValue = valueRef.current;
 
-    // Ctrl+Backspace or Alt+Backspace → delete word
+    // Ctrl+Backspace / Alt+Backspace / Ctrl+H → delete word
+    // Note: many terminals send \x08 (BS) for Ctrl+Backspace, which Ink parses as input='h' + ctrl=true
     if ((key.ctrl || key.meta) && (key.backspace || key.delete)) {
+      if (deleteSelection()) {
+        changed = true;
+      } else {
+        deleteWordBeforeCursor();
+        changed = true;
+      }
+    } else if (inputStr === 'h' && key.ctrl) {
       if (deleteSelection()) {
         changed = true;
       } else {
@@ -359,11 +367,13 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
         changed = true;
       } else {
         const newIndex = Math.max(historyIndexRef.current - 1, -1);
-        historyIndexRef.current = newIndex;
-        valueRef.current = newIndex === -1 ? "" : historyRef.current[historyRef.current.length - 1 - newIndex];
-        cursorOffsetRef.current = valueRef.current.length;
-        clearSelection();
-        changed = true;
+        if (newIndex !== historyIndexRef.current) {
+          historyIndexRef.current = newIndex;
+          valueRef.current = newIndex === -1 ? "" : historyRef.current[historyRef.current.length - 1 - newIndex];
+          cursorOffsetRef.current = valueRef.current.length;
+          clearSelection();
+          changed = true;
+        }
       }
     } else if (key.leftArrow) {
       if (key.shift) {

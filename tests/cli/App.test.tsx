@@ -442,5 +442,34 @@ describe("CLI App", () => {
       expect(frame).toContain("hello");
       expect(frame).not.toContain("world");
     });
+
+    it("does not clear text on Down arrow when no history exists", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("keep me");
+      await delay(50);
+
+      // Down arrow without history should not clear text
+      stdin.write("\x1b[B");
+      await delay(50);
+
+      const frame = lastFrame();
+      expect(frame).toContain("keep me");
+    });
+
+    it("deletes a word with Ctrl+H (terminal sends BS for Ctrl+Backspace)", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hello world test");
+      await delay(50);
+
+      // Ctrl+H = \x08, which many terminals send for Ctrl+Backspace
+      stdin.write("\x08");
+      await delay(50);
+
+      const frame = lastFrame();
+      expect(frame).toContain("hello world");
+      expect(frame).not.toContain("world test");
+    });
   });
 });
