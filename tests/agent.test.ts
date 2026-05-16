@@ -629,7 +629,7 @@ describe("Agent", () => {
 
       const result = await runPromise;
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done" });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       expect(history.length).toBe(5); // user + assistant + toolResult + system + assistant
       expect(history[3].role).toBe("system");
     });
@@ -669,7 +669,7 @@ describe("Agent", () => {
 
       const result = await runPromise;
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done" });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
       const sysMsg = history.find((m: any) => m.role === "system");
       expect(sysMsg).toBeDefined();
     });
