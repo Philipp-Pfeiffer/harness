@@ -43,9 +43,15 @@ export interface RunOptions {
  * cancellation outcomes (max turns, user abort). Callers can switch on
  * `aborted` without a try/catch. Provider-level errors still throw.
  */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export type RunResult =
-  | { aborted: false; turns: number; finalMessage: string }
-  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns" };
+  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage }
+  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage };
 
 /**
  * Events emitted during a streaming run.
@@ -58,7 +64,8 @@ export type AgentEvent =
   | { type: "tool_call_start"; name: string; args: unknown }
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
-  | { type: "turn_end"; turn: number };
+  | { type: "turn_end"; turn: number }
+  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -116,13 +123,17 @@ export interface AgentConfig {
 
 export interface Agent {
   run(messages: Message[], options?: RunOptions): Promise<RunResult>;
+  setModel(model: Model<Api>): void;
 }
 
 export function createAgent(config: AgentConfig): Agent {
   const { tools, systemPrompt, maxIterations = 10, model, logger } = config;
-  const resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
+  let resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
 
   return {
+    setModel(newModel: Model<Api>) {
+      resolvedModel = newModel;
+    },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent, mailbox } = options;
       const history = messages as Array<Message | SteerMessage>;
@@ -132,11 +143,15 @@ export function createAgent(config: AgentConfig): Agent {
         tools: tools.map(toPiTool),
       };
 
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalTokens = 0;
+
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
-          return { aborted: true, completedTurns: i, reason: "signal" };
+          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
         drainMailbox(mailbox, history as Message[]);
@@ -159,10 +174,15 @@ export function createAgent(config: AgentConfig): Agent {
             (err instanceof Error && err.name === "AbortError")
           ) {
             discardMailbox(mailbox);
-            return { aborted: true, completedTurns: i, reason: "signal" };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
           throw err;
         }
+
+        totalInput += response.usage.input;
+        totalOutput += response.usage.output;
+        totalTokens += response.usage.totalTokens;
+        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens });
 
         if (response.stopReason === "error") {
           throw new Error(response.errorMessage ?? "Unbekannter Fehler");
@@ -178,11 +198,11 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join("") };
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
         if (response.stopReason === "aborted") {
-          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen." };
+          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
         if (response.stopReason === "toolUse") {
@@ -195,7 +215,7 @@ export function createAgent(config: AgentConfig): Agent {
           if (signal?.aborted) {
             context.messages.pop();
             discardMailbox(mailbox);
-            return { aborted: true, completedTurns: i, reason: "signal" };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
 
           // Build buckets: independent calls get their own bucket;
@@ -296,7 +316,7 @@ export function createAgent(config: AgentConfig): Agent {
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
             discardMailbox(mailbox);
-            return { aborted: true, completedTurns: i, reason: "signal" };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
 
           continue;
@@ -304,7 +324,7 @@ export function createAgent(config: AgentConfig): Agent {
       }
 
       discardMailbox(mailbox);
-      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns" };
+      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
     },
   };
 }

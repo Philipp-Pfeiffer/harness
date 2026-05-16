@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
 import App from "../../src/cli/App.js";
+import { createAgent } from "../../src/core/agent.js";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -11,7 +12,7 @@ vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
   return {
     ...actual,
-    getModel: vi.fn(() => ({ id: "test-model" })),
+    getModel: vi.fn((provider: string, modelId: string) => ({ id: `${provider}-${modelId}`, contextWindow: 100000 })),
   };
 });
 
@@ -20,6 +21,7 @@ const mockRun = vi.fn();
 vi.mock("../../src/core/agent.js", () => ({
   createAgent: vi.fn(() => ({
     run: mockRun,
+    setModel: vi.fn(),
   })),
 }));
 
@@ -41,7 +43,7 @@ describe("CLI App", () => {
     const { lastFrame } = render(<App />);
     const frame = lastFrame();
     expect(frame).toContain("harness");
-    expect(frame).toContain("test-model");
+    expect(frame).toContain("minimax-MiniMax-M2.7");
     expect(frame).toContain("ready");
     expect(frame).toContain("❯");
   });
@@ -50,7 +52,7 @@ describe("CLI App", () => {
     mockRun.mockImplementation(async (_messages, options) => {
       options?.onEvent?.({ type: "token", text: "Hello" });
       options?.onEvent?.({ type: "token", text: " world!" });
-      return { aborted: false, turns: 1, finalMessage: "Hello world!" };
+      return { aborted: false, turns: 1, finalMessage: "Hello world!", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -73,7 +75,7 @@ describe("CLI App", () => {
       await delay(50);
       options?.onEvent?.({ type: "tool_call_done", name: "echo", result: "hello world" });
       await delay(500); // keep turn active so Ctrl+O can toggle
-      return { aborted: false, turns: 1, finalMessage: "Done" };
+      return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -182,6 +184,9 @@ describe("CLI App", () => {
     await delay(50);
     stdin.write("\r");
     await delay(100);
+    // Picker consumes first Enter to complete command, press again to submit
+    stdin.write("\r");
+    await delay(100);
 
     const allFrames = frames.join("\n");
     expect(allFrames).toContain("Commands");
@@ -194,6 +199,9 @@ describe("CLI App", () => {
 
     stdin.write("/quit");
     await delay(50);
+    stdin.write("\r");
+    await delay(100);
+    // Picker consumes first Enter to complete command, press again to submit
     stdin.write("\r");
     await delay(100);
 
@@ -217,7 +225,7 @@ describe("CLI App", () => {
     mockRun.mockImplementation(async (_messages, options) => {
       callCount++;
       options?.onEvent?.({ type: "token", text: `Response ${callCount}` });
-      return { aborted: false, turns: 1, finalMessage: `Response ${callCount}` };
+      return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
     });
 
     const { stdin, frames } = render(<App />);
@@ -252,7 +260,7 @@ describe("CLI App", () => {
       options?.onEvent?.({ type: "tool_call_start", name: "slow", args: {} });
       // Wait for abort
       await runPromise;
-      return { aborted: true, turns: 0, finalMessage: "" };
+      return { aborted: true, turns: 0, finalMessage: "", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
     });
 
     const { lastFrame, stdin, frames } = render(<App />);
@@ -318,7 +326,7 @@ describe("CLI App", () => {
       options?.onEvent?.({ type: "tool_call_done", name: "exec", result: "Sat May 16" });
       await delay(20);
       options?.onEvent?.({ type: "token", text: "After tools." });
-      return { aborted: false, turns: 1, finalMessage: "Before tools. After tools." };
+      return { aborted: false, turns: 1, finalMessage: "Before tools. After tools.", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -479,7 +487,7 @@ describe("CLI App", () => {
       const frame = lastFrame();
       // Status bar should contain model, harness label, ready status, and cwd
       expect(frame).toContain("harness");
-      expect(frame).toContain("test-model");
+      expect(frame).toContain("minimax-MiniMax-M2.7");
       expect(frame).toContain("ready");
       expect(frame).toContain(process.cwd());
       // Input prompt should be visible
@@ -587,6 +595,147 @@ describe("CLI App", () => {
       // Both lines should be visible
       expect(frame).toContain("line1");
       expect(frame).toContain("line2");
+    });
+  });
+
+  describe("Token counter", () => {
+    it("shows token counter after first turn", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        options?.onEvent?.({ type: "token", text: "Hello" });
+        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("hi");
+      await delay(50);
+      stdin.write("\r");
+      await delay(200);
+
+      const frame = lastFrame();
+      expect(frame).toContain("15 / 100.0k");
+    });
+
+    it("formats tokens with k-suffix above 999", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        options?.onEvent?.({ type: "usage", inputTokens: 17654, outputTokens: 1000, totalTokens: 18654 });
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 17654, outputTokens: 1000, totalTokens: 18654 } };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("test");
+      await delay(50);
+      stdin.write("\r");
+      await delay(200);
+
+      const frame = lastFrame();
+      expect(frame).toContain("18.7k / 100.0k");
+    });
+
+    it("shows yellow counter above 80% context window", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        options?.onEvent?.({ type: "usage", inputTokens: 85000, outputTokens: 1000, totalTokens: 86000 });
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 85000, outputTokens: 1000, totalTokens: 86000 } };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("test");
+      await delay(50);
+      stdin.write("\r");
+      await delay(200);
+
+      const frame = lastFrame();
+      expect(frame).toContain("86.0k / 100.0k");
+    });
+
+    it("shows red counter above 95% context window", async () => {
+      mockRun.mockImplementation(async (_messages, options) => {
+        options?.onEvent?.({ type: "usage", inputTokens: 96000, outputTokens: 1000, totalTokens: 97000 });
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 96000, outputTokens: 1000, totalTokens: 97000 } };
+      });
+
+      const { lastFrame, stdin } = render(<App />);
+
+      stdin.write("test");
+      await delay(50);
+      stdin.write("\r");
+      await delay(200);
+
+      const frame = lastFrame();
+      expect(frame).toContain("97.0k / 100.0k");
+    });
+  });
+
+  describe("/model command", () => {
+    it("opens model picker and shows fallback models", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Picker consumes first Enter to complete command, press again to submit
+      stdin.write("\r");
+      await delay(100);
+
+      const frame = lastFrame();
+      expect(frame).toContain("Select model:");
+      expect(frame).toContain("MiniMax M2.7");
+    });
+
+    it("switches model and updates header", async () => {
+      const { lastFrame, stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /model command
+      stdin.write("\r");
+      await delay(100);
+
+      // Press Enter to select first model
+      stdin.write("\r");
+      await delay(100);
+
+      const frame = lastFrame();
+      // getModel mock returns `${provider}-${modelId}`
+      expect(frame).toContain("minimax-MiniMax-M2.7");
+    });
+
+    it("calls setModel on agent when switching", async () => {
+      const setModelSpy = vi.fn();
+      vi.mocked(createAgent).mockReturnValueOnce({
+        run: mockRun,
+        setModel: setModelSpy,
+      } as any);
+
+      const { stdin } = render(<App />);
+
+      // Wait for config fallback to load
+      await delay(100);
+
+      stdin.write("/model");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /model command
+      stdin.write("\r");
+      await delay(100);
+
+      // Select first model
+      stdin.write("\r");
+      await delay(100);
+
+      expect(setModelSpy).toHaveBeenCalled();
     });
   });
 });
