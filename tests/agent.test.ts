@@ -46,7 +46,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run("Hi");
 
-    expect(result).toBe("Hello, human!");
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!" });
     expect(complete).toHaveBeenCalledTimes(1);
   });
 
@@ -71,7 +71,7 @@ describe("Agent", () => {
 
     const result = await agent.run("Bitte rufe echo auf");
 
-    expect(result).toBe("Ja, das Echo-Tool funktioniert!");
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!" });
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
@@ -91,7 +91,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run("Hi");
 
-    expect(result).toBe("Anfrage wurde abgebrochen.");
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen." });
   });
 
   it("returns error when tool is not found", async () => {
@@ -108,7 +108,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run("Call nonexistent tool");
 
-    expect(result).toBe("Weiter gehts");
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts" });
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
@@ -133,11 +133,11 @@ describe("Agent", () => {
 
     const result = await agent.run("Call echo with bad args");
 
-    expect(result).toBe("Weiter nach Validation");
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation" });
     expect(complete).toHaveBeenCalledTimes(2);
   });
 
-  it("returns max iterations message when limit is reached", async () => {
+  it("returns max turns message when limit is reached", async () => {
     const mockToolCall = makeAssistantMessage(
       [{ type: "toolCall", id: "tc_loop", name: "echo", arguments: { text: "loop" } }],
       "toolUse"
@@ -155,7 +155,80 @@ describe("Agent", () => {
 
     const result = await agent.run("Keep calling tool");
 
-    expect(result).toBe("Maximale Anzahl an Iterationen erreicht.");
+    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns" });
     expect(complete).toHaveBeenCalledTimes(2);
+  });
+
+  describe("AbortSignal", () => {
+    it("aborts before start → no LLM call, result aborted: true", async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const agent = createAgent({ tools: [], model });
+      const result = await agent.run("Hi", { signal: controller.signal });
+
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(complete).not.toHaveBeenCalled();
+    });
+
+    it("aborts mid-loop after LLM response, before tool exec → no tool executed", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      vi.mocked(complete).mockImplementationOnce(async () => {
+        controller.abort();
+        return mockToolCall;
+      });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() { return "should-not-run"; },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const result = await agent.run("Call echo", { signal: controller.signal });
+
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
+
+    it("aborts during tool execution → current tool finishes, no further tool calls or turns", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [
+          { type: "toolCall", id: "tc_1", name: "slow", arguments: {} },
+          { type: "toolCall", id: "tc_2", name: "slow", arguments: {} },
+        ],
+        "toolUse"
+    );
+
+      const controller = new AbortController();
+      let toolRuns = 0;
+
+      const slowTool: Tool = {
+        name: "slow",
+        description: "Slow tool for tests",
+        parameters: Type.Object({}),
+        async execute() {
+          toolRuns++;
+          if (toolRuns === 1) {
+            controller.abort();
+          }
+          return "done";
+        },
+      };
+
+      vi.mocked(complete).mockResolvedValueOnce(mockToolCall);
+
+      const agent = createAgent({ tools: [slowTool], model });
+      const result = await agent.run("Call slow", { signal: controller.signal });
+
+      expect(toolRuns).toBe(1);
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal" });
+      expect(complete).toHaveBeenCalledTimes(1);
+    });
   });
 });
