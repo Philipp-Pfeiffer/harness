@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp } from "ink";
+import { Box, Text, useInput, useApp, useStdout, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -85,7 +85,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function Header({ modelId, status }: { modelId: string; status: string }) {
+function StatusBar({ modelId, status }: { modelId: string; status: string }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -95,8 +95,10 @@ function Header({ modelId, status }: { modelId: string; status: string }) {
           ? "gray"
           : "cyan";
 
+  const cwd = process.cwd();
+
   return (
-    <Box marginBottom={1} width={process.stdout.columns || 80}>
+    <Box width="100%" height={1}>
       <Text bold color="cyan">
         harness
       </Text>
@@ -104,6 +106,8 @@ function Header({ modelId, status }: { modelId: string; status: string }) {
       <Text dimColor>{modelId}</Text>
       <Text dimColor> · </Text>
       <Text color={statusColor}>{status}</Text>
+      <Text dimColor> · </Text>
+      <Text dimColor>{cwd}</Text>
     </Box>
   );
 }
@@ -241,7 +245,15 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
 
 /* ─── PromptInput with selection + Ctrl+Backspace ─── */
 
-function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; history: string[] }) {
+function PromptInput({
+  onSubmit,
+  history,
+  isRunning,
+}: {
+  onSubmit: (v: string) => void;
+  history: string[];
+  isRunning: boolean;
+}) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
   const cursorOffsetRef = useRef(0);
@@ -341,11 +353,13 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
       clearSelection();
       changed = true;
     } else if (key.return) {
-      onSubmit(currentValue);
-      valueRef.current = "";
-      cursorOffsetRef.current = 0;
-      clearSelection();
-      historyIndexRef.current = -1;
+      if (!isRunning) {
+        onSubmit(currentValue);
+        valueRef.current = "";
+        cursorOffsetRef.current = 0;
+        clearSelection();
+        historyIndexRef.current = -1;
+      }
       changed = true;
     } else if (key.upArrow) {
       if (key.shift) {
@@ -514,6 +528,8 @@ function PromptInput({ onSubmit, history }: { onSubmit: (v: string) => void; his
 
 export default function App() {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });
   const [pastTurns, setPastTurns] = useState<CompletedTurn[]>([]);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
@@ -525,6 +541,16 @@ export default function App() {
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
   const mailboxRef = useRef<Mailbox>(createMailbox());
+
+  useEffect(() => {
+    const handleResize = () => {
+      setTermSize({ columns: stdout.columns, rows: stdout.rows });
+    };
+    stdout.on("resize", handleResize);
+    return () => {
+      stdout.off("resize", handleResize);
+    };
+  }, [stdout]);
 
   const tools = useMemo(() => loadTools(), []);
   const model = useMemo(() => getModel("minimax", "MiniMax-M2.7"), []);
@@ -778,14 +804,22 @@ export default function App() {
     }
   });
 
+  const staticTurns = pastTurns.slice(0, -1);
+  const liveTurns = pastTurns.slice(-1);
+
   return (
-    <Box flexDirection="column" width={process.stdout.columns || 80}>
-      <Header modelId={model.id} status={status} />
-      {pastTurns.map((turn) => (
-        <TurnView key={turn.id} turn={turn} />
-      ))}
-      {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
-      {!isRunningRef.current && <PromptInput onSubmit={handleSubmit} history={inputHistory} />}
+    <Box flexDirection="column" width={termSize.columns}>
+      <Static items={staticTurns}>
+        {(turn) => <TurnView key={turn.id} turn={turn} />}
+      </Static>
+      <Box flexDirection="column" flexGrow={1}>
+        {liveTurns.map((turn) => (
+          <TurnView key={turn.id} turn={turn} />
+        ))}
+        {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
+      </Box>
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} isRunning={isRunningRef.current} />
+      <StatusBar modelId={model.id} status={status} />
     </Box>
   );
 }
