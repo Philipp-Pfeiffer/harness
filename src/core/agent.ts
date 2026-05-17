@@ -1,4 +1,5 @@
-import { stream, getModel } from "@mariozechner/pi-ai";
+import { stream } from "@mariozechner/pi-ai";
+import { resolveModel } from "./resolveModel.js";
 import { Value } from "typebox/value";
 import type {
   Context as PiContext,
@@ -128,7 +129,7 @@ export interface Agent {
 
 export function createAgent(config: AgentConfig): Agent {
   const { tools, systemPrompt, maxIterations = 10, model, logger } = config;
-  let resolvedModel = model ?? getModel("minimax", "MiniMax-M2.7");
+  let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {
     setModel(newModel: Model<Api>) {
