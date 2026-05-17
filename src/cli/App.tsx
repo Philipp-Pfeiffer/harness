@@ -35,7 +35,7 @@ marked.use(
 
 /* ─── Types ─── */
 
-type ToolItem = {
+export type ToolItem = {
   id: string;
   name: string;
   status: "pending" | "done" | "error";
@@ -180,7 +180,7 @@ function HelpCard() {
   );
 }
 
-function renderTurnContent(
+export function renderTurnContent(
   assistantText: string,
   tools: ToolItem[],
   toolOffsets: number[],
@@ -206,7 +206,7 @@ function renderTurnContent(
   const remainingText = assistantText.slice(textStart);
   if (remainingText) {
     elements.push(
-      <Box key="post" marginTop={elements.length > 0 ? 0 : 1}>
+      <Box key="post-final" marginTop={elements.length > 0 ? 0 : 1}>
         <Text>{assistantRendered ? (marked.parse(remainingText) as string) : remainingText}</Text>
       </Box>
     );
@@ -248,7 +248,7 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
         <Box flexDirection="column" marginY={1}>
           <Text italic color="gray">[steer]</Text>
           {turn.steers.map((steer, idx) => (
-            <Text key={idx} italic color="gray">  {steer}</Text>
+            <Text key={`steer-${idx}`} italic color="gray">  {steer}</Text>
           ))}
         </Box>
       )}
@@ -570,18 +570,18 @@ function PromptInput({
         }
 
         return (
-          <Box key={lineIndex} flexDirection="row">
+          <Box key={`line-${lineIndex}`} flexDirection="row">
             <Text color="cyan">❯ </Text>
             {segments.map((seg, segIdx) => {
               if (seg.isCursor) {
                 return (
-                  <Text key={segIdx}>{blinkRef.current ? chalk.inverse(seg.text) : seg.text}</Text>
+                  <Text key={`seg-${lineIndex}-${segIdx}`}>{blinkRef.current ? chalk.inverse(seg.text) : seg.text}</Text>
                 );
               }
               if (seg.selected) {
-                return <Text key={segIdx}>{chalk.bgWhite.black(seg.text)}</Text>;
+                return <Text key={`seg-${lineIndex}-${segIdx}`}>{chalk.bgWhite.black(seg.text)}</Text>;
               }
-              return <Text key={segIdx}>{seg.text}</Text>;
+              return <Text key={`seg-${lineIndex}-${segIdx}`}>{seg.text}</Text>;
             })}
           </Box>
         );
@@ -589,7 +589,7 @@ function PromptInput({
       {pickerOpen && filteredCommands.length > 0 && (
         <Box flexDirection="column" marginTop={1} paddingLeft={2}>
           {filteredCommands.map((cmd, idx) => (
-            <Text key={cmd.name} color={idx === pickerIndex ? "cyan" : "gray"} bold={idx === pickerIndex}>
+            <Text key={`cmd-${cmd.name}-${idx}`} color={idx === pickerIndex ? "cyan" : "gray"} bold={idx === pickerIndex}>
               {cmd.name}  – {cmd.description}
             </Text>
           ))}
@@ -967,7 +967,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
           <Box flexDirection="column" marginY={1} paddingLeft={2}>
             <Text bold>Select model:</Text>
             {configModels.map((m, idx) => (
-              <Text key={`${m.provider}-${m.model}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
+              <Text key={`${m.provider}-${m.model}-${idx}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
                 {m.alias} ({m.provider}/{m.model})
               </Text>
             ))}
