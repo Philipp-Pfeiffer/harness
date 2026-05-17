@@ -135,24 +135,43 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
   );
 }
 
-function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) {
+function wrapLines(text: string, maxWidth: number): string[] {
+  const result: string[] = [];
+  for (const rawLine of text.split("\n")) {
+    if (rawLine.length <= maxWidth) {
+      result.push(rawLine);
+    } else {
+      for (let i = 0; i < rawLine.length; i += maxWidth) {
+        result.push(rawLine.slice(i, i + maxWidth));
+      }
+    }
+  }
+  return result;
+}
+
+export function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) {
   const symbol = item.status === "pending" ? "▸" : item.status === "done" ? "✓" : "✗";
   const borderFn = item.status === "error" ? chalk.red : item.status === "done" ? chalk.green : chalk.gray;
   const iconColor = item.status === "error" ? "red" : item.status === "done" ? "green" : "yellow";
-  const width = Math.max(20, (process.stdout.columns || 80) - 4);
+  const innerWidth = Math.max(20, (process.stdout.columns || 80) - 4);
+  const contentWidth = innerWidth;
 
-  const titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
-  const titleLine = `${borderFn("┌─")} ${titleContent} ${borderFn("─".repeat(Math.max(0, width - titleContent.length - 5)) + "┐")}`;
-  const bottomLine = borderFn("└" + "─".repeat(width) + "┘");
+  let titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
+  if (titleContent.length > innerWidth - 4) {
+    titleContent = titleContent.slice(0, innerWidth - 7) + "...";
+  }
+  const titleFill = Math.max(1, innerWidth - titleContent.length - 3);
+  const titleLine = `${borderFn("┌─")} ${titleContent} ${borderFn("─".repeat(titleFill) + "┐")}`;
+  const bottomLine = borderFn("└" + "─".repeat(innerWidth) + "┘");
 
   const body = item.expanded && item.result
-    ? item.result.split("\n").map((line) => `${borderFn("│")} ${line}`).join("\n")
+    ? wrapLines(item.result, contentWidth).map((line) => `${borderFn("│")} ${line}`).join("\n")
     : item.expanded && item.preview
-      ? `${borderFn("│")} ${item.preview}`
+      ? wrapLines(item.preview, contentWidth).map((line) => `${borderFn("│")} ${line}`).join("\n")
       : null;
 
   const previewLine = !item.expanded && item.preview
-    ? `${borderFn("│")} ${item.preview}`
+    ? wrapLines(item.preview, contentWidth).map((line) => `${borderFn("│")} ${line}`).join("\n")
     : null;
 
   return (
