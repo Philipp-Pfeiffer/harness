@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
-import { getModel } from "@mariozechner/pi-ai";
+import { resolveModel } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
@@ -629,7 +629,7 @@ export default function App() {
   }, [stdout]);
 
   const tools = useMemo(() => loadTools(), []);
-  const [activeModel, setActiveModel] = useState<Model<Api>>(() => getModel("minimax", "MiniMax-M2.7"));
+  const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
   useEffect(() => {
     agent.setModel(activeModel);
@@ -902,10 +902,7 @@ export default function App() {
         const selected = configModels[modelPickerIndex];
         if (selected) {
           try {
-            const newModel = (getModel as unknown as (provider: string, modelId: string) => Model<Api>)(
-              selected.provider,
-              selected.model
-            );
+            const newModel = resolveModel(selected.provider, selected.model);
             setActiveModel(newModel);
           } catch {
             const errorTurn: CompletedTurn = {
