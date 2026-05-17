@@ -421,6 +421,31 @@ totalTokens += response.usage.totalTokens;
 onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens });
 ```
 
+### Session-Aggregation in App.tsx
+
+Code: `src/cli/App.tsx:612` (State), `820-830` (Kumulation)
+
+Der Agent liefert pro `run()` ein `result.usage` mit der kumulierten Usage **dieses Turns** (inkl. interner Tool-Loop-Iterationen). `App.tsx` addiert diese Werte auf den Session-State:
+
+```ts
+if (result.usage) {
+  setSessionUsage((prev) =>
+    prev
+      ? {
+          inputTokens: prev.inputTokens + result.usage.inputTokens,
+          outputTokens: prev.outputTokens + result.usage.outputTokens,
+          totalTokens: prev.totalTokens + result.usage.totalTokens,
+        }
+      : result.usage
+  );
+}
+```
+
+**Verhalten:**
+- Counter ist **monoton wachsend** über die gesamte Session
+- `/clear` setzt `sessionUsage` auf `undefined` → Counter verschwindet (neue Session)
+- `/model`-Switch lässt den Counter unverändert (Session läuft weiter)
+
 ### Anzeige in der StatusBar
 
 Code: `src/cli/App.tsx:74-80` (Formatierung), `95-112` (Rendering)
