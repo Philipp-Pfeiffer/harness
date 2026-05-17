@@ -17,21 +17,28 @@ import { loadConfig, type ConfigModel } from "./config.js";
 /* ─── marked config ─── */
 
 marked.use(
-  (markedTerminal({
+  markedTerminal({
+    tab: 2,
+    showSectionPrefix: false,
+    firstHeading: chalk.cyan.bold.underline,
     heading: chalk.cyan.bold,
-    firstHeading: chalk.cyan.bold,
     strong: chalk.bold,
     em: chalk.italic,
-    codespan: chalk.dim,
-    code: chalk.dim,
+    codespan: (text: string) => chalk.gray(`\`${text}\``),
+    code: chalk.gray,
     blockquote: chalk.gray.italic,
     hr: chalk.gray,
     table: chalk.reset,
     link: chalk.blue,
     href: chalk.blue.underline,
     width: process.stdout.columns || 80,
-  }) as any)
+  }) as any
 );
+
+function renderMarkdown(text: string): string {
+  const raw = marked.parse(text) as string;
+  return raw.replace(/^(\s*)\* /gm, "$1• ");
+}
 
 /* ─── Types ─── */
 
@@ -214,7 +221,7 @@ export function renderTurnContent(
     if (textSlice) {
       elements.push(
         <Box key={`pre-${tools[i].id}`}>
-          <Text>{assistantRendered ? (marked.parse(textSlice) as string) : textSlice}</Text>
+          <Text>{assistantRendered ? renderMarkdown(textSlice) : textSlice}</Text>
         </Box>
       );
     }
@@ -226,7 +233,7 @@ export function renderTurnContent(
   if (remainingText) {
     elements.push(
       <Box key="post-final" marginTop={elements.length > 0 ? 0 : 1}>
-        <Text>{assistantRendered ? (marked.parse(remainingText) as string) : remainingText}</Text>
+        <Text>{assistantRendered ? renderMarkdown(remainingText) : remainingText}</Text>
       </Box>
     );
   }
