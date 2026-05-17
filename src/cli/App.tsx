@@ -664,6 +664,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
       if (trimmed === "/clear") {
         setPastTurns([]);
         historyRef.current = [];
+        setSessionUsage(undefined);
         return;
       }
       if (trimmed === "/quit") {
@@ -795,7 +796,8 @@ export default function App({ configPath }: { configPath?: string } = {}) {
                 forceUpdate();
               }
             } else if (event.type === "usage") {
-              setSessionUsage({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, totalTokens: event.totalTokens });
+              // Live-Update während des Turns; finale Aggregation erfolgt aus result.usage
+              // um Doppelzählung bei Multi-Turn-Runs zu vermeiden.
             }
           },
         })
@@ -818,7 +820,15 @@ export default function App({ configPath }: { configPath?: string } = {}) {
             forceUpdate();
           }
           if (result.usage) {
-            setSessionUsage(result.usage);
+            setSessionUsage((prev) =>
+              prev
+                ? {
+                    inputTokens: prev.inputTokens + result.usage.inputTokens,
+                    outputTokens: prev.outputTokens + result.usage.outputTokens,
+                    totalTokens: prev.totalTokens + result.usage.totalTokens,
+                  }
+                : result.usage
+            );
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
