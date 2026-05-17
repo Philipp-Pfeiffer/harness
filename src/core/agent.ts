@@ -114,6 +114,12 @@ function discardMailbox(mailbox: Mailbox | undefined): void {
   mailbox?.drainAll();
 }
 
+const DEFAULT_SYSTEM_PROMPT = `Du bist ein hilfreicher Assistent in einer Terminal-UI.
+- Antworte in knapper Prosa.
+- Verzichte auf Markdown-Überschriften (#, ##, ###).
+- Nutze Bullet-Listen (-) für Aufzählungen.
+- Code-Blöcke (\`\`\`) und Inline-Code (\`) sind erwünscht.`;
+
 export interface AgentConfig {
   tools: Tool[];
   systemPrompt?: string;
@@ -128,7 +134,7 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, systemPrompt, maxIterations = 10, model, logger } = config;
+  const { tools, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxIterations = 10, model, logger } = config;
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {

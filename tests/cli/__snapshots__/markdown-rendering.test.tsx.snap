@@ -1,0 +1,57 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`markdown rendering > renders a code block 1`] = `
+"  const x = 1;
+
+"
+`;
+
+exports[`markdown rendering > renders a flat list 1`] = `
+"  * item 1
+  * item 2
+  * item 3
+
+"
+`;
+
+exports[`markdown rendering > renders a mixed document 1`] = `
+"Summary
+
+  * First point
+    * Sub-point A
+    * Sub-point B
+  * Second point
+
+Run \`npm test\` to verify:
+
+  expect(true).toBe(true);
+
+Bold and italic text.
+
+"
+`;
+
+exports[`markdown rendering > renders a nested list 1`] = `
+"  * item 1
+    * nested a
+    * nested b
+  * item 2
+
+"
+`;
+
+exports[`markdown rendering > renders headings 1`] = `
+"Heading 1
+
+Heading 2
+
+Heading 3
+
+"
+`;
+
+exports[`markdown rendering > renders inline code 1`] = `
+"Use the \`renderMarkdown\` helper.
+
+"
+`;
