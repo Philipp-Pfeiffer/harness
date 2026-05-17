@@ -577,9 +577,15 @@ Der aktuelle Code verwirft bei Abort den laufenden Turn nicht. Der bisher generi
 
 ### Model-Konfiguration
 
-- `harness.config.json` wird aus dem **CWD** gelesen — kein Path-Scoping
-- `getModel` erfordert für dynamische Strings einen `as unknown as ...` Cast (pi-ai strikte Typisierung)
-- Neue Modelle werden durch Einträge in `harness.config.json` hinzugefügt:
+Config-Lookup mit Path-Scoping (`src/cli/config.ts`):
+
+1. `--config <path>` — expliziter CLI-Override
+2. `$PWD/harness.config.json` — Projekt-spezifische Config (CWD)
+3. `$XDG_CONFIG_HOME/harness/config.json` — User-Default (XDG)
+4. `~/.harness/config.json` — User-Default (Legacy)
+5. **Fallback:** Hartcodierter Default (`minimax/MiniMax-M2.7`) mit gelber Warnung in der UI (`configError`)
+
+Neue Modelle werden durch Einträge in einer der Config-Dateien hinzugefügt:
   ```json
   {
     "models": [
@@ -589,6 +595,7 @@ Der aktuelle Code verwirft bei Abort den laufenden Turn nicht. Der bisher generi
   ```
 - Der `provider`-Wert muss von pi-ai unterstützt sein (`minimax`, `openai`, etc.)
 - Der API-Key für den Provider muss in `.env` hinterlegt sein (z. B. `MINIMAX_API_KEY=<token>`)
+- `getModel` erfordert für dynamische Strings einen `as unknown as ...` Cast (pi-ai strikte Typisierung)
 
 ### Fehlende Feature-Reports
 

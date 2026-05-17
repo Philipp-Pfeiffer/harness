@@ -4,7 +4,6 @@ import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { getModel } from "@mariozechner/pi-ai";
@@ -13,6 +12,7 @@ import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
+import { loadConfig, type ConfigModel } from "./config.js";
 
 /* ─── marked config ─── */
 
@@ -601,7 +601,7 @@ function PromptInput({
 
 /* ─── Main App ─── */
 
-export default function App() {
+export default function App({ configPath }: { configPath?: string } = {}) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });
@@ -635,28 +635,20 @@ export default function App() {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
 
-  const [configModels, setConfigModels] = useState<{ provider: string; model: string; alias: string }[]>([]);
+  const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
   const [configError, setConfigError] = useState<string | undefined>(undefined);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
 
   useEffect(() => {
     (async () => {
-      try {
-        const raw = await readFile("harness.config.json", "utf-8");
-        const config = JSON.parse(raw) as { models?: { provider: string; model: string; alias: string }[] };
-        if (config.models && Array.isArray(config.models) && config.models.length > 0) {
-          setConfigModels(config.models);
-        } else {
-          setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
-          setConfigError("Config has no models, using default");
-        }
-      } catch {
-        setConfigModels([{ provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" }]);
-        setConfigError("No harness.config.json found, using default model");
+      const result = await loadConfig({ configPath });
+      setConfigModels(result.models);
+      if (result.error) {
+        setConfigError(result.error);
       }
     })();
-  }, []);
+  }, [configPath]);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
