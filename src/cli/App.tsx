@@ -206,7 +206,7 @@ function renderTurnContent(
   const remainingText = assistantText.slice(textStart);
   if (remainingText) {
     elements.push(
-      <Box key="post" marginTop={elements.length > 0 ? 0 : 1}>
+      <Box key={`post-${elements.length}`} marginTop={elements.length > 0 ? 0 : 1}>
         <Text>{assistantRendered ? (marked.parse(remainingText) as string) : remainingText}</Text>
       </Box>
     );
@@ -978,7 +978,7 @@ export default function App() {
           <Box flexDirection="column" marginY={1} paddingLeft={2}>
             <Text bold>Select model:</Text>
             {configModels.map((m, idx) => (
-              <Text key={`${m.provider}-${m.model}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
+              <Text key={idx} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
                 {m.alias} ({m.provider}/{m.model})
               </Text>
             ))}
