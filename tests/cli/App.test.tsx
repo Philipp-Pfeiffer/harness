@@ -29,6 +29,7 @@ const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {}) as any);
 
 beforeEach(() => {
   exitSpy.mockClear();
+  vi.spyOn(process, "cwd").mockReturnValue("/tmp");
 });
 
 afterEach(() => {

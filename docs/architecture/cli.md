@@ -85,6 +85,15 @@ graph TD
 | `ToolCard` | `App.tsx:138` | Karten-UI für einzelne Tool-Calls (pending/done/error) |
 | `TurnView` | `App.tsx:218` | Rendert abgeschlossenen Turn mit Markdown |
 
+### Markdown-Rendering
+
+Assistant-Text wird via `marked` + `marked-terminal` in terminal-freundliches ASCII übersetzt. Konfiguration in `src/cli/App.tsx:19-42`:
+
+- **Listen:** Bullet `•`, Einrückung 2 Spaces, kein `#`-Prefix.
+- **Überschriften:** `showSectionPrefix: false`, H1 bold+underline (cyan), H2+ bold (cyan).
+- **Code:** Inline mit Backticks (`\`code\``) in gray, Blöcke 2-Space-indented in gray.
+- **Farben:** cyan (Headings/StatusBar), gray (Code/Blockquote/HR), blue (Links).
+
 ---
 
 ## 3. Session State & Conversation History
