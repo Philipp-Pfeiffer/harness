@@ -193,6 +193,7 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         drainMailbox(mailbox, history as Message[]);
+        context.messages = history as Message[];
 
         const eventStream = stream(resolvedModel, context, { signal });
         let response: AssistantMessage;
@@ -245,6 +246,7 @@ export function createAgent(config: AgentConfig): Agent {
         // Drain steering messages after stream ends, before processing stopReason.
         // This handles steers received during the LLM stream.
         drainMailbox(mailbox, history as Message[]);
+        context.messages = history as Message[];
 
         if (response.stopReason === "stop" || response.stopReason === "length") {
           const textParts = response.content

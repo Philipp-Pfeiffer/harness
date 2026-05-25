@@ -829,5 +829,59 @@ describe("Agent", () => {
       expect(mailbox.isEmpty()).toBe(true);
       expect(history.some((m: any) => m.role === "system")).toBe(false);
     });
+
+    it("re-assigns context.messages after drainMailbox so stream sees steer updates", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      const capturedContexts: any[] = [];
+
+      vi.mocked(stream)
+        .mockImplementationOnce((_, context) => {
+          capturedContexts.push(context);
+          return mockStream(mockToolCall);
+        })
+        .mockImplementationOnce((_, context) => {
+          capturedContexts.push(context);
+          return mockStream(mockFinal);
+        });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute(args) {
+          return args.text;
+        },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const mailbox = createMailbox();
+      const history: Message[] = [makeUserMessage("Call echo")];
+
+      const runPromise = agent.run(history, {
+        mailbox,
+        onEvent: (event) => {
+          if (event.type === "tool_call_start") {
+            mailbox.push("mid-tool steer");
+          }
+        },
+      });
+
+      const result = await runPromise;
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+
+      // Both stream calls should have received the same context object
+      expect(capturedContexts.length).toBe(2);
+      expect(capturedContexts[0]).toBe(capturedContexts[1]);
+
+      // But the messages array should have grown: user + assistant + toolResult + system + assistant
+      expect(capturedContexts[0].messages.length).toBe(5);
+      const sysMsg = capturedContexts[0].messages.find((m: any) => m.role === "system");
+      expect(sysMsg).toBeDefined();
+      expect(sysMsg.content).toContain("mid-tool steer");
+    });
   });
 });
