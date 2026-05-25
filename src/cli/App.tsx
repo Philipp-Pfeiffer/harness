@@ -737,6 +737,17 @@ export default function App({ configPath }: { configPath?: string } = {}) {
           };
           forceUpdate();
         }
+
+        // Safety: treat "stopp", "stop", "abort" as immediate abort commands
+        const stopWords = ["stopp", "stop", "abort"];
+        if (stopWords.includes(trimmed.toLowerCase()) && abortControllerRef.current) {
+          userAbortedRef.current = true;
+          abortControllerRef.current.abort();
+          if (activeTurnRef.current) {
+            activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
+            forceUpdate();
+          }
+        }
         return;
       }
 

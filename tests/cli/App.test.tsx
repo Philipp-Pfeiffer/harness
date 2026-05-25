@@ -625,6 +625,47 @@ describe("CLI App", () => {
       expect(mockRun).toHaveBeenCalledTimes(1);
     });
 
+    it("aborts the turn when steer message is 'stopp'", async () => {
+      let resolveRun: (value: { aborted: boolean; turns: number; finalMessage: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }) => void;
+      const runPromise = new Promise<{ aborted: boolean; turns: number; finalMessage: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }>((resolve) => {
+        resolveRun = resolve;
+      });
+
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "working" });
+        await runPromise;
+        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
+      });
+
+      const { lastFrame, stdin, frames } = render(<App />);
+
+      stdin.write("run");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      // Send "stopp" while running
+      stdin.write("stopp");
+      await delay(50);
+      stdin.write("\r");
+      await delay(50);
+
+      let frame = lastFrame();
+      expect(frame).toContain("[steer]");
+      expect(frame).toContain("stopp");
+
+      // Resolve the run — but it should have been aborted
+      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } });
+      await delay(200);
+
+      const allFrames = frames.join("\n");
+      // The turn should show as aborted
+      expect(allFrames).toContain("[abgebrochen]");
+      // mockRun should have been called once, then aborted by the steer
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    });
+
     it("preserves multi-line input with Shift+Enter during streaming", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         await delay(50);
