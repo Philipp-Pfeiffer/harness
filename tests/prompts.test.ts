@@ -25,6 +25,13 @@ describe("prompt()", () => {
     expect(() => prompt("does-not-exist", {})).toThrow();
   });
 
+  it("system-prompt snapshot", () => {
+    const result = prompt("system-prompt");
+    expect(result).toContain("Terminal-UI");
+    expect(result).toContain("Bullet-Listen");
+    expect(result).not.toContain("<!--");
+  });
+
   it("steer-annotation snapshot", () => {
     const result = prompt("steer-annotation", {
       userInput: "Apfelsaft",
