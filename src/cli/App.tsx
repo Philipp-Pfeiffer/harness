@@ -297,12 +297,10 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
 function PromptInput({
   onSubmit,
   history,
-  isRunning,
   commands,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
-  isRunning: boolean;
   commands?: SlashCommandInfo[];
 }) {
   const [, setRenderTick] = useState(0);
@@ -1008,7 +1006,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
           </Box>
         )}
       </Box>
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} isRunning={isRunningRef.current} commands={slashCommands} />
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />
       <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
     </Box>
   );
