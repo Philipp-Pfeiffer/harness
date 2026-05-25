@@ -883,5 +883,112 @@ describe("Agent", () => {
       expect(steerMsg).toBeDefined();
       expect(steerMsg.content[0].text).toContain("mid-tool steer");
     });
+
+    it("steer survives real-provider message conversion and is positioned after tool results", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      // Simulate a real provider's transformMessages behavior:
+      // - Drop role: "system" messages
+      // - Insert synthetic tool results for orphaned tool calls before user messages
+      const simulateRealProvider = (messages: any[]) => {
+        const result: any[] = [];
+        let pendingToolCalls: any[] = [];
+        let existingToolResultIds = new Set<string>();
+
+        const insertSynthetic = () => {
+          for (const tc of pendingToolCalls) {
+            if (!existingToolResultIds.has(tc.id)) {
+              result.push({
+                role: "toolResult",
+                toolCallId: tc.id,
+                toolName: tc.name,
+                content: [{ type: "text", text: "No result provided" }],
+                isError: true,
+              });
+            }
+          }
+          pendingToolCalls = [];
+          existingToolResultIds = new Set();
+        };
+
+        for (const msg of messages) {
+          if (msg.role === "assistant") {
+            insertSynthetic();
+            const toolCalls = msg.content.filter((b: any) => b.type === "toolCall");
+            if (toolCalls.length > 0) pendingToolCalls = toolCalls;
+            result.push(msg);
+          } else if (msg.role === "toolResult") {
+            existingToolResultIds.add(msg.toolCallId);
+            result.push(msg);
+          } else if (msg.role === "user") {
+            insertSynthetic();
+            result.push(msg);
+          } else if (msg.role === "system") {
+            // Dropped by real provider (e.g. Anthropic convertMessages)
+          } else {
+            result.push(msg);
+          }
+        }
+        insertSynthetic();
+        return result;
+      };
+
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStream(mockToolCall))
+        .mockImplementationOnce((_, context) => {
+          const visibleMessages = simulateRealProvider(context.messages);
+
+          // The steer must be visible as a user message
+          const steerMsg = visibleMessages.find(
+            (m: any) => m.role === "user" && m.content[0]?.text?.includes("Apfelsaft")
+          );
+          expect(steerMsg).toBeDefined();
+
+          // There must be no synthetic tool results (orphaned tool calls)
+          const syntheticResults = visibleMessages.filter(
+            (m: any) =>
+              m.role === "toolResult" &&
+              m.content[0]?.text === "No result provided"
+          );
+          expect(syntheticResults.length).toBe(0);
+
+          // The steer must come after the tool result, not between assistant and tool result
+          const roles = visibleMessages.map((m: any) => m.role);
+          const toolResultIndex = roles.indexOf("toolResult");
+          const steerIndex = visibleMessages.findIndex(
+            (m: any) => m.role === "user" && m.content[0]?.text?.includes("Apfelsaft")
+          );
+          expect(toolResultIndex).not.toBe(-1);
+          expect(steerIndex).not.toBe(-1);
+          expect(steerIndex).toBeGreaterThan(toolResultIndex);
+
+          return mockStream(mockFinal);
+        });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute(args) {
+          return args.text;
+        },
+      };
+      const agent = createAgent({ tools: [echoTool], model });
+      const mailbox = createMailbox();
+      const history: Message[] = [makeUserMessage("Call echo")];
+
+      const runPromise = agent.run(history, { mailbox });
+
+      // Push steer while the LLM stream is "running" (simulated by immediate return)
+      mailbox.push("Apfelsaft");
+
+      const result = await runPromise;
+
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    });
   });
 });
