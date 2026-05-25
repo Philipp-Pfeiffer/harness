@@ -712,12 +712,12 @@ describe("Agent", () => {
       vi.mocked(stream)
         .mockReturnValueOnce(mockStream(mockToolCall))
         .mockImplementationOnce((_, context) => {
-          // Verify the steer system message was injected before this second LLM call
-          const sysMsg = context.messages.find((m: any) => m.role === "system");
-          expect(sysMsg).toBeDefined();
-          expect(sysMsg.content).toContain("steer1");
-          expect(sysMsg.content).toContain("steer2");
-          expect(sysMsg.content).toContain("⚠ Steer");
+          // Verify the steer message was injected before this second LLM call
+          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+          expect(steerMsg).toBeDefined();
+          expect(steerMsg.content[0].text).toContain("steer1");
+          expect(steerMsg.content[0].text).toContain("steer2");
+          expect(steerMsg.content[0].text).toContain("⚠ Steer");
           return mockStream(mockFinal);
         });
 
@@ -746,8 +746,8 @@ describe("Agent", () => {
       const result = await runPromise;
 
       expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
-      expect(history.length).toBe(5); // user + assistant + toolResult + system + assistant
-      expect(history[3].role).toBe("system");
+      expect(history.length).toBe(5); // user + assistant + toolResult + steer user + assistant
+      expect(history[3].role).toBe("user");
     });
 
     it("drains steering messages after stream ends, before tool calls", async () => {
@@ -760,9 +760,9 @@ describe("Agent", () => {
       vi.mocked(stream)
         .mockReturnValueOnce(mockStream(mockToolCall))
         .mockImplementationOnce((_, context) => {
-          const sysMsg = context.messages.find((m: any) => m.role === "system");
-          expect(sysMsg).toBeDefined();
-          expect(sysMsg.content).toContain("mid-stream steer");
+          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+          expect(steerMsg).toBeDefined();
+          expect(steerMsg.content[0].text).toContain("mid-stream steer");
           return mockStream(mockFinal);
         });
 
@@ -786,8 +786,8 @@ describe("Agent", () => {
       const result = await runPromise;
 
       expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
-      const sysMsg = history.find((m: any) => m.role === "system");
-      expect(sysMsg).toBeDefined();
+      const steerMsg = history.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+      expect(steerMsg).toBeDefined();
     });
 
     it("clears mailbox on abort and does not inject steer into history", async () => {
@@ -877,11 +877,11 @@ describe("Agent", () => {
       expect(capturedContexts.length).toBe(2);
       expect(capturedContexts[0]).toBe(capturedContexts[1]);
 
-      // But the messages array should have grown: user + assistant + toolResult + system + assistant
+      // But the messages array should have grown: user + assistant + toolResult + steer user + assistant
       expect(capturedContexts[0].messages.length).toBe(5);
-      const sysMsg = capturedContexts[0].messages.find((m: any) => m.role === "system");
-      expect(sysMsg).toBeDefined();
-      expect(sysMsg.content).toContain("mid-tool steer");
+      const steerMsg = capturedContexts[0].messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+      expect(steerMsg).toBeDefined();
+      expect(steerMsg.content[0].text).toContain("mid-tool steer");
     });
   });
 });
