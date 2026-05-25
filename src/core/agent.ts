@@ -164,12 +164,7 @@ function stripDanglingToolCalls(
   }
 }
 
-const DEFAULT_SYSTEM_PROMPT = `Du bist ein hilfreicher Assistent in einer Terminal-UI.
-- Antworte in knapper Prosa.
-- Verzichte auf Markdown-Überschriften (#, ##, ###).
-- Nutze Bullet-Listen (-) für Aufzählungen.
-- Code-Blöcke (\`\`\`) und Inline-Code (\`) sind erwünscht.
-- Fett (**text**), kursiv (*text*) und Tabellen (| ... |) sind explizit erlaubt und erwünscht.`;
+
 
 export interface AgentConfig {
   tools: Tool[];
@@ -185,7 +180,8 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, systemPrompt = DEFAULT_SYSTEM_PROMPT, maxIterations = 10, model, logger } = config;
+  const { tools, maxIterations = 10, model, logger } = config;
+  const systemPrompt = config.systemPrompt ?? prompt("system-prompt");
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {
