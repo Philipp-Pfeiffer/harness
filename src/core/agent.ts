@@ -24,7 +24,7 @@ export interface ToolCallLog {
 
 export type Logger = (msg: string) => void;
 
-type SteerMessage = { role: "system"; content: string; timestamp: number };
+
 
 /**
  * Options passed to a single `run()` invocation.
@@ -104,18 +104,18 @@ function drainMailbox(mailbox: Mailbox | undefined, messages: Message[]): void {
   const steers = mailbox.drainAll();
   if (steers.length === 0) return;
   const content = formatSteerMessage(steers);
-  (messages as Array<Message | SteerMessage>).push({
-    role: "system",
-    content,
+  messages.push({
+    role: "user",
+    content: [{ type: "text", text: content }],
     timestamp: Date.now(),
-  });
+  } as Message);
 }
 
 function discardMailbox(mailbox: Mailbox | undefined): void {
   mailbox?.drainAll();
 }
 
-function findLastAssistantMessageIndex(messages: Array<Message | SteerMessage>): number {
+function findLastAssistantMessageIndex(messages: Message[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "assistant") {
       return i;
@@ -125,7 +125,7 @@ function findLastAssistantMessageIndex(messages: Array<Message | SteerMessage>):
 }
 
 function stripDanglingToolCalls(
-  messages: Array<Message | SteerMessage>,
+  messages: Message[],
   executedToolCallIds: Set<string>
 ): void {
   const idx = findLastAssistantMessageIndex(messages);
@@ -174,10 +174,9 @@ export function createAgent(config: AgentConfig): Agent {
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent, mailbox } = options;
-      const history = messages as Array<Message | SteerMessage>;
       const context: PiContext = {
         systemPrompt,
-        messages: history as Message[],
+        messages,
         tools: tools.map(toPiTool),
       };
 
@@ -192,8 +191,7 @@ export function createAgent(config: AgentConfig): Agent {
           return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
-        drainMailbox(mailbox, history as Message[]);
-        context.messages = history as Message[];
+        drainMailbox(mailbox, context.messages);
 
         const eventStream = stream(resolvedModel, context, { signal });
         let response: AssistantMessage;
@@ -242,22 +240,6 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         context.messages.push(response);
-
-        // Drain steering messages after stream ends, before processing stopReason.
-        // This handles steers received during the LLM stream.
-        drainMailbox(mailbox, history as Message[]);
-        context.messages = history as Message[];
-
-        if (response.stopReason === "stop" || response.stopReason === "length") {
-          const textParts = response.content
-            .filter((c): c is TextContent => c.type === "text")
-            .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
-        }
-
-        if (response.stopReason === "aborted") {
-          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
-        }
 
         if (response.stopReason === "toolUse") {
           const toolCalls = response.content.filter(
@@ -368,6 +350,11 @@ export function createAgent(config: AgentConfig): Agent {
 
           onEvent?.({ type: "turn_end", turn: i + 1 });
 
+          // Drain steering messages after tool results are in place.
+          // This ensures steer messages appear after tool results, avoiding
+          // synthetic tool result insertion by providers like Anthropic.
+          drainMailbox(mailbox, context.messages);
+
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
             const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
@@ -377,6 +364,21 @@ export function createAgent(config: AgentConfig): Agent {
           }
 
           continue;
+        }
+
+        // Drain steering messages after stream ends, before processing stopReason.
+        // This handles steers received during the LLM stream for non-toolUse responses.
+        drainMailbox(mailbox, context.messages);
+
+        if (response.stopReason === "stop" || response.stopReason === "length") {
+          const textParts = response.content
+            .filter((c): c is TextContent => c.type === "text")
+            .map((c) => c.text);
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+        }
+
+        if (response.stopReason === "aborted") {
+          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
       }
 
