@@ -1,5 +1,6 @@
 import { stream } from "@mariozechner/pi-ai";
 import { resolveModel } from "./resolveModel.js";
+import { prompt } from "../prompts.js";
 import { Value } from "typebox/value";
 import type {
   Context as PiContext,
@@ -92,18 +93,15 @@ function createToolResultMessage(
   };
 }
 
-function formatSteerMessage(steers: string[]): string {
-  return (
-    `⚠ Steer während Tool-Call. Behandle als Korrektur/Ergänzung der ursprünglichen Aufgabe:\n` +
-    steers.map((s) => `"${s}"`).join("\n")
-  );
-}
-
 function drainMailbox(mailbox: Mailbox | undefined, messages: Message[]): void {
   if (!mailbox) return;
   const steers = mailbox.drainAll();
   if (steers.length === 0) return;
-  const content = formatSteerMessage(steers);
+  const userInput = steers.map((s) => `"${s}"`).join("\n");
+  const content = prompt("steer-annotation", {
+    userInput,
+    timestamp: new Date().toISOString(),
+  });
   messages.push({
     role: "user",
     content: [{ type: "text", text: content }],
