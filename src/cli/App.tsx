@@ -433,13 +433,11 @@ function PromptInput({
       clearSelection();
       changed = true;
     } else if (key.return) {
-      if (!isRunning) {
-        onSubmit(currentValue);
-        valueRef.current = "";
-        cursorOffsetRef.current = 0;
-        clearSelection();
-        historyIndexRef.current = -1;
-      }
+      onSubmit(currentValue);
+      valueRef.current = "";
+      cursorOffsetRef.current = 0;
+      clearSelection();
+      historyIndexRef.current = -1;
       changed = true;
     } else if (key.upArrow) {
       if (key.shift) {
