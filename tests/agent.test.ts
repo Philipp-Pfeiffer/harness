@@ -583,6 +583,122 @@ describe("Agent", () => {
       expect(history[1].role).toBe("assistant");
       expect(history[2].role).toBe("toolResult");
     });
+
+    it("preserves partial text in history when aborted during text stream", async () => {
+      const controller = new AbortController();
+      const history: Message[] = [];
+
+      vi.mocked(stream).mockImplementationOnce(() => {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "Hello",
+              partial: makeAssistantMessage([], "stop"),
+            };
+            yield {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: " world",
+              partial: makeAssistantMessage([], "stop"),
+            };
+            controller.abort();
+            throw new DOMException("Aborted", "AbortError");
+          },
+          async result() {
+            throw new DOMException("Aborted", "AbortError");
+          },
+        } as unknown as AssistantMessageEventStream;
+      });
+
+      const agent = createAgent({ tools: [], model });
+      history.push(makeUserMessage("Say hello"));
+      const result = await agent.run(history, { signal: controller.signal });
+
+      expect(result.aborted).toBe(true);
+      expect(history.length).toBe(2);
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect((history[1] as any).content).toEqual([{ type: "text", text: "Hello world" }]);
+    });
+
+    it("keeps assistant text but removes dangling tool calls when aborted before tool execution", async () => {
+      const history: Message[] = [];
+      const mockToolCall = makeAssistantMessage(
+        [
+          { type: "text", text: "I will call echo." },
+          { type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } },
+        ],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      vi.mocked(stream).mockImplementationOnce(() => {
+        controller.abort();
+        return mockStream(mockToolCall);
+      });
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() { return "done"; },
+      };
+
+      const agent = createAgent({ tools: [echoTool], model });
+      history.push(makeUserMessage("Call echo"));
+      const result = await agent.run(history, { signal: controller.signal });
+
+      expect(result.aborted).toBe(true);
+      expect(history.length).toBe(2); // user + assistant (text only)
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect((history[1] as any).content).toEqual([{ type: "text", text: "I will call echo." }]);
+    });
+
+    it("keeps completed tool calls and results, removes incomplete ones when aborted during tool execution", async () => {
+      const history: Message[] = [];
+      const mockToolCall = makeAssistantMessage(
+        [
+          { type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "first" } },
+          { type: "toolCall", id: "tc_2", name: "echo", arguments: { text: "second" } },
+        ],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      let toolRuns = 0;
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() {
+          toolRuns++;
+          if (toolRuns === 1) {
+            controller.abort();
+          }
+          return "done";
+        },
+      };
+
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
+
+      const agent = createAgent({ tools: [echoTool], model });
+      history.push(makeUserMessage("Call echo twice"));
+      const result = await agent.run(history, { signal: controller.signal });
+
+      expect(result.aborted).toBe(true);
+      expect(toolRuns).toBe(1);
+      expect(history.length).toBe(3); // user + assistant (1 toolCall) + 1 toolResult
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect((history[1] as any).content).toEqual([
+        { type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "first" } },
+      ]);
+      expect(history[2].role).toBe("toolResult");
+    });
   });
 
   describe("Mailbox steering", () => {

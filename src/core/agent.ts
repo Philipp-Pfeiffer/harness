@@ -10,6 +10,7 @@ import type {
   Model,
   Api,
   Message,
+  AssistantMessage,
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
@@ -114,6 +115,35 @@ function discardMailbox(mailbox: Mailbox | undefined): void {
   mailbox?.drainAll();
 }
 
+function findLastAssistantMessageIndex(messages: Array<Message | SteerMessage>): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function stripDanglingToolCalls(
+  messages: Array<Message | SteerMessage>,
+  executedToolCallIds: Set<string>
+): void {
+  const idx = findLastAssistantMessageIndex(messages);
+  if (idx === -1) return;
+  const msg = messages[idx] as AssistantMessage;
+  const newContent = msg.content.filter((c) => {
+    if (c.type === "toolCall") {
+      return executedToolCallIds.has(c.id);
+    }
+    return true;
+  });
+  if (newContent.length === 0) {
+    messages.splice(idx, 1);
+  } else {
+    messages[idx] = { ...msg, content: newContent };
+  }
+}
+
 const DEFAULT_SYSTEM_PROMPT = `Du bist ein hilfreicher Assistent in einer Terminal-UI.
 - Antworte in knapper Prosa.
 - Verzichte auf Markdown-Überschriften (#, ##, ###).
@@ -165,11 +195,13 @@ export function createAgent(config: AgentConfig): Agent {
         drainMailbox(mailbox, history as Message[]);
 
         const eventStream = stream(resolvedModel, context, { signal });
-        let response: import("@mariozechner/pi-ai").AssistantMessage;
+        let response: AssistantMessage;
+        let partialText = "";
 
         try {
           for await (const event of eventStream) {
             if (event.type === "text_delta") {
+              partialText += event.delta;
               onEvent?.({ type: "token", text: event.delta });
             }
           }
@@ -181,6 +213,18 @@ export function createAgent(config: AgentConfig): Agent {
             signal?.aborted ||
             (err instanceof Error && err.name === "AbortError")
           ) {
+            if (partialText.length > 0) {
+              context.messages.push({
+                role: "assistant",
+                content: [{ type: "text", text: partialText }],
+                stopReason: "aborted",
+                provider: resolvedModel.provider,
+                api: resolvedModel.api,
+                model: resolvedModel.name,
+                usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+                timestamp: Date.now(),
+              });
+            }
             discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
@@ -218,10 +262,11 @@ export function createAgent(config: AgentConfig): Agent {
             (c): c is PiToolCall => c.type === "toolCall"
           );
 
-          // Check 2: Before any tool execution — if already aborted, roll back
-          // the assistant message so we don't leave dangling tool calls in history.
+          // Check 2: Before any tool execution — if already aborted, strip
+          // dangling tool calls from the assistant message so we don't leave
+          // incomplete tool calls in history. Text content is preserved.
           if (signal?.aborted) {
-            context.messages.pop();
+            stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
@@ -323,6 +368,8 @@ export function createAgent(config: AgentConfig): Agent {
 
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
+            const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
+            stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
