@@ -991,4 +991,86 @@ describe("Agent", () => {
       expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
     });
   });
+
+  describe("Abort annotation", () => {
+    it("injects abort-annotation after tool result when aborted during tool execution", async () => {
+      const history: Message[] = [];
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "echo", arguments: { text: "hi" } }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      const abortCommand = { current: "stopp" };
+      let toolExecuted = false;
+
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
+
+      const echoTool: Tool<typeof echoArgs> = {
+        name: "echo",
+        description: "Echo for tests",
+        parameters: echoArgs,
+        execute() {
+          toolExecuted = true;
+          controller.abort();
+          return "done";
+        },
+      };
+
+      const agent = createAgent({ tools: [echoTool], model });
+      history.push(makeUserMessage("Call echo"));
+      const result = await agent.run(history, { signal: controller.signal, abortCommand });
+
+      expect(result.aborted).toBe(true);
+      expect(toolExecuted).toBe(true);
+      expect(history.length).toBe(4); // user + assistant + toolResult + abort-annotation
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect(history[2].role).toBe("toolResult");
+      expect(history[3].role).toBe("user");
+      const annotation = (history[3] as any).content[0].text;
+      expect(annotation).toContain("stopp");
+      expect(annotation).toContain("User-Abort-Kommando");
+      expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("injects abort-annotation without synth tool_result when aborted during text stream", async () => {
+      const controller = new AbortController();
+      const abortCommand = { current: "stop" };
+      const history: Message[] = [];
+
+      vi.mocked(stream).mockImplementationOnce(() => {
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "Hello",
+              partial: makeAssistantMessage([], "stop"),
+            };
+            controller.abort();
+            throw new DOMException("Aborted", "AbortError");
+          },
+          async result() {
+            throw new DOMException("Aborted", "AbortError");
+          },
+        } as unknown as AssistantMessageEventStream;
+      });
+
+      const agent = createAgent({ tools: [], model });
+      history.push(makeUserMessage("Say hello"));
+      const result = await agent.run(history, { signal: controller.signal, abortCommand });
+
+      expect(result.aborted).toBe(true);
+      expect(history.length).toBe(3); // user + assistant (partial) + abort-annotation
+      expect(history[0].role).toBe("user");
+      expect(history[1].role).toBe("assistant");
+      expect((history[1] as any).content).toEqual([{ type: "text", text: "Hello" }]);
+      expect(history[2].role).toBe("user");
+      const annotation = (history[2] as any).content[0].text;
+      expect(annotation).toContain("stop");
+      expect(annotation).toContain("User-Abort-Kommando");
+      expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    });
+  });
 });
