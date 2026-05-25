@@ -37,6 +37,8 @@ export interface RunOptions {
   onEvent?: (event: AgentEvent) => void;
   /** Optional mailbox for runtime steering messages. */
   mailbox?: Mailbox;
+  /** Optional mutable ref to the abort command string (set by CLI when user types stop/stopp/abort). */
+  abortCommand?: { current: string | undefined };
 }
 
 /**
@@ -113,6 +115,26 @@ function discardMailbox(mailbox: Mailbox | undefined): void {
   mailbox?.drainAll();
 }
 
+function pushAbortAnnotation(
+  messages: Message[],
+  abortCommand: { current: string | undefined } | undefined
+): void {
+  if (!abortCommand?.current) return;
+  messages.push({
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: prompt("abort-annotation", {
+          command: abortCommand.current,
+          timestamp: new Date().toISOString(),
+        }),
+      },
+    ],
+    timestamp: Date.now(),
+  } as Message);
+}
+
 function findLastAssistantMessageIndex(messages: Message[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === "assistant") {
@@ -186,6 +208,7 @@ export function createAgent(config: AgentConfig): Agent {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
+          pushAbortAnnotation(context.messages, options.abortCommand);
           return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
 
@@ -223,6 +246,7 @@ export function createAgent(config: AgentConfig): Agent {
               });
             }
             discardMailbox(mailbox);
+            pushAbortAnnotation(context.messages, options.abortCommand);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
           throw err;
@@ -250,6 +274,7 @@ export function createAgent(config: AgentConfig): Agent {
           if (signal?.aborted) {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
+            pushAbortAnnotation(context.messages, options.abortCommand);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
 
@@ -358,6 +383,7 @@ export function createAgent(config: AgentConfig): Agent {
             const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
             stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
+            pushAbortAnnotation(context.messages, options.abortCommand);
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
           }
 

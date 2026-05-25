@@ -636,6 +636,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const userAbortedRef = useRef(false);
+  const abortCommandRef = useRef<string | undefined>(undefined);
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
   const mailboxRef = useRef<Mailbox>(createMailbox());
@@ -742,6 +743,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
         const stopWords = ["stopp", "stop", "abort"];
         if (stopWords.includes(trimmed.toLowerCase()) && abortControllerRef.current) {
           userAbortedRef.current = true;
+          abortCommandRef.current = trimmed.toLowerCase();
           abortControllerRef.current.abort();
           if (activeTurnRef.current) {
             activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
@@ -761,11 +763,13 @@ export default function App({ configPath }: { configPath?: string } = {}) {
       const controller = new AbortController();
       abortControllerRef.current = controller;
       userAbortedRef.current = false;
+      abortCommandRef.current = undefined;
 
       agent
         .run(historyRef.current, {
           signal: controller.signal,
           mailbox: mailboxRef.current,
+          abortCommand: abortCommandRef,
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
@@ -970,6 +974,7 @@ export default function App({ configPath }: { configPath?: string } = {}) {
 
       if (isRunningRef.current && abortControllerRef.current) {
         userAbortedRef.current = true;
+        abortCommandRef.current = "ctrl+c";
         abortControllerRef.current.abort();
         if (activeTurnRef.current) {
           activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
