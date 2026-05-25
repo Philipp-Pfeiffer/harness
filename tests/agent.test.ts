@@ -1030,7 +1030,8 @@ describe("Agent", () => {
       expect(history[3].role).toBe("user");
       const annotation = (history[3] as any).content[0].text;
       expect(annotation).toContain("stopp");
-      expect(annotation).toContain("User-Abort-Kommando");
+      expect(annotation).toContain("User-Abort");
+      expect(annotation).toContain("synthetisch");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
 
@@ -1069,7 +1070,8 @@ describe("Agent", () => {
       expect(history[2].role).toBe("user");
       const annotation = (history[2] as any).content[0].text;
       expect(annotation).toContain("stop");
-      expect(annotation).toContain("User-Abort-Kommando");
+      expect(annotation).toContain("User-Abort");
+      expect(annotation).toContain("synthetisch");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
   });
