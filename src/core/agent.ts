@@ -241,21 +241,6 @@ export function createAgent(config: AgentConfig): Agent {
 
         context.messages.push(response);
 
-        // Drain steering messages after stream ends, before processing stopReason.
-        // This handles steers received during the LLM stream.
-        drainMailbox(mailbox, context.messages);
-
-        if (response.stopReason === "stop" || response.stopReason === "length") {
-          const textParts = response.content
-            .filter((c): c is TextContent => c.type === "text")
-            .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
-        }
-
-        if (response.stopReason === "aborted") {
-          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
-        }
-
         if (response.stopReason === "toolUse") {
           const toolCalls = response.content.filter(
             (c): c is PiToolCall => c.type === "toolCall"
@@ -365,6 +350,11 @@ export function createAgent(config: AgentConfig): Agent {
 
           onEvent?.({ type: "turn_end", turn: i + 1 });
 
+          // Drain steering messages after tool results are in place.
+          // This ensures steer messages appear after tool results, avoiding
+          // synthetic tool result insertion by providers like Anthropic.
+          drainMailbox(mailbox, context.messages);
+
           // Check 3: Between iterations (after tool results, before next turn)
           if (signal?.aborted) {
             const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
@@ -374,6 +364,21 @@ export function createAgent(config: AgentConfig): Agent {
           }
 
           continue;
+        }
+
+        // Drain steering messages after stream ends, before processing stopReason.
+        // This handles steers received during the LLM stream for non-toolUse responses.
+        drainMailbox(mailbox, context.messages);
+
+        if (response.stopReason === "stop" || response.stopReason === "length") {
+          const textParts = response.content
+            .filter((c): c is TextContent => c.type === "text")
+            .map((c) => c.text);
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+        }
+
+        if (response.stopReason === "aborted") {
+          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
         }
       }
 
