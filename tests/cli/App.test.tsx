@@ -540,7 +540,7 @@ describe("CLI App", () => {
       expect(frame).toContain("next");
     });
 
-    it("blocks Enter during streaming", async () => {
+    it("queues steer message during streaming", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         await delay(50);
         options?.onEvent?.({ type: "token", text: "first" });
@@ -556,15 +556,72 @@ describe("CLI App", () => {
       await delay(150);
 
       // Type and press Enter while streaming
-      stdin.write("blocked");
+      stdin.write("steer message");
       await delay(50);
       stdin.write("\r");
       await delay(50);
 
       const frame = lastFrame();
-      // Text should still be in input, not submitted as a new turn
-      expect(frame).toContain("blocked");
+      // Input should be cleared after submit
+      expect(frame).not.toContain("❯ steer message");
+      // Steer should appear in active turn
+      expect(frame).toContain("[steer]");
+      expect(frame).toContain("steer message");
       // mockRun should only be called once (for the first submit)
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    });
+
+    it("queues multiple steer messages during a turn", async () => {
+      let resolveRun: (value: { aborted: boolean; turns: number; finalMessage: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }) => void;
+      const runPromise = new Promise<{ aborted: boolean; turns: number; finalMessage: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number } }>((resolve) => {
+        resolveRun = resolve;
+      });
+
+      mockRun.mockImplementation(async (_messages, options) => {
+        await delay(50);
+        options?.onEvent?.({ type: "token", text: "working" });
+        await runPromise;
+        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } };
+      });
+
+      const { lastFrame, stdin, frames } = render(<App />);
+
+      stdin.write("run");
+      await delay(50);
+      stdin.write("\r");
+      await delay(150);
+
+      // Queue first steer
+      stdin.write("steer one");
+      await delay(50);
+      stdin.write("\r");
+      await delay(50);
+
+      let frame = lastFrame();
+      expect(frame).toContain("[steer]");
+      expect(frame).toContain("steer one");
+
+      // Queue second steer
+      stdin.write("steer two");
+      await delay(50);
+      stdin.write("\r");
+      await delay(50);
+
+      frame = lastFrame();
+      expect(frame).toContain("steer one");
+      expect(frame).toContain("steer two");
+
+      // End the turn
+      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } });
+      await delay(200);
+
+      // Both steers should have been visible during the active turn
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("steer one");
+      expect(allFrames).toContain("steer two");
+      // Turn should complete normally (turn content visible in completed turns)
+      expect(allFrames).toContain("working");
+      // mockRun should only be called once
       expect(mockRun).toHaveBeenCalledTimes(1);
     });
 
