@@ -15,7 +15,7 @@ async function cleanup(path: string) {
 
 async function cleanupTmp(path: string) {
   try {
-    await unlink(`${path}.harnes.tmp`);
+    await unlink(`${path}.harness.tmp`);
   } catch (_) {}
 }
 
@@ -96,7 +96,7 @@ describe("write tool", () => {
     it("11. atomic rename: writes to tmp then renames to target", async () => {
       const path = resolve(testDir, "atomic.txt");
       await writeTool.execute({ path, content: "atomic test" });
-      const tmpExists = await executeExecSync({ command: `test -f ${path}.harnes.tmp && echo yes || echo no` });
+      const tmpExists = await executeExecSync({ command: `test -f ${path}.harness.tmp && echo yes || echo no` });
       expect(tmpExists.content).toContain("no");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("atomic test");
@@ -105,7 +105,7 @@ describe("write tool", () => {
     it("12. tmp cleanup: I/O error leaves no tmp file", async () => {
       const path = resolve(testDir, "nonexistent", "file.txt");
       await writeTool.execute({ path, content: "test" });
-      const tmpExists = await executeExecSync({ command: `test -f ${path}.harnes.tmp && echo yes || echo no` });
+      const tmpExists = await executeExecSync({ command: `test -f ${path}.harness.tmp && echo yes || echo no` });
       expect(tmpExists.content).toContain("no");
     });
   });

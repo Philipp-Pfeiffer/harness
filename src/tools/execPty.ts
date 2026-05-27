@@ -2,6 +2,7 @@ import * as pty from "node-pty";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { cwd } from "node:process";
+import { existsSync, statSync } from "node:fs";
 import { EXEC_NO_FLY_PATTERNS, type ExecToolResult } from "./exec.js";
 import { processSupervisor } from "./processSupervisor.js";
 import { RingBuffer, generateHandle } from "./ringBuffer.js";
@@ -10,6 +11,25 @@ import type { Session } from "./processSupervisor.js";
 
 
 const KILL_GRACE_MS = 5_000;
+
+function resolveShell(): string {
+  const candidates = ["/bin/bash", "/usr/bin/bash", "/bin/sh"];
+  for (const shell of candidates) {
+    try {
+      if (existsSync(shell)) {
+        const stats = statSync(shell);
+        if (stats.isFile() && (stats.mode & 0o111) !== 0) {
+          return shell;
+        }
+      }
+    } catch (_) {
+      // continue to next candidate
+    }
+  }
+  throw new Error(`No suitable shell found (tried: ${candidates.join(", ")})`);
+}
+
+const SHELL_PATH = resolveShell();
 
 function expandTilde(pathStr: string): string {
   if (pathStr.startsWith("~/") || pathStr === "~") {
@@ -70,7 +90,11 @@ export async function executeExecPty(args: {
   const finalCommand = args.elevated ? `sudo -n ${args.command}` : args.command;
   const timeoutMs = args.timeout ?? 30_000;
 
-  const ptyProc = pty.spawn("bash", ["-c", finalCommand], {
+  if (SHELL_PATH === "/bin/sh") {
+    console.warn("[execPty] Warning: falling back to /bin/sh. Bash-specific syntax may fail.");
+  }
+
+  const ptyProc = pty.spawn(SHELL_PATH, ["-c", finalCommand], {
     name: "xterm-256color",
     cols: 80,
     rows: 24,

@@ -96,6 +96,11 @@ export const EXEC_NO_FLY_PATTERNS: { pattern: RegExp; reason: string; hint?: str
     hint: "Use 'trash' (trash-cli) for safe file deletion.",
   },
   {
+    pattern: /\brm\b(?=\s+(-[rR]\s+--force\b|--force\b\s+-[rR]|-[fF]\s+--recursive\b|--recursive\b\s+-[fF]))/,
+    reason: "rm with mixed recursive+force flags is blocked",
+    hint: "Use 'trash' (trash-cli) for safe file deletion.",
+  },
+  {
     pattern: /\bdd\s+if=/,
     reason: "dd with input file is blocked (can destroy disks)",
   },

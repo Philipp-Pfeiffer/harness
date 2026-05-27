@@ -194,8 +194,13 @@ async function handleKill(sessionId: string, signal: string): Promise<ProcessToo
   const lines: string[] = [];
   lines.push(`--- killed ${sessionId} ---`);
   lines.push(`signal sent: ${signal}`);
-  lines.push(`exit code: ${result.exitCode ?? "null"}`);
-  lines.push(`exit signal: ${result.exitSignal ?? "null"}`);
+
+  if ("killed" in result && result.killed === false) {
+    lines.push(`result: timeout after 30s (pid: ${result.pid})`);
+  } else {
+    lines.push(`exit code: ${result.exitCode ?? "null"}`);
+    lines.push(`exit signal: ${result.exitSignal ?? "null"}`);
+  }
 
   return { isError: false, content: lines.join("\n") };
 }

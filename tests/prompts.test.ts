@@ -12,17 +12,26 @@ describe("prompt()", () => {
     expect(result).not.toContain("<!--");
   });
 
-  it("throws on missing variable", () => {
-    expect(() =>
-      prompt("steer-annotation", {
-        timestamp: "2026-05-25T10:00:00.000Z",
-        // userInput is missing
-      } as any)
-    ).toThrow('prompt(steer-annotation): missing variable "userInput"');
+  it("returns empty string for missing variable instead of throwing", () => {
+    const result = prompt("steer-annotation", {
+      timestamp: "2026-05-25T10:00:00.000Z",
+      // userInput is missing
+    } as any);
+    expect(result).toContain("⚠ Steer während Tool-Call");
+    // Missing variable should be replaced with empty string
+    expect(result).not.toContain("{{userInput}}");
   });
 
-  it("throws on missing prompt file", () => {
-    expect(() => prompt("does-not-exist", {})).toThrow();
+  it("returns fallback prompt for missing prompt file", () => {
+    const result = prompt("does-not-exist", {});
+    expect(result).toContain("hilfreicher Assistent");
+  });
+
+  it("system-prompt snapshot", () => {
+    const result = prompt("system-prompt");
+    expect(result).toContain("Terminal-UI");
+    expect(result).toContain("Bullet-Listen");
+    expect(result).not.toContain("<!--");
   });
 
   it("steer-annotation snapshot", () => {
@@ -33,6 +42,18 @@ describe("prompt()", () => {
     expect(result).toMatchInlineSnapshot(`
       "⚠ Steer während Tool-Call. Behandle als Korrektur/Ergänzung der ursprünglichen Aufgabe:
       Apfelsaft
+      "
+    `);
+  });
+
+  it("abort-annotation snapshot", () => {
+    const result = prompt("abort-annotation", {
+      command: "stopp",
+      timestamp: "2026-05-25T11:00:00.000Z",
+    });
+    expect(result).toMatchInlineSnapshot(`
+      "[User-Abort: "stopp" @ 2026-05-25T11:00:00.000Z. Eventuelle vorhergehende Tool-Results sind synthetisch.]
+      Nutzer hat Ausführungen abgebrochen.
       "
     `);
   });

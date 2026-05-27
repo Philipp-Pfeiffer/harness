@@ -120,6 +120,30 @@ describe("exec tool", () => {
       expect(result.content).toContain("Blocked destructive command");
     });
 
+    it("rm -r --force /tmp/test → isError, blocked (short+long)", async () => {
+      const result = await executeExec({ command: "rm -r --force /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
+    it("rm --recursive -f /tmp/test → isError, blocked (long+short)", async () => {
+      const result = await executeExec({ command: "rm --recursive -f /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
+    it("rm -f --recursive /tmp/test → isError, blocked (short+long reverse)", async () => {
+      const result = await executeExec({ command: "rm -f --recursive /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
+    it("rm --force -R /tmp/test → isError, blocked (long+short reverse)", async () => {
+      const result = await executeExec({ command: "rm --force -R /tmp/test" });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+    });
+
     it("11. dd if=/dev/zero of=/tmp/x → isError", async () => {
       const result = await executeExec({ command: "dd if=/dev/zero of=/tmp/x" });
       expect(result.isError).toBe(true);

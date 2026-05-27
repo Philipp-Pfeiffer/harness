@@ -76,6 +76,24 @@ describe("readFile tool", () => {
       const result = await readFileTool.execute({ path: binaryBin });
       expect(result).toContain("Unsupported binary format");
     });
+
+    it("returns error for binary file with late null byte (after 1024B)", async () => {
+      const lateNullBin = resolve(fixtures, "binary-late-null.bin");
+      const result = await readFileTool.execute({ path: lateNullBin });
+      expect(result).toContain("Unsupported binary format");
+    });
+
+    it("returns error for file with PNG magic header", async () => {
+      const pngMagicBin = resolve(fixtures, "binary-png-magic.bin");
+      const result = await readFileTool.execute({ path: pngMagicBin });
+      expect(result).toContain("Unsupported binary format");
+    });
+
+    it("returns error for file with ZIP magic header", async () => {
+      const zipMagicBin = resolve(fixtures, "binary-zip-magic.bin");
+      const result = await readFileTool.execute({ path: zipMagicBin });
+      expect(result).toContain("Unsupported binary format");
+    });
   });
 
   describe("PDF support", () => {
