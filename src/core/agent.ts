@@ -55,7 +55,7 @@ export interface TokenUsage {
 }
 
 export type RunResult =
-  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage }
+  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; error?: { type: "provider_aborted"; message: string } }
   | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage };
 
 /**
@@ -398,7 +398,13 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         if (response.stopReason === "aborted") {
-          return { aborted: false, turns: i + 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+          return {
+            aborted: false,
+            turns: i + 1,
+            finalMessage: "Anfrage wurde abgebrochen.",
+            usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens },
+            error: { type: "provider_aborted", message: "Provider aborted the generation." },
+          };
         }
       }
 

@@ -135,7 +135,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Hi")]);
 
-    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, error: { type: "provider_aborted", message: "Provider aborted the generation." } });
   });
 
   it("returns error when tool is not found", async () => {
