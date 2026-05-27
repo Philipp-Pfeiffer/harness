@@ -14,7 +14,7 @@ export async function atomicWrite(
   absolutePath: string,
   content: string
 ): Promise<AtomicWriteResult | AtomicWriteError> {
-  const tmpPath = `${absolutePath}.harnes.tmp`;
+  const tmpPath = `${absolutePath}.harness.tmp`;
   try {
     await writeFile(tmpPath, content, "utf-8");
   } catch (err) {
