@@ -31,12 +31,41 @@ function isPdf(buffer: Buffer): boolean {
     buffer[4] === 0x2d;
 }
 
+const BINARY_SAMPLE_SIZE = 64 * 1024;
+
+const MAGIC_NUMBERS: { magic: Buffer; offset: number }[] = [
+  { magic: Buffer.from([0x89, 0x50, 0x4E, 0x47]), offset: 0 }, // PNG
+  { magic: Buffer.from([0xFF, 0xD8, 0xFF]), offset: 0 },       // JPEG
+  { magic: Buffer.from([0x50, 0x4B, 0x03, 0x04]), offset: 0 }, // ZIP
+  { magic: Buffer.from([0x7F, 0x45, 0x4C, 0x46]), offset: 0 }, // ELF
+  { magic: Buffer.from([0x1F, 0x8B]), offset: 0 },             // gzip
+];
+
+function hasMagicNumber(buffer: Buffer): boolean {
+  for (const { magic, offset } of MAGIC_NUMBERS) {
+    if (buffer.length < offset + magic.length) continue;
+    let match = true;
+    for (let i = 0; i < magic.length; i++) {
+      if (buffer[offset + i] !== magic[i]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
 function hasNullByte(buffer: Buffer): boolean {
-  const sample = buffer.subarray(0, Math.min(1024, buffer.length));
+  const sample = buffer.subarray(0, Math.min(BINARY_SAMPLE_SIZE, buffer.length));
   for (let i = 0; i < sample.length; i++) {
     if (sample[i] === 0) return true;
   }
   return false;
+}
+
+function isBinary(buffer: Buffer): boolean {
+  return hasNullByte(buffer) || hasMagicNumber(buffer);
 }
 
 function sliceLines(text: string, lineStart?: number, lineEnd?: number): string {
@@ -117,8 +146,8 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
       }
     }
 
-    if (hasNullByte(buffer)) {
-      return "Unsupported binary format (null byte detected). Only UTF-8 text and PDF are supported.";
+    if (isBinary(buffer)) {
+      return "Unsupported binary format detected. Only UTF-8 text and PDF are supported.";
     }
 
     let content: string;

@@ -3,6 +3,7 @@ import type { IPty } from "node-pty";
 import { RingBuffer } from "./ringBuffer.js";
 
 const KILL_GRACE_MS = 5_000;
+const KILL_MAX_WAIT_MS = 30_000;
 const GC_INTERVAL_MS = 5 * 60_000;
 const GC_MAX_AGE_MS = 30 * 60_000;
 
@@ -95,7 +96,10 @@ class ProcessSupervisor {
     return { running, finished };
   }
 
-  async kill(handle: string, signal: string = "SIGTERM"): Promise<{ exitCode: number | null; exitSignal: string | null }> {
+  async kill(handle: string, signal: string = "SIGTERM"): Promise<
+    | { exitCode: number | null; exitSignal: string | null }
+    | { killed: false; reason: "timeout"; pid: number }
+  > {
     const session = this.sessions.get(handle);
     if (!session) {
       return { exitCode: null, exitSignal: null };
@@ -116,8 +120,11 @@ class ProcessSupervisor {
     }
 
     return new Promise((resolve) => {
-      const timeoutId = setTimeout(() => {
-        if (signal === "SIGTERM") {
+      const startTime = Date.now();
+      let escalationSent = false;
+
+      const graceTimeoutId = setTimeout(() => {
+        if (signal === "SIGTERM" && !session.exitedAt) {
           if (session.isPty) {
             (session.child as IPty).kill("SIGKILL");
           } else {
@@ -126,14 +133,22 @@ class ProcessSupervisor {
               process.kill(-child.pid, "SIGKILL");
             }
           }
+          escalationSent = true;
         }
       }, KILL_GRACE_MS);
 
+      const maxTimeoutId = setTimeout(() => {
+        clearTimeout(graceTimeoutId);
+        console.warn(`[processSupervisor] kill timeout after ${KILL_MAX_WAIT_MS}ms for session ${handle} (pid: ${session.pid})`);
+        resolve({ killed: false, reason: "timeout", pid: session.pid });
+      }, KILL_MAX_WAIT_MS);
+
       const checkExit = () => {
         if (session.exitedAt) {
-          clearTimeout(timeoutId);
+          clearTimeout(graceTimeoutId);
+          clearTimeout(maxTimeoutId);
           resolve({ exitCode: session.exitCode ?? null, exitSignal: session.exitSignal ?? null });
-        } else {
+        } else if (Date.now() - startTime < KILL_MAX_WAIT_MS) {
           setTimeout(checkExit, 100);
         }
       };
