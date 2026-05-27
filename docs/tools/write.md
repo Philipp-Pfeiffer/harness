@@ -41,7 +41,7 @@ export const WRITE_NO_FLY_PATTERNS: { pattern: RegExp; reason: string }[] = [
 
 ### Atomares Write
 
-1. Schreibt nach `<path>.harnes.tmp`
+1. Schreibt nach `<path>.harness.tmp`
 2. `fs.rename(tmp, target)` auf Zielpfad
 3. Bei Fehler: tmp-Datei löschen, dann Error zurückgeben
 
