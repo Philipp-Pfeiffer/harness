@@ -3,11 +3,11 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 
 export interface MemoryFolderConfig {
-  /** Absolute path to the memory directory. Default: ~/memory */
+  /** Absolute path to the memory directory. Default: <projectRoot>/memory */
   memoryPath: string;
-  /** Absolute path to the sources directory. Default: ~/sources */
+  /** Absolute path to the sources directory. Default: <projectRoot>/sources */
   sourcesPath: string;
-  /** Absolute path to the inbox file. Default: ~/memory/_inbox.md */
+  /** Absolute path to the inbox file. Default: <projectRoot>/memory/_inbox.md */
   inboxPath: string;
 }
 
@@ -18,14 +18,27 @@ function expandHome(path: string): string {
   return resolve(path);
 }
 
+function getProjectRoot(): string {
+  return process.env.HARNESS_PROJECT_ROOT ?? process.cwd();
+}
+
 /**
- * Resolves memory folder paths from environment or defaults.
+ * Resolves memory folder paths from environment or project-root defaults.
+ * Env overrides (HARNESS_MEMORY_PATH, HARNESS_SOURCES_PATH, HARNESS_INBOX_PATH)
+ * always take precedence. Paths starting with ~ are expanded to the home dir.
  */
 export function resolveMemoryConfig(
-  env: Record<string, string | undefined> = process.env
+  env: Record<string, string | undefined> = process.env,
+  projectRoot = getProjectRoot()
 ): MemoryFolderConfig {
-  const memoryPath = expandHome(env.HARNESS_MEMORY_PATH ?? "~/memory");
-  const sourcesPath = expandHome(env.HARNESS_SOURCES_PATH ?? "~/sources");
+  const memoryPath = env.HARNESS_MEMORY_PATH
+    ? expandHome(env.HARNESS_MEMORY_PATH)
+    : resolve(projectRoot, "memory");
+
+  const sourcesPath = env.HARNESS_SOURCES_PATH
+    ? expandHome(env.HARNESS_SOURCES_PATH)
+    : resolve(projectRoot, "sources");
+
   const inboxPath = env.HARNESS_INBOX_PATH
     ? expandHome(env.HARNESS_INBOX_PATH)
     : resolve(memoryPath, "_inbox.md");

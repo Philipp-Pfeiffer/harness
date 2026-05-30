@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 
 describe("memoryFolders", () => {
   describe("resolveMemoryConfig", () => {
-    it("uses defaults when no env is set", () => {
-      const config = resolveMemoryConfig({});
-      expect(config.memoryPath).toContain("memory");
-      expect(config.sourcesPath).toContain("sources");
-      expect(config.inboxPath).toContain("_inbox.md");
+    it("uses project-root defaults when no env is set", () => {
+      const projectRoot = "/fake/project";
+      const config = resolveMemoryConfig({}, projectRoot);
+      expect(config.memoryPath).toBe(resolve(projectRoot, "memory"));
+      expect(config.sourcesPath).toBe(resolve(projectRoot, "sources"));
+      expect(config.inboxPath).toBe(resolve(projectRoot, "memory", "_inbox.md"));
     });
 
     it("reads paths from env vars", () => {
@@ -18,7 +19,7 @@ describe("memoryFolders", () => {
         HARNESS_MEMORY_PATH: "/custom/memory",
         HARNESS_SOURCES_PATH: "/custom/sources",
         HARNESS_INBOX_PATH: "/custom/inbox.md",
-      });
+      }, "/fake/project");
       expect(config.memoryPath).toBe("/custom/memory");
       expect(config.sourcesPath).toBe("/custom/sources");
       expect(config.inboxPath).toBe("/custom/inbox.md");
@@ -27,9 +28,18 @@ describe("memoryFolders", () => {
     it("expands ~ to home directory", () => {
       const config = resolveMemoryConfig({
         HARNESS_MEMORY_PATH: "~/my-memory",
-      });
+      }, "/fake/project");
       expect(config.memoryPath).not.toContain("~");
       expect(config.memoryPath).toContain("my-memory");
+    });
+
+    it("env overrides take precedence over project root", () => {
+      const projectRoot = "/fake/project";
+      const config = resolveMemoryConfig({
+        HARNESS_MEMORY_PATH: "/override/memory",
+      }, projectRoot);
+      expect(config.memoryPath).toBe("/override/memory");
+      expect(config.sourcesPath).toBe(resolve(projectRoot, "sources"));
     });
   });
 
