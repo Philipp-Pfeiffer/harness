@@ -67,7 +67,7 @@
 | After Step 1 | 238 passed | ✅ |
 | After Step 2 | 255 passed | ✅ |
 
-**Delta: +47 tests** (208 → 255).
+**Delta: +56 tests** (208 → 264). One smoke test is skipped when QMD is not installed.
 
 ---
 
@@ -94,10 +94,30 @@ qmd query "architecture decisions" --json -n 5
 
 ---
 
+## Post-Review Fixes
+
+### 1. Project-Local Default Paths
+- **Before:** Defaults were `~/memory`, `~/sources` (home directory).
+- **After:** Defaults are now `<projectRoot>/memory`, `<projectRoot>/sources`.
+- **Rationale:** All editable runtime files belong in the workspace, not scattered across the user's home directory. Enables project isolation and easy deployment.
+- **Env overrides remain:** `HARNESS_MEMORY_PATH`, `HARNESS_SOURCES_PATH`, `HARNESS_INBOX_PATH` still take precedence.
+
+### 2. Idempotent QMD Auto-Setup
+- **Before:** QMD collections were never registered automatically. `vsearch`/`query` would return empty results unless the user manually ran `qmd collection add`.
+- **After:** `ensureQmdCollections()` in `src/core/qmdSetup.ts` is called on startup. It registers `memory` and `sources` collections, then runs `qmd update` + `qmd embed`.
+- **Idempotent:** Already-existing collections are detected (via stderr/error message heuristics) and skipped.
+- **Graceful degrade:** If QMD is not installed, a clear warning is logged and startup continues.
+
+### 3. Real Smoke Test + JSON Fixture
+- **Smoke test:** `tests/core/qmdSmoke.test.ts` performs an end-to-end test against a real QMD binary (write → register → index → search → assert hit). Skipped with a clear message when QMD is unavailable (e.g. in CI).
+- **JSON fixture:** `tests/core/qmdBackend.test.ts` now contains a "JSON fixture" describe block that tests `parseQmdJson` against realistic QMD output shapes (direct array + nested `{ results: [...] }` wrapper).
+
+---
+
 ## Assumptions & Open Questions
 
 1. **QMD binary path:** Default is `"qmd"` (PATH lookup). Override via `QmdBackendOptions.binaryPath`.
-2. **QMD collections:** The backend does not auto-register collections. This is deferred to Step 3/4 or manual setup.
+2. **QMD collections:** Auto-registration happens on every startup. If QMD is slow, this could add latency. A future optimization could cache "last registered" timestamps.
 3. **QMD JSON shape:** The parser handles both direct arrays and `{ results: [...] }` wrappers, based on observed QMD behavior. If QMD changes its JSON schema, the parser needs updating.
-4. **First-Run model download:** QMD auto-downloads GGUF models on first `embed`/`vsearch`/`query`. This is handled by QMD internally; Harness only calls the CLI.
+4. **First-Run model download:** QMD auto-downloads GGUF models on first `embed`/`vsearch`/`query`. This is handled by QMD internally; Harness only calls the CLI. The `embed` step on startup may trigger this download (~2GB), which can take several minutes.
 5. **No automatic Stub fallback:** The backend interface is pluggable, but there is no auto-detection yet (e.g., "QMD missing → use Stub"). Callers must instantiate the backend they want.
