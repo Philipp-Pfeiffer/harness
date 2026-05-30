@@ -1,6 +1,6 @@
 # Memory Architecture
 
-**Stand:** 2026-05-30, Phase 2A Step 1+2  
+**Stand:** 2026-05-30, Phase 2A Step 1+2+Review-Fixes  
 **Scope:** Core Memory (System-Prompt-Injection) + Markdown-Folder-Layout + QMD Retrieval Backend
 
 ---
@@ -47,9 +47,14 @@
 
 | Variable | Default | Env-Override |
 |----------|---------|--------------|
-| Memory folder | `~/memory` | `HARNESS_MEMORY_PATH` |
-| Sources folder | `~/sources` | `HARNESS_SOURCES_PATH` |
-| Inbox file | `~/memory/_inbox.md` | `HARNESS_INBOX_PATH` |
+| Memory folder | `<projectRoot>/memory` | `HARNESS_MEMORY_PATH` |
+| Sources folder | `<projectRoot>/sources` | `HARNESS_SOURCES_PATH` |
+| Inbox file | `<projectRoot>/memory/_inbox.md` | `HARNESS_INBOX_PATH` |
+
+**Design Decision:** Alle editierbaren Runtime-Files liegen **projekt-lokal** im Harness-Root (oder dem via `HARNESS_PROJECT_ROOT` gesetzten Verzeichnis). Das ermöglicht:
+- Workspace-Isolation (mehrere Projekte, kein Konflikt im Home-Verzeichnis)
+- Einfaches Deployment via Symlink oder Git-Submodule
+- Env-Overrides bleiben erhalten für Power-User, die z. B. `~/memory` bevorzugen
 
 ### Init Behavior
 
@@ -61,7 +66,7 @@
 
 ### Design Decision: Top-Level, keine Sub-Ordner
 
-Die Anforderung spezifiziert **keine** Sub-Ordner innerhalb von `~/memory/` oder `~/sources/`. QMD indexiert flach über `**/*.md`.
+Die Anforderung spezifiziert **keine** Sub-Ordner innerhalb von `memory/` oder `sources/`. QMD indexiert flach über `**/*.md`.
 
 ---
 
@@ -133,6 +138,20 @@ QMD wird mit `--json` aufgerufen. Die Ausgabe wird geparsed:
 - Oder verschachtelt: `{ results: [...] }`
 - Unparseable / leer → `[]`
 
+### Auto-Setup (Collection Registration)
+
+`ensureQmdCollections()` wird in `src/index.tsx` aufgerufen, nachdem die Ordner bereit sind:
+
+1. Prüft, ob `qmd` verfügbar ist (`qmd --version`).
+2. Registriert Collections idempotent:
+   - `qmd collection add <projectRoot>/memory --name memory --mask "**/*.md"`
+   - `qmd collection add <projectRoot>/sources --name sources --mask "**/*.md"`
+   - Bereits existierende Collections werden als "already present" erkannt und übersprungen.
+3. Baut/aktualisiert den Index: `qmd update`
+4. Baut Embeddings für Vector-Search: `qmd embed`
+
+Falls QMD nicht installiert ist: klare Warnung, sauberer Degrade — kein Crash.
+
 ### Error Handling
 
 - `qmd` nicht in PATH → `execFile` wirft Error (z. B. "spawn qmd ENOENT").
@@ -169,5 +188,6 @@ QMD wird mit `--json` aufgerufen. Die Ausgabe wird geparsed:
 | `src/core/memoryFolders.ts` | Folder-Scaffolding + Env-Config |
 | `src/core/memoryBackend.ts` | `MemoryBackend` Interface + Typen |
 | `src/core/qmdBackend.ts` | QMD-CLI Adapter (`vsearch`, `query`, `write`) |
+| `src/core/qmdSetup.ts` | Idempotente QMD Collection-Registrierung + Index/Embed |
 | `src/core/stubBackend.ts` | No-op Fallback-Implementierung |
 | `core.md` | User-pflegbare Identitäts-/Projekt-Informationen |

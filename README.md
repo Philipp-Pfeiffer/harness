@@ -44,7 +44,13 @@ src/
 
 ## Memory Setup (optional)
 
-Harness supports local markdown memory via [QMD](https://github.com/tobi/qmd). To enable it:
+Harness supports local markdown memory via [QMD](https://github.com/tobi/qmd). On startup, Harness automatically creates:
+
+- `<projectRoot>/memory/` — your knowledge base
+- `<projectRoot>/sources/` — reference material
+- `<projectRoot>/memory/_inbox.md` — quick notes
+
+If QMD is installed, collections are **auto-registered** and indexed on startup:
 
 ```bash
 # Install Bun (prerequisite for QMD)
@@ -52,15 +58,13 @@ curl -fsSL https://bun.sh/install | bash
 
 # Install QMD
 bun install -g https://github.com/tobi/qmd
-
-# Register collections (one-time)
-qmd collection add ~/memory --name memory --mask "**/*.md"
-qmd collection add ~/sources --name sources --mask "**/*.md"
-
-# Build index (first run downloads ~2GB of local GGUF models)
-qmd update
-qmd embed
 ```
+
+That's it — Harness handles `qmd collection add`, `qmd update`, and `qmd embed` automatically.
+
+**First run:** `qmd embed` downloads ~2GB of local GGUF models (embedding + reranker). This happens once and is triggered automatically.
+
+**Override paths:** Set `HARNESS_MEMORY_PATH`, `HARNESS_SOURCES_PATH`, or `HARNESS_INBOX_PATH` to customize locations.
 
 If QMD is not installed, the memory backend gracefully falls back to a no-op stub.
 
