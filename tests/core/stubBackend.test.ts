@@ -1,0 +1,20 @@
+import { describe, it, expect } from "vitest";
+import { StubBackend } from "../../src/core/stubBackend.js";
+
+describe("StubBackend", () => {
+  it("name is 'stub'", () => {
+    const backend = new StubBackend();
+    expect(backend.name).toBe("stub");
+  });
+
+  it("search returns empty array", async () => {
+    const backend = new StubBackend();
+    const hits = await backend.search("anything");
+    expect(hits).toEqual([]);
+  });
+
+  it("write does not throw", async () => {
+    const backend = new StubBackend();
+    await expect(backend.write({ path: "/tmp/x.md", content: "y" })).resolves.toBeUndefined();
+  });
+});
