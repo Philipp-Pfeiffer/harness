@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "provider": "minimax",
+      "model": "MiniMax-M2.7",
+      "alias": "MiniMax M2.7"
+    },
+    {
+      "provider": "kimi-coding",
+      "model": "kimi-for-coding",
+      "alias": "Kimi Code"
+    }
+  ]
+}
