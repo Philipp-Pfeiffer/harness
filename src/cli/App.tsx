@@ -6,8 +6,10 @@ import { markedTerminal } from "marked-terminal";
 import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
+import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
 import { resolveModel } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
+import { prompt } from "../prompts.js";
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
@@ -657,6 +659,16 @@ export default function App({ configPath }: { configPath?: string } = {}) {
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
+
+  useEffect(() => {
+    (async () => {
+      const coreMemory = await loadCoreMemoryRaw();
+      const basePrompt = prompt("system-prompt");
+      const composed = composeSystemPrompt(basePrompt, coreMemory);
+      agent.setSystemPrompt(composed);
+      console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
+    })();
+  }, [agent]);
 
   const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
   const [configError, setConfigError] = useState<string | undefined>(undefined);

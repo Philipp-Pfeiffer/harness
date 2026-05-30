@@ -21,6 +21,7 @@ vi.mock("../../src/core/agent.js", () => ({
   createAgent: vi.fn(() => ({
     run: mockRun,
     setModel: vi.fn(),
+    setSystemPrompt: vi.fn(),
   })),
 }));
 
