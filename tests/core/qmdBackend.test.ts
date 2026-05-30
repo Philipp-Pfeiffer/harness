@@ -138,4 +138,55 @@ describe("QmdBackend", () => {
     expect(content).toBe("# Note\n\nHello");
     await rm(dir, { recursive: true });
   });
+
+  describe("JSON fixture", () => {
+    it("parses a realistic QMD vsearch JSON output", async () => {
+      const fixture = JSON.stringify([
+        {
+          file: "/proj/memory/architecture.md",
+          score: 0.9123,
+          content: "## Gateway Setup\n\nThe gateway server runs on port 18789 via Cloudflare tunnel.",
+          line: 42,
+        },
+        {
+          file: "/proj/sources/api-docs.md",
+          score: 0.7456,
+          content: "API documentation for the gateway service.",
+          line: 1,
+        },
+      ]);
+
+      mockExecFile(fixture);
+      const backend = new QmdBackend();
+      const hits = await backend.vsearch("gateway server", 2);
+
+      expect(hits).toHaveLength(2);
+      expect(hits[0].source).toBe("/proj/memory/architecture.md");
+      expect(hits[0].score).toBe(0.9123);
+      expect(hits[0].content).toContain("Gateway Setup");
+      expect(hits[0].line).toBe(42);
+      expect(hits[1].source).toBe("/proj/sources/api-docs.md");
+    });
+
+    it("parses nested results wrapper", async () => {
+      const fixture = JSON.stringify({
+        results: [
+          {
+            file: "/proj/memory/notes.md",
+            score: 0.88,
+            chunk: "Chunked content from QMD.",
+            line: 10,
+          },
+        ],
+      });
+
+      mockExecFile(fixture);
+      const backend = new QmdBackend();
+      const hits = await backend.query("notes");
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0].source).toBe("/proj/memory/notes.md");
+      expect(hits[0].content).toBe("Chunked content from QMD.");
+    });
+  });
 });
