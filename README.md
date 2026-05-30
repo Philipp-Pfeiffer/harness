@@ -42,6 +42,28 @@ src/
 └── utils/            # Shared helpers
 ```
 
+## Memory Setup (optional)
+
+Harness supports local markdown memory via [QMD](https://github.com/tobi/qmd). To enable it:
+
+```bash
+# Install Bun (prerequisite for QMD)
+curl -fsSL https://bun.sh/install | bash
+
+# Install QMD
+bun install -g https://github.com/tobi/qmd
+
+# Register collections (one-time)
+qmd collection add ~/memory --name memory --mask "**/*.md"
+qmd collection add ~/sources --name sources --mask "**/*.md"
+
+# Build index (first run downloads ~2GB of local GGUF models)
+qmd update
+qmd embed
+```
+
+If QMD is not installed, the memory backend gracefully falls back to a no-op stub.
+
 ## Architecture Decision
 
 - **Only dependency:** `@mariozechner/pi-ai` (Multi-Provider-LLM-Layer)
