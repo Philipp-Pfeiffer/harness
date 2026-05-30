@@ -177,16 +177,20 @@ export interface AgentConfig {
 export interface Agent {
   run(messages: Message[], options?: RunOptions): Promise<RunResult>;
   setModel(model: Model<Api>): void;
+  setSystemPrompt(prompt: string): void;
 }
 
 export function createAgent(config: AgentConfig): Agent {
   const { tools, maxIterations = 10, model, logger } = config;
-  const systemPrompt = config.systemPrompt ?? prompt("system-prompt");
+  let systemPrompt = config.systemPrompt ?? prompt("system-prompt");
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {
     setModel(newModel: Model<Api>) {
       resolvedModel = newModel;
+    },
+    setSystemPrompt(newPrompt: string) {
+      systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent, mailbox } = options;

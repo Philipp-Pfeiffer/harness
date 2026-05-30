@@ -22,6 +22,7 @@ vi.mock("../../src/core/agent.js", () => ({
   createAgent: vi.fn(() => ({
     run: mockRun,
     setModel: vi.fn(),
+    setSystemPrompt: vi.fn(),
   })),
 }));
 
@@ -909,6 +910,7 @@ describe("CLI App", () => {
       vi.mocked(createAgent).mockReturnValueOnce({
         run: mockRun,
         setModel: setModelSpy,
+        setSystemPrompt: vi.fn(),
       } as any);
 
       const { stdin } = render(<App />);
