@@ -33,3 +33,6 @@ coverage/
 
 # Bug Hunter
 .bug-hunter/
+
+# Agent workspace
+workspace/
