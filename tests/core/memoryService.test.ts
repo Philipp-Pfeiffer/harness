@@ -147,4 +147,39 @@ describe("MemoryService", () => {
     const backend = service.getBackend();
     expect(backend.name).toBe("qmd");
   });
+
+  it("calls embed({ force: true }) when embedModel is configured", async () => {
+    const fakeStore = createFakeStore();
+    vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+    const service = new MemoryService({
+      memoryPath: "/proj/memory",
+      sourcesPath: "/proj/sources",
+      dbPath: "/proj/.qmd/index.sqlite",
+      embedModel: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await service.init();
+    logSpy.mockRestore();
+
+    expect(fakeStore.embed).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("calls embed() without force when no embedModel is configured", async () => {
+    const fakeStore = createFakeStore();
+    vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+    const service = new MemoryService({
+      memoryPath: "/proj/memory",
+      sourcesPath: "/proj/sources",
+      dbPath: "/proj/.qmd/index.sqlite",
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await service.init();
+    logSpy.mockRestore();
+
+    expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
+  });
 });
