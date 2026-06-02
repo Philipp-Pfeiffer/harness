@@ -13,6 +13,7 @@
   "dependencies": {
     "@mariozechner/pi-ai": "^0.70.2",
     "@sinclair/typebox": "^0.34.49",
+    "@tobilu/qmd": "^2.5.3",
     "dotenv": "^17.4.2",
     "ink": "^6.0.0",
     "ink-text-input": "^6.0.0",
