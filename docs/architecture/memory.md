@@ -1,7 +1,7 @@
 # Memory Architecture
 
-**Stand:** 2026-05-30, Phase 2A (SDK-Migration abgeschlossen)  
-**Scope:** Core Memory (System-Prompt-Injection) + Markdown-Folder-Layout + QMD Retrieval Backend via `@tobilu/qmd` SDK
+**Stand:** 2026-05-30, Phase 2A Schritt 3 (Ambient Hook)  
+**Scope:** Core Memory + Markdown-Folder-Layout + QMD Retrieval Backend + L2 Ambient Hook
 
 ---
 
@@ -77,6 +77,7 @@ Die Anforderung spezifiziert **keine** Sub-Ordner innerhalb von `memory/` oder `
 interface MemoryBackend {
   name: string;
   search(query: string, k?: number, opts?: { mode?: "ambient" | "explicit" }): Promise<MemoryHit[]>;
+  getAmbientHints(query: string, opts?: { k?: number; minCosine?: number }): Promise<AmbientHint[]>;
   write(entry: MemoryEntry): Promise<void>;
 }
 
@@ -85,6 +86,13 @@ interface MemoryHit {
   score: number;    // 0.0–1.0
   content: string;  // chunk text
   line?: number;    // optional
+}
+
+interface AmbientHint {
+  title: string;
+  path: string;
+  score: number;
+  snippet?: string;
 }
 
 interface MemoryEntry {
@@ -239,14 +247,41 @@ Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unveränder
 
 ---
 
-## 7. File Map
+## 8. Ambient Retrieval Hook (L2)
+
+### Pipeline
+
+1. **Query extraction:** Aus der aktuellen User-Message wird reiner Text extrahiert (String- oder TextContent-Array-Content).
+2. **Retrieval:** `memoryBackend.getAmbientHints(query, { k: 3, minCosine: 0.5 })` → `store.searchVector(query, { limit: 3 })`.
+3. **Filter:** Treffer mit Cosine-Score < 0.5 werden verworfen.
+4. **Formatierung:** `formatMemoryHint(hits)` baut den `<memory_hint>`-Block (tiered: Top-1 mit Snippet, Top-2/3 ohne).
+5. **Injektion:** Der Block wird **ephemer an den per-call `systemPrompt` angehängt**. Die `messages`-Liste wird weder mutiert noch kopiert noch umgebaut.
+
+### Design-Entscheidungen
+
+| Aspekt | Entscheidung | Begründung |
+|--------|-------------|------------|
+| Injection-Ziel | `systemPrompt` (per-call) | Keine Mutation der History, keine consecutive-user-Messages, native Multimodalität bleibt erhalten |
+| L2 Modus | `searchVector` (vector-only) | < 100 ms/Turn, kein LLM-Rerank, kein Query-Expansion |
+| Threshold | `minCosine = 0.5` | QMD `score = 1 - bestDist` = roher Cosine. 0.5 = 60° Winkel, filtert schwache Treffer |
+| Snippet | Top-1 nur, aus `body` | Phase-A-Limitation: Chunk-Text nicht direkt verfügbar; `body` kann Titel duplizieren |
+| 0 Hits | `null` → nichts injizieren | Kein leerer Wrapper, Loop verhält sich exakt wie Baseline |
+
+### Abgrenzung zu L4 (Schritt 4)
+
+- **L2 Ambient** = automatisch vor jedem Turn, `searchVector`, schnell, kein Rerank.
+- **L4 Explicit** = `search_memory`-Tool (noch nicht implementiert), `store.search()` (Hybrid + LLM-Rerank), ~1.7 s, auf User-Anfrage.
+
+---
+
+## 9. File Map
 
 | Datei | Zweck |
 |-------|-------|
 | `src/core/coreMemory.ts` | core.md Loader, Parser, Formatter, Composer |
 | `src/core/memoryFolders.ts` | Folder-Scaffolding + Env-Config |
-| `src/core/memoryBackend.ts` | `MemoryBackend` Interface + `MemoryHit` / `MemoryEntry` Typen |
-| `src/core/memoryService.ts` | Lifecycle-Owner: Store-Init, Collection-Setup, Update/Embed, Shutdown |
-| `src/core/qmdBackend.ts` | SDK-Adapter: `vsearch`, `query`, `search`, `write` |
+| `src/core/memoryBackend.ts` | `MemoryBackend` Interface + `MemoryHit` / `AmbientHint` / `MemoryEntry` + `formatMemoryHint` |
+| `src/core/memoryService.ts` | Lifecycle-Owner: Store-Init, Collection-Setup, Update/Embed, Shutdown, Embed-Model-Marker |
+| `src/core/qmdBackend.ts` | SDK-Adapter: `vsearch`, `query`, `search`, `getAmbientHints`, `write` |
 | `src/core/stubBackend.ts` | No-op Fallback-Implementierung |
 | `core.md` | User-pflegbare Identitäts-/Projekt-Informationen |
