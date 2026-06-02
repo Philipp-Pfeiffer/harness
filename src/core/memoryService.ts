@@ -1,4 +1,6 @@
 import { createStore, type QMDStore } from "@tobilu/qmd";
+import { readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { MemoryBackend } from "./memoryBackend.js";
 import { QmdBackend } from "./qmdBackend.js";
 import { StubBackend } from "./stubBackend.js";
@@ -67,9 +69,11 @@ export class MemoryService {
     }
 
     try {
-      // If a custom embed model is configured, force re-embedding because
-      // vectors from different models are incompatible.
-      await this.store.embed({ force: !!this.config.embedModel });
+      const force = await this.shouldForceEmbed();
+      await this.store.embed({ force });
+      if (force || this.config.embedModel) {
+        await this.writeEmbedModelMarker();
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[harness] QMD embed failed: ${message}`);
@@ -95,6 +99,31 @@ export class MemoryService {
     if (this.store) {
       await this.store.close();
       this.store = null;
+    }
+  }
+
+  private get markerPath(): string {
+    return dirname(this.config.dbPath) + "/.embed-model";
+  }
+
+  private async shouldForceEmbed(): Promise<boolean> {
+    if (!this.config.embedModel) return false;
+    try {
+      const lastModel = await readFile(this.markerPath, "utf-8");
+      return lastModel.trim() !== this.config.embedModel;
+    } catch {
+      // No marker file → first run with explicit model; incremental embed is sufficient
+      return false;
+    }
+  }
+
+  private async writeEmbedModelMarker(): Promise<void> {
+    if (!this.config.embedModel) return;
+    try {
+      await writeFile(this.markerPath, this.config.embedModel, "utf-8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[harness] Failed to write embed model marker: ${message}`);
     }
   }
 
