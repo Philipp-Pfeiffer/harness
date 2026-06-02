@@ -156,4 +156,153 @@ describe("QmdBackend (SDK)", () => {
     const hits = await backend.vsearch("test");
     expect(hits[0].content).toBe("Title Only");
   });
+
+  describe("getAmbientHints", () => {
+    it("calls store.searchVector with limit from opts", async () => {
+      const store = createFakeStore();
+      const backend = new QmdBackend(store);
+      await backend.getAmbientHints("hello", { k: 5 });
+
+      expect(store.searchVector).toHaveBeenCalledWith("hello", { limit: 5 });
+    });
+
+    it("filters out scores below minCosine", async () => {
+      const results: SearchResult[] = [
+        {
+          filepath: "/proj/memory/high.md",
+          displayPath: "high.md",
+          title: "High",
+          context: null,
+          hash: "a",
+          docid: "a",
+          collectionName: "memory",
+          modifiedAt: "",
+          bodyLength: 10,
+          body: "High score",
+          score: 0.85,
+          source: "vec",
+        },
+        {
+          filepath: "/proj/memory/low.md",
+          displayPath: "low.md",
+          title: "Low",
+          context: null,
+          hash: "b",
+          docid: "b",
+          collectionName: "memory",
+          modifiedAt: "",
+          bodyLength: 10,
+          body: "Low score",
+          score: 0.3,
+          source: "vec",
+        },
+      ];
+
+      const store = createFakeStore({
+        searchVector: vi.fn(async () => results),
+      });
+
+      const backend = new QmdBackend(store);
+      const hints = await backend.getAmbientHints("hello", { minCosine: 0.5 });
+
+      expect(hints).toHaveLength(1);
+      expect(hints[0].title).toBe("High");
+      expect(hints[0].score).toBe(0.85);
+    });
+
+    it("returns empty array when all scores below threshold", async () => {
+      const results: SearchResult[] = [
+        {
+          filepath: "/proj/memory/weak.md",
+          displayPath: "weak.md",
+          title: "Weak",
+          context: null,
+          hash: "a",
+          docid: "a",
+          collectionName: "memory",
+          modifiedAt: "",
+          bodyLength: 10,
+          body: "Weak",
+          score: 0.1,
+          source: "vec",
+        },
+      ];
+
+      const store = createFakeStore({
+        searchVector: vi.fn(async () => results),
+      });
+
+      const backend = new QmdBackend(store);
+      const hints = await backend.getAmbientHints("hello");
+
+      expect(hints).toEqual([]);
+    });
+
+    it("maps title, path, score, and snippet correctly", async () => {
+      const results: SearchResult[] = [
+        {
+          filepath: "/proj/memory/note.md",
+          displayPath: "note.md",
+          title: "My Note",
+          context: null,
+          hash: "a",
+          docid: "a",
+          collectionName: "memory",
+          modifiedAt: "",
+          bodyLength: 100,
+          body: "First line\n\nSecond line\nThird line\nFourth line",
+          score: 0.92,
+          source: "vec",
+        },
+      ];
+
+      const store = createFakeStore({
+        searchVector: vi.fn(async () => results),
+      });
+
+      const backend = new QmdBackend(store);
+      const hints = await backend.getAmbientHints("hello");
+
+      expect(hints).toHaveLength(1);
+      expect(hints[0].title).toBe("My Note");
+      expect(hints[0].path).toBe("/proj/memory/note.md");
+      expect(hints[0].score).toBe(0.92);
+      expect(hints[0].snippet).toBe("First line\nSecond line\nThird line");
+    });
+
+    it("omits snippet when body is empty", async () => {
+      const results: SearchResult[] = [
+        {
+          filepath: "/proj/memory/empty.md",
+          displayPath: "empty.md",
+          title: "Empty",
+          context: null,
+          hash: "a",
+          docid: "a",
+          collectionName: "memory",
+          modifiedAt: "",
+          bodyLength: 0,
+          score: 0.8,
+          source: "vec",
+        },
+      ];
+
+      const store = createFakeStore({
+        searchVector: vi.fn(async () => results),
+      });
+
+      const backend = new QmdBackend(store);
+      const hints = await backend.getAmbientHints("hello");
+
+      expect(hints[0].snippet).toBeUndefined();
+    });
+
+    it("uses default k=3 and minCosine=0.5 when opts omitted", async () => {
+      const store = createFakeStore();
+      const backend = new QmdBackend(store);
+      await backend.getAmbientHints("hello");
+
+      expect(store.searchVector).toHaveBeenCalledWith("hello", { limit: 3 });
+    });
+  });
 });

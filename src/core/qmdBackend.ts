@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { QMDStore, SearchResult, HybridQueryResult } from "@tobilu/qmd";
-import type { MemoryBackend, MemoryHit, MemoryEntry } from "./memoryBackend.js";
+import type { MemoryBackend, MemoryHit, MemoryEntry, AmbientHint } from "./memoryBackend.js";
 
 export interface QmdBackendOptions {
   /** Default number of results. */
@@ -24,6 +24,17 @@ function hybridResultToHit(r: HybridQueryResult): MemoryHit {
     content: (r.bestChunk ?? r.body ?? r.title ?? "").trim(),
     line: r.bestChunkPos,
   };
+}
+
+function makeSnippet(body: string | undefined): string | undefined {
+  if (!body) return undefined;
+  const lines = body
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const snippetLines = lines.slice(0, 3);
+  if (snippetLines.length === 0) return undefined;
+  return snippetLines.join("\n");
 }
 
 export class QmdBackend implements MemoryBackend {
@@ -70,6 +81,27 @@ export class QmdBackend implements MemoryBackend {
       return this.query(query, k);
     }
     return this.vsearch(query, k);
+  }
+
+  /**
+   * L2 Ambient hints — vector-only retrieval for pre-turn injection.
+   * Returns typed hints with optional snippet for Top-1 formatting.
+   */
+  async getAmbientHints(
+    query: string,
+    opts?: { k?: number; minCosine?: number }
+  ): Promise<AmbientHint[]> {
+    const k = opts?.k ?? 3;
+    const minCosine = opts?.minCosine ?? 0.5;
+    const results = await this.store.searchVector(query, { limit: k });
+    return results
+      .filter((r) => r.score >= minCosine)
+      .map((r) => ({
+        title: r.title,
+        path: r.filepath,
+        score: r.score,
+        snippet: makeSnippet(r.body),
+      }));
   }
 
   /**
