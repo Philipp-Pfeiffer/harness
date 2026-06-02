@@ -625,7 +625,17 @@ function PromptInput({
 
 /* ─── Main App ─── */
 
-export default function App({ configPath }: { configPath?: string } = {}) {
+export default function App({
+  configPath,
+  memoryService,
+}: {
+  configPath?: string;
+  memoryService?: import("../core/memoryService.js").MemoryService;
+} = {}) {
+  // memoryService is injected for future phases (ambient retrieval, explicit search)
+  const _memoryServiceRef = useRef(memoryService);
+  void _memoryServiceRef;
+
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });

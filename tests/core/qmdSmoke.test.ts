@@ -1,42 +1,44 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { createStore } from "@tobilu/qmd";
 import { QmdBackend } from "../../src/core/qmdBackend.js";
-import { ensureQmdCollections } from "../../src/core/qmdSetup.js";
 import { writeFile, mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { execFile } from "node:child_process";
 
 /**
- * Real QMD smoke test.
- * Skips gracefully if QMD is not installed (e.g. in CI).
+ * Real QMD SDK smoke test.
+ * Skips gracefully if QMD native dependencies are unavailable (e.g. in CI).
  */
 
-let qmdAvailable = false;
+let sdkAvailable = false;
 
 beforeAll(async () => {
   try {
-    await new Promise<void>((resolve, reject) => {
-      execFile("qmd", ["--version"], { timeout: 5_000 }, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
+    const testDir = resolve(tmpdir(), `harness-qmd-smoke-check-${Date.now()}`);
+    await mkdir(testDir, { recursive: true });
+    const store = await createStore({
+      dbPath: resolve(testDir, "test.sqlite"),
+      config: {
+        collections: {
+          test: { path: testDir, pattern: "**/*.md" },
+        },
+      },
     });
-    qmdAvailable = true;
+    await store.close();
+    await rm(testDir, { recursive: true, force: true });
+    sdkAvailable = true;
   } catch {
-    qmdAvailable = false;
+    sdkAvailable = false;
   }
 });
 
-describe("QMD Smoke Test", () => {
-  it.skipIf(!qmdAvailable)("end-to-end: write, register, index, and retrieve a markdown file", async () => {
+describe("QMD SDK Smoke Test", () => {
+  it.skipIf(!sdkAvailable)("end-to-end: write, index, and retrieve via SDK", async () => {
     const testDir = resolve(tmpdir(), `harness-qmd-smoke-${Date.now()}`);
     const memoryPath = resolve(testDir, "memory");
-    const sourcesPath = resolve(testDir, "sources");
 
     await mkdir(memoryPath, { recursive: true });
-    await mkdir(sourcesPath, { recursive: true });
 
-    // Write a test markdown file
     const testFile = resolve(memoryPath, "test-note.md");
     await writeFile(
       testFile,
@@ -44,24 +46,39 @@ describe("QMD Smoke Test", () => {
       "utf-8"
     );
 
-    // Register collections and build index
-    await ensureQmdCollections({ memoryPath, sourcesPath });
+    const store = await createStore({
+      dbPath: resolve(testDir, "index.sqlite"),
+      config: {
+        collections: {
+          memory: { path: memoryPath, pattern: "**/*.md" },
+        },
+      },
+    });
 
-    // Search via QmdBackend (vsearch = L2 Ambient)
-    const backend = new QmdBackend({ collections: ["memory"] });
-    const hits = await backend.search("gateway server setup", 5);
+    await store.update();
+    await store.embed();
 
-    expect(hits.length).toBeGreaterThan(0);
-    const hit = hits.find((h) => h.content.toLowerCase().includes("gateway"));
-    expect(hit).toBeDefined();
-    expect(hit!.source).toContain("test-note.md");
+    const backend = new QmdBackend(store);
 
+    // L2 Ambient (vector search)
+    const ambientHits = await backend.search("gateway server setup", 5, { mode: "ambient" });
+    expect(ambientHits.length).toBeGreaterThan(0);
+    const ambientHit = ambientHits.find((h) => h.content.toLowerCase().includes("gateway"));
+    expect(ambientHit).toBeDefined();
+
+    // L4 Explicit (hybrid search)
+    const explicitHits = await backend.search("gateway server setup", 5, { mode: "explicit" });
+    expect(explicitHits.length).toBeGreaterThan(0);
+    const explicitHit = explicitHits.find((h) => h.content.toLowerCase().includes("gateway"));
+    expect(explicitHit).toBeDefined();
+
+    await store.close();
     await rm(testDir, { recursive: true, force: true });
   }, 600_000); // 10 min timeout for first-run model download
 
-  it("logs skip reason when QMD is not available", () => {
-    if (!qmdAvailable) {
-      console.log("[SKIP] QMD not installed — smoke test skipped. Run locally after: bun install -g https://github.com/tobi/qmd");
+  it("logs skip reason when SDK is not available", () => {
+    if (!sdkAvailable) {
+      console.log("[SKIP] QMD SDK not available — smoke test skipped. Install: npm install @tobilu/qmd");
     }
     expect(true).toBe(true);
   });
