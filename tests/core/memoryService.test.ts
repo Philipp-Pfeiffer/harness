@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MemoryService } from "../../src/core/memoryService.js";
 import type { QMDStore } from "@tobilu/qmd";
 
@@ -41,9 +41,25 @@ vi.mock("@tobilu/qmd", async () => {
   };
 });
 
+vi.mock("node:fs/promises", () => ({
+  readFile: vi.fn(),
+  writeFile: vi.fn(),
+}));
+
 import { createStore } from "@tobilu/qmd";
+import { readFile, writeFile } from "node:fs/promises";
 
 describe("MemoryService", () => {
+  beforeEach(() => {
+    vi.mocked(readFile).mockReset();
+    vi.mocked(writeFile).mockReset();
+  });
+
+  afterEach(() => {
+    vi.mocked(readFile).mockReset();
+    vi.mocked(writeFile).mockReset();
+  });
+
   it("init creates store, registers missing collections, runs update+embed", async () => {
     const fakeStore = createFakeStore();
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
@@ -148,7 +164,9 @@ describe("MemoryService", () => {
     expect(backend.name).toBe("qmd");
   });
 
-  it("calls embed({ force: true }) when embedModel is configured", async () => {
+  it("calls embed({ force: true }) when configured model differs from marker", async () => {
+    vi.mocked(readFile).mockResolvedValueOnce("old-model");
+
     const fakeStore = createFakeStore();
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
 
@@ -164,9 +182,56 @@ describe("MemoryService", () => {
     logSpy.mockRestore();
 
     expect(fakeStore.embed).toHaveBeenCalledWith({ force: true });
+    expect(writeFile).toHaveBeenCalledWith(
+      "/proj/.qmd/.embed-model",
+      "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "utf-8"
+    );
   });
 
-  it("calls embed() without force when no embedModel is configured", async () => {
+  it("calls embed({ force: false }) when marker matches configured model", async () => {
+    vi.mocked(readFile).mockResolvedValueOnce(
+      "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+    );
+
+    const fakeStore = createFakeStore();
+    vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+    const service = new MemoryService({
+      memoryPath: "/proj/memory",
+      sourcesPath: "/proj/sources",
+      dbPath: "/proj/.qmd/index.sqlite",
+      embedModel: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await service.init();
+    logSpy.mockRestore();
+
+    expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
+  });
+
+  it("calls embed({ force: false }) on first run when no marker exists", async () => {
+    vi.mocked(readFile).mockRejectedValueOnce({ code: "ENOENT" });
+
+    const fakeStore = createFakeStore();
+    vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+    const service = new MemoryService({
+      memoryPath: "/proj/memory",
+      sourcesPath: "/proj/sources",
+      dbPath: "/proj/.qmd/index.sqlite",
+      embedModel: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await service.init();
+    logSpy.mockRestore();
+
+    expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
+  });
+
+  it("calls embed({ force: false }) when no embedModel is configured", async () => {
     const fakeStore = createFakeStore();
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
 
