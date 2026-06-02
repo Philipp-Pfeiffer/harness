@@ -15,6 +15,8 @@ import type {
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
+import { formatMemoryHint } from "./memoryBackend.js";
+import type { MemoryBackend } from "./memoryBackend.js";
 
 export interface ToolCallLog {
   name: string;
@@ -39,6 +41,8 @@ export interface RunOptions {
   mailbox?: Mailbox;
   /** Optional mutable ref to the abort command string (set by CLI when user types stop/stopp/abort). */
   abortCommand?: { current: string | undefined };
+  /** Optional memory backend for ambient hint retrieval. */
+  memoryBackend?: MemoryBackend;
 }
 
 /**
@@ -78,6 +82,19 @@ function toPiTool(tool: Tool): PiTool {
     description: tool.description,
     parameters: tool.parameters,
   };
+}
+
+function extractUserText(msg: Message): string {
+  if (msg.role !== "user") return "";
+  const content = msg.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c): c is TextContent => c.type === "text")
+      .map((c) => c.text)
+      .join(" ");
+  }
+  return "";
 }
 
 function createToolResultMessage(
@@ -193,9 +210,32 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent, mailbox } = options;
+      const { signal, onEvent, mailbox, memoryBackend } = options;
+      let effectiveSystemPrompt = systemPrompt;
+
+      if (memoryBackend) {
+        let lastUserIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === "user") {
+            lastUserIndex = i;
+            break;
+          }
+        }
+
+        if (lastUserIndex !== -1) {
+          const query = extractUserText(messages[lastUserIndex]);
+          if (query.trim()) {
+            const hints = await memoryBackend.getAmbientHints(query);
+            const hintBlock = formatMemoryHint(hints);
+            if (hintBlock) {
+              effectiveSystemPrompt = `${systemPrompt}\n\n${hintBlock}`;
+            }
+          }
+        }
+      }
+
       const context: PiContext = {
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         messages,
         tools: tools.map(toPiTool),
       };
