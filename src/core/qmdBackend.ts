@@ -1,132 +1,105 @@
-import { execFile } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
-import { resolve, dirname } from "node:path";
+import { dirname } from "node:path";
+import type { QMDStore, SearchResult, HybridQueryResult } from "@tobilu/qmd";
 import type { MemoryBackend, MemoryHit, MemoryEntry } from "./memoryBackend.js";
 
 export interface QmdBackendOptions {
-  /** Absolute path to the qmd binary. Defaults to "qmd" (PATH lookup). */
-  binaryPath?: string;
-  /** Collections to search (qmd --collection flag). If omitted, searches all. */
-  collections?: string[];
   /** Default number of results. */
   defaultK?: number;
 }
 
-/**
- * Raw result shape from qmd --json output.
- * QMD returns an array of { file, score, content, line? } objects.
- */
-interface QmdJsonResult {
-  file?: string;
-  score?: number;
-  content?: string;
-  line?: number;
-  chunk?: string;
+function searchResultToHit(r: SearchResult): MemoryHit {
+  return {
+    source: r.filepath,
+    score: r.score,
+    content: (r.body ?? r.title ?? "").trim(),
+    line: r.chunkPos,
+  };
 }
 
-function runQmd(
-  binary: string,
-  args: string[],
-  timeoutMs: number
-): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(binary, args, { timeout: timeoutMs }, (error, stdout, stderr) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
-    });
-
-    // Defensive: if the process hangs, kill it after timeout + buffer
-    // execFile timeout sends SIGTERM, which is usually sufficient.
-    if (!child.pid) {
-      reject(new Error("Failed to spawn qmd process"));
-    }
-  });
-}
-
-function parseQmdJson(raw: string): QmdJsonResult[] {
-  try {
-    const parsed = JSON.parse(raw) as QmdJsonResult[] | { results?: QmdJsonResult[] };
-    if (Array.isArray(parsed)) return parsed;
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.results)) return parsed.results;
-    return [];
-  } catch {
-    return [];
-  }
-}
-
-function normalizeHits(results: QmdJsonResult[]): MemoryHit[] {
-  return results
-    .filter((r) => r.content || r.chunk)
-    .map((r) => ({
-      source: r.file ?? "unknown",
-      score: typeof r.score === "number" ? r.score : 0,
-      content: (r.content ?? r.chunk ?? "").trim(),
-      line: typeof r.line === "number" ? r.line : undefined,
-    }));
+function hybridResultToHit(r: HybridQueryResult): MemoryHit {
+  return {
+    source: r.file,
+    score: r.score,
+    content: (r.bestChunk ?? r.body ?? r.title ?? "").trim(),
+    line: r.bestChunkPos,
+  };
 }
 
 export class QmdBackend implements MemoryBackend {
   readonly name = "qmd";
-  private readonly binary: string;
-  private readonly collections: string[];
   private readonly defaultK: number;
+  private dirty = false;
+  private flushPending = false;
 
-  constructor(options: QmdBackendOptions = {}) {
-    this.binary = options.binaryPath ?? "qmd";
-    this.collections = options.collections ?? [];
+  constructor(
+    private readonly store: QMDStore,
+    options: QmdBackendOptions = {}
+  ) {
     this.defaultK = options.defaultK ?? 5;
   }
 
   /**
-   * L2 Ambient search — vector-only, no LLM, budget <100ms.
-   * Maps to `qmd vsearch --json`.
+   * L2 Ambient search — vector-only, no reranking, fast.
+   * Maps to `store.searchVector()`.
    */
   async vsearch(query: string, k = this.defaultK): Promise<MemoryHit[]> {
-    const args = ["vsearch", query, "--json", "-n", String(k)];
-    for (const c of this.collections) {
-      args.push("--collection", c);
-    }
-
-    const { stdout } = await runQmd(this.binary, args, 30_000);
-    const results = parseQmdJson(stdout);
-    return normalizeHits(results);
+    const results = await this.store.searchVector(query, { limit: k });
+    return results.map(searchResultToHit);
   }
 
   /**
-   * L4 Explicit search — hybrid + LLM rerank, ~1.7s.
-   * Maps to `qmd query --json`.
+   * L4 Explicit search — hybrid + LLM rerank.
+   * Maps to `store.search()`.
    */
   async query(query: string, k = this.defaultK): Promise<MemoryHit[]> {
-    const args = ["query", query, "--json", "-n", String(k)];
-    for (const c of this.collections) {
-      args.push("--collection", c);
-    }
-
-    const { stdout } = await runQmd(this.binary, args, 120_000);
-    const results = parseQmdJson(stdout);
-    return normalizeHits(results);
+    const results = await this.store.search({ query, limit: k });
+    return results.map(hybridResultToHit);
   }
 
   /**
-   * Generic search entry point. Defaults to vsearch (fast) unless
-   * the caller explicitly wants deep retrieval.
-   *
-   * To use L4 explicit, call `backend.query(q, k)` directly.
+   * Generic search entry point. Defaults to vsearch (ambient / fast).
+   * Use mode: "explicit" for deep retrieval.
    */
-  async search(query: string, k?: number): Promise<MemoryHit[]> {
+  async search(
+    query: string,
+    k?: number,
+    opts?: { mode?: "ambient" | "explicit" }
+  ): Promise<MemoryHit[]> {
+    if (opts?.mode === "explicit") {
+      return this.query(query, k);
+    }
     return this.vsearch(query, k);
   }
 
   /**
-   * Writes a memory entry to disk as a Markdown file.
-   * Creates parent directories as needed.
+   * Writes a memory entry to disk as a Markdown file, then queues an
+   * incremental store update. Rapid successive writes are debounced via
+   * a single microtask flush.
    */
   async write(entry: MemoryEntry): Promise<void> {
     const dir = dirname(entry.path);
     await mkdir(dir, { recursive: true });
     await writeFile(entry.path, entry.content, "utf-8");
+
+    this.dirty = true;
+    if (!this.flushPending) {
+      this.flushPending = true;
+      queueMicrotask(() => this.flush());
+    }
+  }
+
+  private async flush(): Promise<void> {
+    this.flushPending = false;
+    if (!this.dirty) return;
+    this.dirty = false;
+
+    try {
+      await this.store.update({ collections: ["memory"] });
+      await this.store.embed({ collection: "memory" });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[harness] QMD incremental update after write failed: ${message}`);
+    }
   }
 }
