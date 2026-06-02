@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { render } from "ink";
 import { ensureMemoryFolders } from "./core/memoryFolders.js";
-import { ensureQmdCollections } from "./core/qmdSetup.js";
+import { MemoryService } from "./core/memoryService.js";
 
 if (!process.stdin.isTTY) {
   console.error("harness requires an interactive terminal (TTY).");
@@ -20,12 +20,26 @@ await mkdir(resolve(projectRoot, "workspace"), { recursive: true });
 const folders = await ensureMemoryFolders();
 console.log(`[harness] memory folders ready: ${folders.memoryPath}, ${folders.sourcesPath}`);
 
-await ensureQmdCollections({
+const dbPath = process.env.HARNESS_QMD_DB_PATH
+  ? resolve(projectRoot, process.env.HARNESS_QMD_DB_PATH)
+  : resolve(projectRoot, ".qmd", "index.sqlite");
+
+const memoryService = new MemoryService({
   memoryPath: folders.memoryPath,
   sourcesPath: folders.sourcesPath,
+  dbPath,
 });
+await memoryService.init();
 
 process.chdir(resolve(projectRoot, "workspace"));
 
 const { default: App } = await import("./cli/App.js");
-render(<App />);
+render(<App memoryService={memoryService} />);
+
+// Graceful shutdown on exit signals
+async function shutdown() {
+  await memoryService.shutdown();
+  process.exit(0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
