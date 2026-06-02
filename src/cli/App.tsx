@@ -792,6 +792,7 @@ export default function App({
           signal: controller.signal,
           mailbox: mailboxRef.current,
           abortCommand: abortCommandRef,
+          memoryBackend: memoryService?.getBackend(),
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
