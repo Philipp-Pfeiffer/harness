@@ -67,7 +67,9 @@ export class MemoryService {
     }
 
     try {
-      await this.store.embed();
+      // If a custom embed model is configured, force re-embedding because
+      // vectors from different models are incompatible.
+      await this.store.embed({ force: !!this.config.embedModel });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[harness] QMD embed failed: ${message}`);
