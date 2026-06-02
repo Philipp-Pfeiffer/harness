@@ -5,6 +5,7 @@ import { createMailbox } from "../src/core/mailbox.js";
 import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../src/tools/types.js";
 import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
+import type { MemoryBackend, AmbientHint } from "../src/core/memoryBackend.js";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
@@ -1073,6 +1074,146 @@ describe("Agent", () => {
       expect(annotation).toContain("User-Abort");
       expect(annotation).toContain("synthetisch");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    });
+  });
+
+  describe("Ambient memory hint", () => {
+    function createMockMemoryBackend(hints: AmbientHint[]): MemoryBackend {
+      return {
+        name: "mock",
+        search: vi.fn(async () => []),
+        getAmbientHints: vi.fn(async () => hints),
+        write: vi.fn(async () => {}),
+      };
+    }
+
+    it("appends memory_hint to systemPrompt when hits exist", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toContain("<memory_hint>");
+        expect(context.systemPrompt).toContain("Architecture Notes");
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([
+        { title: "Architecture Notes", path: "/proj/memory/arch.md", score: 0.92, snippet: "Use MVC" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history, { memoryBackend: backend });
+
+      expect(result.aborted).toBe(false);
+      expect(backend.getAmbientHints).toHaveBeenCalledWith("Tell me about architecture");
+    });
+
+    it("does not inject when memoryBackend returns no hits", async () => {
+      const basePrompt = "You are a test agent";
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe(basePrompt);
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([]);
+
+      const agent = createAgent({ tools: [], model, systemPrompt: basePrompt });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history, { memoryBackend: backend });
+
+      expect(result.aborted).toBe(false);
+      expect(backend.getAmbientHints).toHaveBeenCalled();
+    });
+
+    it("does not inject when no memoryBackend provided", async () => {
+      const basePrompt = "You are a test agent";
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe(basePrompt);
+        return mockStream(mockResponse);
+      });
+
+      const agent = createAgent({ tools: [], model, systemPrompt: basePrompt });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history);
+
+      expect(result.aborted).toBe(false);
+    });
+
+    it("does not mutate the passed messages array via ambient injection", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
+
+      const backend = createMockMemoryBackend([
+        { title: "Architecture Notes", path: "/proj/memory/arch.md", score: 0.92, snippet: "Use MVC" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const userMsg = makeUserMessage("Tell me about architecture");
+      const history: Message[] = [userMsg];
+
+      await agent.run(history, { memoryBackend: backend });
+
+      // The user message itself must be untouched by ambient injection
+      expect(history[0]).toBe(userMsg);
+      expect((history[0] as any).content).toBe("Tell me about architecture");
+
+      // No memory-hint message injected; only normal assistant response appended
+      expect(history).toHaveLength(2);
+      expect(history[1].role).toBe("assistant");
+    });
+
+    it("preserves multimodal user messages unchanged", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      let capturedContext: any;
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        capturedContext = context;
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([
+        { title: "Image Note", path: "/proj/memory/img.md", score: 0.92, snippet: "About images" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const userMsg: Message = {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image" },
+          { type: "image", data: "base64abc", mimeType: "image/png" },
+        ],
+        timestamp: Date.now(),
+      };
+      const history: Message[] = [userMsg];
+
+      await agent.run(history, { memoryBackend: backend });
+
+      // messages array must be reference-identical and unchanged
+      expect(capturedContext.messages).toBe(history);
+      expect(capturedContext.messages[0]).toBe(userMsg);
+      expect((capturedContext.messages[0] as any).content).toEqual([
+        { type: "text", text: "Describe this image" },
+        { type: "image", data: "base64abc", mimeType: "image/png" },
+      ]);
+
+      // hint lives only in systemPrompt
+      expect(capturedContext.systemPrompt).toContain("<memory_hint>");
+    });
+
+    it("latency discipline: uses getAmbientHints, not search", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
+
+      const backend = createMockMemoryBackend([
+        { title: "Note", path: "/proj/memory/note.md", score: 0.92 },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const history: Message[] = [makeUserMessage("Query")];
+      await agent.run(history, { memoryBackend: backend });
+
+      expect(backend.getAmbientHints).toHaveBeenCalled();
+      expect(backend.search).not.toHaveBeenCalled();
     });
   });
 });
