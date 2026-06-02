@@ -1,7 +1,7 @@
 # Memory Architecture
 
-**Stand:** 2026-05-30, Phase 2A Step 1+2+Review-Fixes  
-**Scope:** Core Memory (System-Prompt-Injection) + Markdown-Folder-Layout + QMD Retrieval Backend
+**Stand:** 2026-05-30, Phase 2A (SDK-Migration abgeschlossen)  
+**Scope:** Core Memory (System-Prompt-Injection) + Markdown-Folder-Layout + QMD Retrieval Backend via `@tobilu/qmd` SDK
 
 ---
 
@@ -50,6 +50,7 @@
 | Memory folder | `<projectRoot>/memory` | `HARNESS_MEMORY_PATH` |
 | Sources folder | `<projectRoot>/sources` | `HARNESS_SOURCES_PATH` |
 | Inbox file | `<projectRoot>/memory/_inbox.md` | `HARNESS_INBOX_PATH` |
+| QMD DB | `<projectRoot>/.qmd/index.sqlite` | `HARNESS_QMD_DB_PATH` |
 
 **Design Decision:** Alle editierbaren Runtime-Files liegen **projekt-lokal** im Harness-Root (oder dem via `HARNESS_PROJECT_ROOT` gesetzten Verzeichnis). Das ermöglicht:
 - Workspace-Isolation (mehrere Projekte, kein Konflikt im Home-Verzeichnis)
@@ -75,7 +76,7 @@ Die Anforderung spezifiziert **keine** Sub-Ordner innerhalb von `memory/` oder `
 ```ts
 interface MemoryBackend {
   name: string;
-  search(query: string, k?: number): Promise<MemoryHit[]>;
+  search(query: string, k?: number, opts?: { mode?: "ambient" | "explicit" }): Promise<MemoryHit[]>;
   write(entry: MemoryEntry): Promise<void>;
 }
 
@@ -96,66 +97,90 @@ interface MemoryEntry {
 
 | Klasse | File | Zweck |
 |--------|------|-------|
-| `QmdBackend` | `src/core/qmdBackend.ts` | Primärpfad — ruft QMD-CLI auf |
+| `QmdBackend` | `src/core/qmdBackend.ts` | Primärpfad — nutzt `@tobilu/qmd` SDK |
 | `StubBackend` | `src/core/stubBackend.ts` | Fallback — no-op, leere Ergebnisse |
 
 ---
 
-## 4. QMD Integration
+## 4. QMD SDK Integration
 
-### QMD Overview
+### Overview
 
-[QMD](https://github.com/tobi/qmd) (Query Markdown Documents) ist eine lokale CLI-Suchmaschine für Markdown. Sie kombiniert:
+Harness nutzt das [`@tobilu/qmd`](https://github.com/tobi/qmd) SDK (nicht mehr die CLI über `execFile`). Das SDK bietet:
 
-- **BM25** (Lexikalisch / Keyword)
-- **Vektor-Semantic-Search** (Embeddings via lokalem GGUF)
-- **Hybrid + LLM-Rerank** (Reciprocal Rank Fusion + Re-Ranker)
+- **BM25** (Lexikalisch / Keyword) — `searchLex()`
+- **Vektor-Semantic-Search** (Embeddings via lokalem GGUF) — `searchVector()`
+- **Hybrid + LLM-Rerank** (Reciprocal Rank Fusion + Re-Ranker) — `search()`
 
-### Installation (externe Dependency)
+### Voraussetzungen
 
-```bash
-# QMD erfordert Bun >= 1.0.0
-curl -fsSL https://bun.sh/install | bash
-bun install -g https://github.com/tobi/qmd
+- **Node:** >= 22 empfohlen (für native SQLite-Erweiterungen)
+- **macOS:** `brew install sqlite` (für `sqlite-vec`)
+- **Model-Cache:** `~/.cache/qmd/models/` — GGUF-Modelle werden bei erster Nutzung automatisch heruntergeladen (~2 GB total: Embedding + Reranker)
+
+### MemoryService — Lifecycle Owner
+
+`src/core/memoryService.ts` ist der **einzige** Besitzer des QMD-Store-Lifecycles. Design: reine Constructor-Injection, **keine** Kopplung an TUI/CLI/Gateway.
+
+```ts
+const service = new MemoryService({
+  memoryPath:   "<projectRoot>/memory",
+  sourcesPath:  "<projectRoot>/sources",
+  dbPath:       "<projectRoot>/.qmd/index.sqlite",
+  embedModel?:  "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+});
+await service.init();          // createStore → ensureCollections → update → embed
+const backend = service.getBackend(); // MemoryBackend (QmdBackend oder StubBackend)
+// … Runtime …
+await service.shutdown();      // store.close()
 ```
 
-**First-Run** lädt automatisch GGUF-Modelle herunter (~300MB Embedding, ~640MB Reranker, ~1.1GB Query-Expansion). Dieser Download erfolgt **beim ersten `qmd embed` oder ersten `qmd vsearch/query`** und ist nicht blockierend für den Harness-Start.
+**`init()` im Detail:**
 
-### QMD-Aufrufmodi
+1. Optional: `QMD_EMBED_MODEL` aus Config setzen.
+2. `createStore({ dbPath, config: { collections: { memory, sources } } })`
+3. `ensureCollections()`: `listCollections()` prüfen, fehlende via `addCollection()` anlegen (idempotent).
+4. `store.update()` — Dateien aus dem Filesystem re-indexieren.
+5. `store.embed()` — Embeddings neu berechnen (bzw. inkrementell).
 
-| Modus | CLI | Zweck | Latenz | Harness-Methode |
-|-------|-----|-------|--------|-----------------|
-| L2 Ambient | `qmd vsearch` | Vector-only, kein LLM | <100ms | `QmdBackend.vsearch()` |
-| L4 Explicit | `qmd query` | Hybrid + LLM-Rerank | ~1.7s | `QmdBackend.query()` |
+**Degraded Mode:** Falls `createStore()` fehlschlägt (z. B. `sqlite-vec` nicht verfügbar, Modelle offline, Node-Version zu alt), wird `degraded = true` gesetzt, ein Warn-Log ausgegeben, und `getBackend()` liefert einen `StubBackend`. Kein Crash.
 
-`QmdBackend.search()` defaulted zu `vsearch` (schnellster Modus).
+### QMD Search-Methoden
 
-### JSON Parsing
+| Modus | SDK-Methode | Zweck | Latenz | Harness-Methode |
+|-------|-------------|-------|--------|-----------------|
+| L2 Ambient | `store.searchVector(query, { limit })` | Reine Vektor-Suche, kein Rerank | < 100 ms | `QmdBackend.vsearch()` |
+| L4 Explicit | `store.search({ query, limit })` | Hybrid + LLM-Rerank | ~ 1.7 s | `QmdBackend.query()` |
 
-QMD wird mit `--json` aufgerufen. Die Ausgabe wird geparsed:
+`QmdBackend.search()` defaulted zu `vsearch` (schnellster Modus). `mode: "explicit"` wählt die tiefere Hybrid-Suche.
 
-- Direktes Array: `[{ file, score, content, line }]`
-- Oder verschachtelt: `{ results: [...] }`
-- Unparseable / leer → `[]`
+### Content Mapping
 
-### Auto-Setup (Collection Registration)
+Die SDK-Rückgaben werden typisiert auf `MemoryHit` gemappt — **kein JSON-Parsing** mehr:
 
-`ensureQmdCollections()` wird in `src/index.tsx` aufgerufen, nachdem die Ordner bereit sind:
+- `searchVector` → `SearchResult[]` mit `body?`, `title`, `chunkPos`
+- `search` → `HybridQueryResult[]` mit `body`, `bestChunk`, `bestChunkPos`, `title`
 
-1. Prüft, ob `qmd` verfügbar ist (`qmd --version`).
-2. Registriert Collections idempotent:
-   - `qmd collection add <projectRoot>/memory --name memory --mask "**/*.md"`
-   - `qmd collection add <projectRoot>/sources --name sources --mask "**/*.md"`
-   - Bereits existierende Collections werden als "already present" erkannt und übersprungen.
-3. Baut/aktualisiert den Index: `qmd update`
-4. Baut Embeddings für Vector-Search: `qmd embed`
+Fallback-Kette: `body ?? title` (Ambient) bzw. `bestChunk ?? body ?? title` (Explicit).
 
-Falls QMD nicht installiert ist: klare Warnung, sauberer Degrade — kein Crash.
+### Write + Inkrementeller Index
 
-### Error Handling
+`QmdBackend.write(entry)`:
 
-- `qmd` nicht in PATH → `execFile` wirft Error (z. B. "spawn qmd ENOENT").
-- Caller (z. B. ein späteres Memory-Tool) kann auf `StubBackend` fallbacken.
+1. Schreibt die `.md`-Datei via `node:fs/promises`.
+2. Setzt ein `dirty`-Flag.
+3. Queue-Microtask ruft `store.update({ collections: ["memory"] })` + `store.embed({ collection: "memory" })` auf.
+4. Mehrere schnelle Writes werden so zu einem einzigen inkrementellen Update gebündelt.
+
+### Deutsch / Embed-Model
+
+Der Default-Embedder (`embeddinggemma-300M`) ist english-optimiert. Für deutsche Inhalte oder DE/EN-Mix:
+
+```bash
+export QMD_EMBED_MODEL="hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+```
+
+**Wichtig:** Beim Modellwechsel sind alte Vektoren nicht kompatibel. Ein Re-Embed mit `force: true` ist erforderlich (wird bei `MemoryService.init()` bei Bedarf über `config.embedModel` + Umgebungsvariable gesteuert).
 
 ---
 
@@ -172,22 +197,56 @@ Falls QMD nicht installiert ist: klare Warnung, sauberer Degrade — kein Crash.
 │  QMD  │  │  Stub   │
 │Primary│  │Fallback │
 └───────┘  └─────────┘
+         ▲
+         │ degraded=true
+┌────────┴────────┐
+│  MemoryService  │ ← Lifecycle Owner
+└─────────────────┘
 ```
 
-- **QMD ist der Primärpfad.** Wenn QMD verfügbar ist, werden alle Retrieval-Operationen darüber ausgeführt.
-- **StubBackend** implementiert das gleiche Interface, liefert aber immer leere Ergebnisse. Er wird nur aktiv, wenn ein Caller explizit auf ihn zurückfällt (z. B. weil QMD nicht installiert ist).
-- Es gibt keinen automatischen Fallback im Backend selbst — die Entscheidung liegt beim Aufrufer (zukünftiges Memory-Tool in Phase 2B+).
+- **QMD ist der Primärpfad.** Wenn der Store erfolgreich initialisiert wird, liefert `getBackend()` ein `QmdBackend` mit Live-Store.
+- **StubBackend** implementiert das gleiche Interface, liefert aber immer leere Ergebnisse. Wird automatisch bei `degraded=true` ausgegeben.
+- Die Entscheidung liegt bei `MemoryService` — Aufrufer (z. B. ein späteres Memory-Tool in Phase 2B+) bekommen nur ein `MemoryBackend` und wissen nicht, ob QMD oder Stub dahintersteckt.
 
 ---
 
-## 6. File Map
+## 6. Migration zum Gateway
+
+`MemoryService` ist heute in `src/index.tsx` instanziiert:
+
+```tsx
+const memoryService = new MemoryService({ ... });
+await memoryService.init();
+render(<App memoryService={memoryService} />);
+```
+
+Im **Gateway** wird exakt dieselbe Klasse im Gateway-Main instanziiert und das Backend per DI durchgereicht — **kein Aufrufer-Code ändert sich**:
+
+```ts
+// Gateway-Main (zukünftig)
+const memoryService = new MemoryService({
+  memoryPath:  config.memoryPath,
+  sourcesPath: config.sourcesPath,
+  dbPath:      config.dbPath,
+});
+await memoryService.init();
+
+// DI an Agent-Handler, RPC-Server, etc.
+const agentHandler = new AgentHandler({ memoryBackend: memoryService.getBackend() });
+```
+
+Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unverändert. Nur der Erzeugungs- und Shutdown-Code wandert vom CLI-Entrypoint in den Gateway-Prozess.
+
+---
+
+## 7. File Map
 
 | Datei | Zweck |
 |-------|-------|
 | `src/core/coreMemory.ts` | core.md Loader, Parser, Formatter, Composer |
 | `src/core/memoryFolders.ts` | Folder-Scaffolding + Env-Config |
-| `src/core/memoryBackend.ts` | `MemoryBackend` Interface + Typen |
-| `src/core/qmdBackend.ts` | QMD-CLI Adapter (`vsearch`, `query`, `write`) |
-| `src/core/qmdSetup.ts` | Idempotente QMD Collection-Registrierung + Index/Embed |
+| `src/core/memoryBackend.ts` | `MemoryBackend` Interface + `MemoryHit` / `MemoryEntry` Typen |
+| `src/core/memoryService.ts` | Lifecycle-Owner: Store-Init, Collection-Setup, Update/Embed, Shutdown |
+| `src/core/qmdBackend.ts` | SDK-Adapter: `vsearch`, `query`, `search`, `write` |
 | `src/core/stubBackend.ts` | No-op Fallback-Implementierung |
 | `core.md` | User-pflegbare Identitäts-/Projekt-Informationen |
