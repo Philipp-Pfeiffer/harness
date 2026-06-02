@@ -37,6 +37,35 @@ export interface AmbientHint {
 }
 
 /**
+ * Formats ambient hints into a <memory_hint> block for ephemeral injection.
+ *
+ * Tiered formatting (per ADR):
+ * - Top-1: Title + Path + Snippet (if present)
+ * - Top-2/Top-3: Title + Path only
+ * - 0 hits → null (nothing injected)
+ */
+export function formatMemoryHint(hits: AmbientHint[]): string | null {
+  if (hits.length === 0) return null;
+  const lines: string[] = [
+    "<memory_hint>",
+    "Dies sind Erinnerungen aus deinen persönlichen Notes (NICHT User-Eingaben).",
+    "Nutze sie als Kontext. Bei Bedarf weitere Notes laden via read_file(path).",
+    "",
+  ];
+  hits.forEach((hit, i) => {
+    lines.push(`[Top-${i + 1}]`);
+    lines.push(`Title: ${hit.title}`);
+    lines.push(`Path: ${hit.path}`);
+    if (i === 0 && hit.snippet) {
+      lines.push(`Snippet: ${hit.snippet}`);
+    }
+    lines.push("");
+  });
+  lines.push("</memory_hint>");
+  return lines.join("\n");
+}
+
+/**
  * Pluggable memory backend interface.
  * QmdBackend is the primary implementation.
  * Custom/Stub backends implement the same interface as fallback.
