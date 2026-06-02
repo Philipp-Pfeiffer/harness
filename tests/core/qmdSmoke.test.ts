@@ -10,30 +10,36 @@ import { tmpdir } from "node:os";
  * Skips gracefully if QMD native dependencies are unavailable (e.g. in CI).
  */
 
-let sdkAvailable = false;
-
-beforeAll(async () => {
-  try {
-    const testDir = resolve(tmpdir(), `harness-qmd-smoke-check-${Date.now()}`);
-    await mkdir(testDir, { recursive: true });
-    const store = await createStore({
-      dbPath: resolve(testDir, "test.sqlite"),
-      config: {
-        collections: {
-          test: { path: testDir, pattern: "**/*.md" },
-        },
-      },
-    });
-    await store.close();
-    await rm(testDir, { recursive: true, force: true });
-    sdkAvailable = true;
-  } catch {
-    sdkAvailable = false;
-  }
-});
-
 describe("QMD SDK Smoke Test", () => {
-  it.skipIf(!sdkAvailable)("end-to-end: write, index, and retrieve via SDK", async () => {
+  let sdkAvailable = false;
+
+  beforeAll(async () => {
+    try {
+      const testDir = resolve(tmpdir(), `harness-qmd-smoke-check-${Date.now()}`);
+      await mkdir(testDir, { recursive: true });
+      const store = await createStore({
+        dbPath: resolve(testDir, "test.sqlite"),
+        config: {
+          collections: {
+            test: { path: testDir, pattern: "**/*.md" },
+          },
+        },
+      });
+      await store.close();
+      await rm(testDir, { recursive: true, force: true });
+      sdkAvailable = true;
+    } catch (e: any) {
+      console.error("[qmdSmoke] beforeAll failed:", e.message);
+      sdkAvailable = false;
+    }
+  });
+
+  it("end-to-end: write, index, and retrieve via SDK", async () => {
+    if (!sdkAvailable) {
+      console.log("[SKIP] QMD SDK not available — smoke test skipped. Install: npm install @tobilu/qmd");
+      return;
+    }
+
     const testDir = resolve(tmpdir(), `harness-qmd-smoke-${Date.now()}`);
     const memoryPath = resolve(testDir, "memory");
 
@@ -75,11 +81,4 @@ describe("QMD SDK Smoke Test", () => {
     await store.close();
     await rm(testDir, { recursive: true, force: true });
   }, 600_000); // 10 min timeout for first-run model download
-
-  it("logs skip reason when SDK is not available", () => {
-    if (!sdkAvailable) {
-      console.log("[SKIP] QMD SDK not available — smoke test skipped. Install: npm install @tobilu/qmd");
-    }
-    expect(true).toBe(true);
-  });
 });
