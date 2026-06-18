@@ -34,6 +34,49 @@ describe("prompt()", () => {
     expect(result).not.toContain("<!--");
   });
 
+  describe("system-prompt: inbox append contract (Step 5)", () => {
+    it("mentions 'merk das' as explicit trigger", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      expect(result).toContain("merk das");
+    });
+
+    it("mentions 'remember' as explicit trigger", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      expect(result).toContain("remember");
+    });
+
+    it("references the inbox path via {{inboxPath}} substitution", () => {
+      const result = prompt("system-prompt", { inboxPath: "/custom/inbox.md" });
+      expect(result).toContain("/custom/inbox.md");
+      expect(result).not.toContain("{{inboxPath}}");
+    });
+
+    it("instructs to use the edit tool (not a dedicated remember tool)", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      expect(result.toLowerCase()).toContain("edit");
+    });
+
+    it("instructs to append as bullet", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      expect(result).toContain("Bullet");
+    });
+
+    it("prohibits automatic/heuristic writing — no auto-summarization", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      expect(result).toContain("keine Heuristik");
+      expect(result).toContain("keine automatische Zusammenfassung");
+    });
+
+    it("does not mention session-end distillation as a feature", () => {
+      const result = prompt("system-prompt", { inboxPath: "/proj/memory/_inbox.md" });
+      // The contract must not introduce distillation as a feature
+      expect(result).not.toContain("Distillation");
+      expect(result).not.toContain("distillation");
+      // "am Session-Ende" is allowed only in negation context (prohibiting it)
+      expect(result).toContain("keine automatische Zusammenfassung am Session-Ende");
+    });
+  });
+
   it("steer-annotation snapshot", () => {
     const result = prompt("steer-annotation", {
       userInput: "Apfelsaft",

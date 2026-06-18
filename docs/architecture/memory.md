@@ -137,19 +137,29 @@ const service = new MemoryService({
   dbPath:       "<projectRoot>/.qmd/index.sqlite",
   embedModel?:  "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
 });
-await service.init();          // createStore → ensureCollections → update → embed
-const backend = service.getBackend(); // MemoryBackend (QmdBackend oder StubBackend)
+await service.init();          // createStore → ensureCollections (schnell)
+                               // update + embed laufen asynchron im Hintergrund (warmup)
+const backend = service.getBackend(); // MemoryBackend (QmdBackend, WarmupGatedBackend oder StubBackend)
 // … Runtime …
-await service.shutdown();      // store.close()
+await service.shutdown();      // wartet auf warmup → store.close()
 ```
 
-**`init()` im Detail:**
+**`init()` im Detail (Background-Init):**
 
 1. Optional: `QMD_EMBED_MODEL` aus Config setzen.
 2. `createStore({ dbPath, config: { collections: { memory, sources } } })`
 3. `ensureCollections()`: `listCollections()` prüfen, fehlende via `addCollection()` anlegen (idempotent).
-4. `store.update()` — Dateien aus dem Filesystem re-indexieren.
-5. `store.embed()` — Embeddings neu berechnen (bzw. inkrementell).
+4. `QmdBackend` wird sofort erstellt (nutzt vorhandenen Index aus SQLite).
+5. `warmup()` feuert **asynchron im Hintergrund**: `store.update()` → `store.embed()` → `store.searchVector("warmup", { limit: 1 })` (Pre-warm: lädt Embedding-Modell in den Speicher).
+6. `init()` **returns sofort** — die TUI rendert, Memory wärmt im Hintergrund auf.
+
+**Warmup-Gate (`getBackend()`):**
+
+| Zustand | `getBackend()` liefert | `getAmbientHints()` | `query()` |
+|---------|----------------------|---------------------|-----------|
+| Warmup läuft | `WarmupGatedBackend` | `[]` (still, nicht-blockierend) | "index warming" Meldung |
+| Warmup fertig | `QmdBackend` (direkt) | Normale Ergebnisse | Normale Ergebnisse |
+| Store-Erstellung fehlgeschlagen | `StubBackend` | `[]` | `[]` |
 
 **Degraded Mode:** Falls `createStore()` fehlschlägt (z. B. `sqlite-vec` nicht verfügbar, Modelle offline, Node-Version zu alt), wird `degraded = true` gesetzt, ein Warn-Log ausgegeben, und `getBackend()` liefert einen `StubBackend`. Kein Crash.
 
@@ -270,7 +280,104 @@ Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unveränder
 ### Abgrenzung zu L4 (Schritt 4)
 
 - **L2 Ambient** = automatisch vor jedem Turn, `searchVector`, schnell, kein Rerank.
-- **L4 Explicit** = `search_memory`-Tool (noch nicht implementiert), `store.search()` (Hybrid + LLM-Rerank), ~1.7 s, auf User-Anfrage.
+- **L4 Explicit** = `search_memory`-Tool, `searchLex()` + `searchVector()` + RRF (kein LLM), auf User-Anfrage. Siehe §10.
+
+---
+
+## 10. Explicit Search Tool (L4)
+
+**Status:** implementiert (Phase 2A Schritt 4)
+
+### Tool: `search_memory`
+
+| Eigenschaft | Wert |
+|-------------|------|
+| Name | `search_memory` |
+| Datei | `src/tools/searchMemory.ts` |
+| Input | `query: string` (required, minLength 1) |
+| Backend-Aufruf | `MemoryBackend.query(query, 10)` → `QmdBackend.query()` → `searchLex()` + `searchVector()` + RRF |
+| Default K | 10 |
+| Read-only | ✅ — keine Writes, keine Message-Mutation |
+| Degraded Mode | Graceful: gibt Hinweis-Text zurück, kein Throw |
+| LLM-Beteiligung | ❌ — keine Query Expansion, kein Reranking |
+
+### Unterschied zum Ambient Hook (L2)
+
+| Aspekt | L2 Ambient Hook | L4 Explicit `search_memory` |
+|--------|-----------------|-----------------------------|
+| Trigger | Automatisch vor jedem Turn | Vom Agent bewusst als Tool-Call |
+| Backend-Methode | `getAmbientHints()` → `searchVector()` | `query()` → `searchLex()` + `searchVector()` + RRF |
+| Retrieval | Vector-only | BM25 + Vector + Reciprocal Rank Fusion |
+| LLM-Calls | 0 | 0 (keine Expansion, kein Rerank) |
+| Top-K | 3 | 10 |
+| Output | Ephememer `<memory_hint>`-Block im System-Prompt | Tool-Result-Message mit strukturiertem Text |
+| Latenz | < 100 ms (nach Cold-Start) | < 200 ms (BM25 + vector parallel, keine LLM-Calls) |
+
+### Output-Format
+
+```
+--- memory search: N results ---
+[1]
+Path: /proj/memory/arch.md
+Score: 0.920
+Content: Architecture: MVC pattern with Ink
+
+[2]
+Path: /proj/memory/tools.md
+Score: 0.810
+Content: Tool registry pattern
+```
+
+Bei 0 Treffern:
+```
+--- memory search: 0 results ---
+No matching notes found.
+```
+
+Bei fehlendem Backend (degraded):
+```
+--- memory search: unavailable ---
+No memory backend configured. Memory search is not available.
+```
+
+### Integration
+
+- `loadTools(memoryBackend?)` in `src/tools/registry.ts` — Factory `createSearchMemoryTool(memoryBackend)` erzeugt das Tool mit Backend im Closure.
+- `src/cli/App.tsx` — übergibt `memoryService?.getBackend()` an `loadTools()`.
+- `MemoryBackend`-Interface hat `query()` als eigene Methode (ergänzt in Schritt 4).
+- `QmdBackend.query()` nutzt `searchLex()` + `searchVector()` + inline RRF (k=60). **Kein** `store.search()`, **keine** LLM-Query-Expansion, **kein** LLM-Rerank.
+
+---
+
+## 11. Inbox Append Pattern (Step 5)
+
+**Status:** implementiert (Phase 2A Schritt 5)
+
+### Konzept
+
+Bei explizitem User-Request ("merk das" / "remember") appended der Agent einen Bullet an `memory/_inbox.md` — unter Nutzung des **vorhandenen edit-Tools**, ohne neues Tool oder neue API.
+
+### Prompt-Contract
+
+Die System-Prompt-Klausel (`prompts/system-prompt.md`) weist den Agent an:
+
+1. **Trigger:** User sagt explizit "merk das" oder "remember" + Inhalt.
+2. **Aktion:** `readFile` auf `{{inboxPath}}` → `edit`-Tool: Bullet (`- `) am Ende einfügen.
+3. **Keine Heuristik:** Nur explizit angeforderte Dinge, keine automatische Zusammenfassung am Session-Ende.
+4. **Pfad:** `{{inboxPath}}` wird via `prompt("system-prompt", { inboxPath })` substituiert. Default: `<projectRoot>/memory/_inbox.md` (via `resolveMemoryConfig()`).
+
+### Was NICHT implementiert ist
+
+- Kein `remember`-Tool — der Agent nutzt `edit`.
+- Keine Intent-Heuristik / Auto-Write — nur bei explizitem User-Request.
+- Keine Session-End-Distillation.
+- Keine neue Tool-API.
+
+### Integration
+
+- `prompts/system-prompt.md` — Klausel mit `{{inboxPath}}`-Platzhalter.
+- `src/cli/App.tsx:676` — `prompt("system-prompt", { inboxPath: resolveMemoryConfig().inboxPath })`.
+- `src/core/memoryFolders.ts` — `resolveMemoryConfig()` liefert den konfigurierten Inbox-Pfad.
 
 ---
 
@@ -281,7 +388,8 @@ Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unveränder
 | `src/core/coreMemory.ts` | core.md Loader, Parser, Formatter, Composer |
 | `src/core/memoryFolders.ts` | Folder-Scaffolding + Env-Config |
 | `src/core/memoryBackend.ts` | `MemoryBackend` Interface + `MemoryHit` / `AmbientHint` / `MemoryEntry` + `formatMemoryHint` |
-| `src/core/memoryService.ts` | Lifecycle-Owner: Store-Init, Collection-Setup, Update/Embed, Shutdown, Embed-Model-Marker |
-| `src/core/qmdBackend.ts` | SDK-Adapter: `vsearch`, `query`, `search`, `getAmbientHints`, `write` |
+| `src/core/memoryService.ts` | Lifecycle-Owner: Store-Init, Background-Warmup (update+embed+pre-warm async), WarmupGatedBackend, Embed-Model-Marker, Shutdown |
+| `src/core/qmdBackend.ts` | SDK-Adapter: `vsearch`, `query` (searchLex + searchVector + RRF, kein LLM), `search`, `getAmbientHints`, `write` |
 | `src/core/stubBackend.ts` | No-op Fallback-Implementierung |
+| `src/tools/searchMemory.ts` | `search_memory`-Tool: Factory mit `MemoryBackend`-Closure, read-only, L4 Explicit Search |
 | `core.md` | User-pflegbare Identitäts-/Projekt-Informationen |
