@@ -1,6 +1,6 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { QMDStore, SearchResult, HybridQueryResult } from "@tobilu/qmd";
+import type { QMDStore, SearchResult } from "@tobilu/qmd";
 import type { MemoryBackend, MemoryHit, MemoryEntry, AmbientHint } from "./memoryBackend.js";
 
 export interface QmdBackendOptions {
@@ -17,13 +17,44 @@ function searchResultToHit(r: SearchResult): MemoryHit {
   };
 }
 
-function hybridResultToHit(r: HybridQueryResult): MemoryHit {
-  return {
-    source: r.file,
-    score: r.score,
-    content: (r.bestChunk ?? r.body ?? r.title ?? "").trim(),
-    line: r.bestChunkPos,
-  };
+/**
+ * Reciprocal Rank Fusion (RRF) — merges multiple ranked result lists
+ * into a single ranking without LLM reranking.
+ *
+ * Formula: score(d) = Σ weight_i / (k + rank_i + 1)
+ *
+ * @param resultLists - Array of ranked SearchResult arrays (lex, vector, ...)
+ * @param weights - Per-list weights (default: 1.0 each)
+ * @param k - RRF constant (default: 60, standard value from the original paper)
+ */
+function reciprocalRankFusion(
+  resultLists: SearchResult[][],
+  weights: number[] = [],
+  k = 60,
+): SearchResult[] {
+  const merged = new Map<string, { result: SearchResult; rrfScore: number }>();
+
+  for (let listIdx = 0; listIdx < resultLists.length; listIdx++) {
+    const list = resultLists[listIdx];
+    if (!list) continue;
+    const weight = weights[listIdx] ?? 1.0;
+
+    for (let rank = 0; rank < list.length; rank++) {
+      const result = list[rank];
+      if (!result) continue;
+      const rrfContribution = weight / (k + rank + 1);
+      const existing = merged.get(result.filepath);
+      if (existing) {
+        existing.rrfScore += rrfContribution;
+      } else {
+        merged.set(result.filepath, { result, rrfScore: rrfContribution });
+      }
+    }
+  }
+
+  return Array.from(merged.values())
+    .map(({ result, rrfScore }) => ({ ...result, score: rrfScore }))
+    .sort((a, b) => b.score - a.score);
 }
 
 function makeSnippet(body: string | undefined): string | undefined {
@@ -60,17 +91,24 @@ export class QmdBackend implements MemoryBackend {
   }
 
   /**
-   * L4 Explicit search — hybrid + LLM rerank.
-   * Maps to `store.search()`.
+   * L4 Explicit search — BM25 (searchLex) + Vector (searchVector) + RRF.
+   *
+   * No LLM query expansion, no LLM reranking. Both searches run in parallel,
+   * results are fused via Reciprocal Rank Fusion (k=60, equal weights).
    */
   async query(query: string, k = this.defaultK): Promise<MemoryHit[]> {
-    const results = await this.store.search({ query, limit: k });
-    return results.map(hybridResultToHit);
+    const [lexResults, vecResults] = await Promise.all([
+      this.store.searchLex(query, { limit: k * 3 }),
+      this.store.searchVector(query, { limit: k * 3 }),
+    ]);
+
+    const fused = reciprocalRankFusion([lexResults, vecResults]).slice(0, k);
+    return fused.map(searchResultToHit);
   }
 
   /**
    * Generic search entry point. Defaults to vsearch (ambient / fast).
-   * Use mode: "explicit" for deep retrieval.
+   * Use mode: "explicit" for L4 retrieval (BM25 + vector + RRF, no LLM).
    */
   async search(
     query: string,

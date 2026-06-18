@@ -1,12 +1,36 @@
 import { describe, it, expect, vi } from "vitest";
 import { QmdBackend } from "../../src/core/qmdBackend.js";
-import type { QMDStore, SearchResult, HybridQueryResult } from "@tobilu/qmd";
+import type { QMDStore, SearchResult } from "@tobilu/qmd";
+
+function makeSearchResult(
+  filepath: string,
+  title: string,
+  score: number,
+  body?: string,
+  chunkPos?: number,
+): SearchResult {
+  return {
+    filepath,
+    displayPath: filepath.split("/").pop() ?? filepath,
+    title,
+    context: null,
+    hash: "hash_" + filepath,
+    docid: "doc_" + filepath,
+    collectionName: "memory",
+    modifiedAt: new Date().toISOString(),
+    bodyLength: body?.length ?? 0,
+    body,
+    score,
+    source: "vec",
+    chunkPos,
+  };
+}
 
 function createFakeStore(overrides?: Partial<QMDStore>): QMDStore {
   return {
     internal: {} as any,
     dbPath: "/fake/db.sqlite",
-    search: vi.fn(async () => [] as HybridQueryResult[]),
+    search: vi.fn(async () => []),
     searchLex: vi.fn(async () => []),
     searchVector: vi.fn(async () => [] as SearchResult[]),
     expandQuery: vi.fn(async () => []),
@@ -39,21 +63,7 @@ describe("QmdBackend (SDK)", () => {
   });
 
   it("vsearch calls store.searchVector and maps results", async () => {
-    const fakeResult: SearchResult = {
-      filepath: "/proj/memory/note.md",
-      displayPath: "note.md",
-      title: "My Note",
-      context: null,
-      hash: "abc123",
-      docid: "abc123",
-      collectionName: "memory",
-      modifiedAt: new Date().toISOString(),
-      bodyLength: 100,
-      body: "Hello world",
-      score: 0.95,
-      source: "vec",
-      chunkPos: 42,
-    };
+    const fakeResult = makeSearchResult("/proj/memory/note.md", "My Note", 0.95, "Hello world", 42);
 
     const store = createFakeStore({
       searchVector: vi.fn(async () => [fakeResult]),
@@ -70,31 +80,101 @@ describe("QmdBackend (SDK)", () => {
     expect(hits[0].line).toBe(42);
   });
 
-  it("query calls store.search and maps hybrid results", async () => {
-    const fakeResult: HybridQueryResult = {
-      file: "/proj/memory/note.md",
-      displayPath: "note.md",
-      title: "My Note",
-      body: "Full body text",
-      bestChunk: "Best chunk",
-      bestChunkPos: 10,
-      score: 0.88,
-      context: null,
-      docid: "abc123",
-    };
+  describe("query (L4 explicit — BM25 + vector + RRF, no LLM)", () => {
+    it("calls searchLex and searchVector in parallel, not store.search", async () => {
+      const lexResult = makeSearchResult("/proj/memory/lex.md", "Lex Hit", 0.8, "Lex body");
+      const vecResult = makeSearchResult("/proj/memory/vec.md", "Vec Hit", 0.9, "Vec body");
 
-    const store = createFakeStore({
-      search: vi.fn(async () => [fakeResult]),
+      const store = createFakeStore({
+        searchLex: vi.fn(async () => [lexResult]),
+        searchVector: vi.fn(async () => [vecResult]),
+      });
+
+      const backend = new QmdBackend(store);
+      const hits = await backend.query("hello", 5);
+
+      // Must call searchLex and searchVector
+      expect(store.searchLex).toHaveBeenCalledWith("hello", { limit: 15 });
+      expect(store.searchVector).toHaveBeenCalledWith("hello", { limit: 15 });
+
+      // Must NOT call store.search (the LLM expansion + rerank path)
+      expect(store.search).not.toHaveBeenCalled();
+
+      // Must NOT call expandQuery (LLM query expansion)
+      expect(store.expandQuery).not.toHaveBeenCalled();
+
+      // Both results appear in fused output
+      expect(hits).toHaveLength(2);
+      const sources = hits.map((h) => h.source);
+      expect(sources).toContain("/proj/memory/lex.md");
+      expect(sources).toContain("/proj/memory/vec.md");
     });
 
-    const backend = new QmdBackend(store);
-    const hits = await backend.query("hello", 5);
+    it("RRF fuses overlapping results — same file in both lists merges to one hit", async () => {
+      const shared = makeSearchResult("/proj/memory/shared.md", "Shared", 0.9, "Shared body");
+      const lexOnly = makeSearchResult("/proj/memory/lex-only.md", "Lex Only", 0.7, "Lex body");
+      const vecOnly = makeSearchResult("/proj/memory/vec-only.md", "Vec Only", 0.8, "Vec body");
 
-    expect(store.search).toHaveBeenCalledWith({ query: "hello", limit: 5 });
-    expect(hits).toHaveLength(1);
-    expect(hits[0].source).toBe("/proj/memory/note.md");
-    expect(hits[0].content).toBe("Best chunk");
-    expect(hits[0].line).toBe(10);
+      const store = createFakeStore({
+        searchLex: vi.fn(async () => [shared, lexOnly]),
+        searchVector: vi.fn(async () => [shared, vecOnly]),
+      });
+
+      const backend = new QmdBackend(store);
+      const hits = await backend.query("test", 10);
+
+      // 3 unique files, not 4 (shared appears once)
+      expect(hits).toHaveLength(3);
+      const sources = hits.map((h) => h.source);
+      expect(sources).toContain("/proj/memory/shared.md");
+      expect(sources).toContain("/proj/memory/lex-only.md");
+      expect(sources).toContain("/proj/memory/vec-only.md");
+
+      // Shared file should have higher RRF score than single-list hits
+      const sharedHit = hits.find((h) => h.source === "/proj/memory/shared.md");
+      const lexOnlyHit = hits.find((h) => h.source === "/proj/memory/lex-only.md");
+      expect(sharedHit!.score).toBeGreaterThan(lexOnlyHit!.score);
+    });
+
+    it("respects k limit on fused results", async () => {
+      const results = Array.from({ length: 10 }, (_, i) =>
+        makeSearchResult(`/proj/memory/note-${i}.md`, `Note ${i}`, 0.9 - i * 0.05),
+      );
+
+      const store = createFakeStore({
+        searchLex: vi.fn(async () => results.slice(0, 5)),
+        searchVector: vi.fn(async () => results.slice(5)),
+      });
+
+      const backend = new QmdBackend(store);
+      const hits = await backend.query("test", 3);
+
+      expect(hits).toHaveLength(3);
+    });
+
+    it("returns empty array when both lists are empty", async () => {
+      const store = createFakeStore();
+      const backend = new QmdBackend(store);
+      const hits = await backend.query("nothing", 5);
+
+      expect(hits).toEqual([]);
+      expect(store.search).not.toHaveBeenCalled();
+    });
+
+    it("works when searchLex returns empty but searchVector has results", async () => {
+      const vecResult = makeSearchResult("/proj/memory/vec.md", "Vec Hit", 0.85, "Vec body");
+
+      const store = createFakeStore({
+        searchLex: vi.fn(async () => []),
+        searchVector: vi.fn(async () => [vecResult]),
+      });
+
+      const backend = new QmdBackend(store);
+      const hits = await backend.query("hello", 5);
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0].source).toBe("/proj/memory/vec.md");
+    });
   });
 
   it("search defaults to ambient (vsearch)", async () => {
@@ -105,12 +185,14 @@ describe("QmdBackend (SDK)", () => {
     expect(store.searchVector).toHaveBeenCalledWith("q", { limit: 5 });
   });
 
-  it("search mode explicit calls query", async () => {
+  it("search mode explicit calls query (searchLex + searchVector), not store.search", async () => {
     const store = createFakeStore();
     const backend = new QmdBackend(store);
     await backend.search("q", 3, { mode: "explicit" });
 
-    expect(store.search).toHaveBeenCalledWith({ query: "q", limit: 3 });
+    expect(store.searchLex).toHaveBeenCalledWith("q", { limit: 9 });
+    expect(store.searchVector).toHaveBeenCalledWith("q", { limit: 9 });
+    expect(store.search).not.toHaveBeenCalled();
   });
 
   it("write creates file and queues incremental update", async () => {
@@ -134,19 +216,7 @@ describe("QmdBackend (SDK)", () => {
   });
 
   it("maps SearchResult without body to title fallback", async () => {
-    const fakeResult: SearchResult = {
-      filepath: "/proj/memory/title-only.md",
-      displayPath: "title-only.md",
-      title: "Title Only",
-      context: null,
-      hash: "abc",
-      docid: "abc",
-      collectionName: "memory",
-      modifiedAt: new Date().toISOString(),
-      bodyLength: 0,
-      score: 0.7,
-      source: "vec",
-    };
+    const fakeResult = makeSearchResult("/proj/memory/title-only.md", "Title Only", 0.7);
 
     const store = createFakeStore({
       searchVector: vi.fn(async () => [fakeResult]),
@@ -168,34 +238,8 @@ describe("QmdBackend (SDK)", () => {
 
     it("filters out scores below minCosine", async () => {
       const results: SearchResult[] = [
-        {
-          filepath: "/proj/memory/high.md",
-          displayPath: "high.md",
-          title: "High",
-          context: null,
-          hash: "a",
-          docid: "a",
-          collectionName: "memory",
-          modifiedAt: "",
-          bodyLength: 10,
-          body: "High score",
-          score: 0.85,
-          source: "vec",
-        },
-        {
-          filepath: "/proj/memory/low.md",
-          displayPath: "low.md",
-          title: "Low",
-          context: null,
-          hash: "b",
-          docid: "b",
-          collectionName: "memory",
-          modifiedAt: "",
-          bodyLength: 10,
-          body: "Low score",
-          score: 0.3,
-          source: "vec",
-        },
+        makeSearchResult("/proj/memory/high.md", "High", 0.85, "High score"),
+        makeSearchResult("/proj/memory/low.md", "Low", 0.3, "Low score"),
       ];
 
       const store = createFakeStore({
@@ -212,20 +256,7 @@ describe("QmdBackend (SDK)", () => {
 
     it("returns empty array when all scores below threshold", async () => {
       const results: SearchResult[] = [
-        {
-          filepath: "/proj/memory/weak.md",
-          displayPath: "weak.md",
-          title: "Weak",
-          context: null,
-          hash: "a",
-          docid: "a",
-          collectionName: "memory",
-          modifiedAt: "",
-          bodyLength: 10,
-          body: "Weak",
-          score: 0.1,
-          source: "vec",
-        },
+        makeSearchResult("/proj/memory/weak.md", "Weak", 0.1, "Weak"),
       ];
 
       const store = createFakeStore({
@@ -240,20 +271,12 @@ describe("QmdBackend (SDK)", () => {
 
     it("maps title, path, score, and snippet correctly", async () => {
       const results: SearchResult[] = [
-        {
-          filepath: "/proj/memory/note.md",
-          displayPath: "note.md",
-          title: "My Note",
-          context: null,
-          hash: "a",
-          docid: "a",
-          collectionName: "memory",
-          modifiedAt: "",
-          bodyLength: 100,
-          body: "First line\n\nSecond line\nThird line\nFourth line",
-          score: 0.92,
-          source: "vec",
-        },
+        makeSearchResult(
+          "/proj/memory/note.md",
+          "My Note",
+          0.92,
+          "First line\n\nSecond line\nThird line\nFourth line",
+        ),
       ];
 
       const store = createFakeStore({
@@ -272,19 +295,7 @@ describe("QmdBackend (SDK)", () => {
 
     it("omits snippet when body is empty", async () => {
       const results: SearchResult[] = [
-        {
-          filepath: "/proj/memory/empty.md",
-          displayPath: "empty.md",
-          title: "Empty",
-          context: null,
-          hash: "a",
-          docid: "a",
-          collectionName: "memory",
-          modifiedAt: "",
-          bodyLength: 0,
-          score: 0.8,
-          source: "vec",
-        },
+        makeSearchResult("/proj/memory/empty.md", "Empty", 0.8),
       ];
 
       const store = createFakeStore({
