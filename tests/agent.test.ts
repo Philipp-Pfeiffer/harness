@@ -1082,6 +1082,7 @@ describe("Agent", () => {
       return {
         name: "mock",
         search: vi.fn(async () => []),
+        query: vi.fn(async () => []),
         getAmbientHints: vi.fn(async () => hints),
         write: vi.fn(async () => {}),
       };
