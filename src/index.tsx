@@ -24,6 +24,8 @@ const dbPath = process.env.HARNESS_QMD_DB_PATH
   ? resolve(projectRoot, process.env.HARNESS_QMD_DB_PATH)
   : resolve(projectRoot, ".qmd", "index.sqlite");
 
+await mkdir(resolve(projectRoot, ".qmd"), { recursive: true });
+
 const memoryService = new MemoryService({
   memoryPath: folders.memoryPath,
   sourcesPath: folders.sourcesPath,

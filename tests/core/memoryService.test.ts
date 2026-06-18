@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MemoryService } from "../../src/core/memoryService.js";
-import type { QMDStore } from "@tobilu/qmd";
+import type { QMDStore, SearchResult } from "@tobilu/qmd";
 
 function createFakeStore(overrides?: Partial<QMDStore>): QMDStore {
   return {
@@ -8,7 +8,7 @@ function createFakeStore(overrides?: Partial<QMDStore>): QMDStore {
     dbPath: "/fake/db.sqlite",
     search: vi.fn(async () => []),
     searchLex: vi.fn(async () => []),
-    searchVector: vi.fn(async () => []),
+    searchVector: vi.fn(async () => [] as SearchResult[]),
     expandQuery: vi.fn(async () => []),
     get: vi.fn(async () => ({ error: "not_found", query: "", similarFiles: [] } as any)),
     getDocumentBody: vi.fn(async () => null),
@@ -49,6 +49,13 @@ vi.mock("node:fs/promises", () => ({
 import { createStore } from "@tobilu/qmd";
 import { readFile, writeFile } from "node:fs/promises";
 
+/** Helper: wait for microtasks + pending promises to flush (multiple rounds for chained awaits) */
+async function flushPromises(rounds = 5) {
+  for (let i = 0; i < rounds; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
 describe("MemoryService", () => {
   beforeEach(() => {
     vi.mocked(readFile).mockReset();
@@ -60,7 +67,7 @@ describe("MemoryService", () => {
     vi.mocked(writeFile).mockReset();
   });
 
-  it("init creates store, registers missing collections, runs update+embed", async () => {
+  it("init creates store, registers missing collections; update+embed run in background", async () => {
     const fakeStore = createFakeStore();
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
 
@@ -81,6 +88,10 @@ describe("MemoryService", () => {
     );
     expect(fakeStore.addCollection).toHaveBeenCalledWith("memory", { path: "/proj/memory", pattern: "**/*.md" });
     expect(fakeStore.addCollection).toHaveBeenCalledWith("sources", { path: "/proj/sources", pattern: "**/*.md" });
+
+    // update + embed should NOT have been called yet (they run in background)
+    // Wait for background warmup to complete
+    await flushPromises();
     expect(fakeStore.update).toHaveBeenCalled();
     expect(fakeStore.embed).toHaveBeenCalled();
     expect(service.degraded).toBe(false);
@@ -128,7 +139,7 @@ describe("MemoryService", () => {
     expect(await backend.search("anything")).toEqual([]);
   });
 
-  it("shutdown closes the store", async () => {
+  it("shutdown closes the store after warmup completes", async () => {
     const fakeStore = createFakeStore();
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
 
@@ -140,14 +151,17 @@ describe("MemoryService", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await service.init();
+    await flushPromises(); // let warmup finish
     logSpy.mockRestore();
 
     await service.shutdown();
     expect(fakeStore.close).toHaveBeenCalled();
   });
 
-  it("getBackend returns QmdBackend when healthy", async () => {
-    const fakeStore = createFakeStore();
+  it("getBackend returns WarmupGatedBackend (name 'qmd-warming') during warmup", async () => {
+    const fakeStore = createFakeStore({
+      update: vi.fn(async () => new Promise((r) => setTimeout(r, 1000))), // slow warmup
+    });
     vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
 
     const service = new MemoryService({
@@ -161,7 +175,135 @@ describe("MemoryService", () => {
     logSpy.mockRestore();
 
     const backend = service.getBackend();
+    expect(backend.name).toBe("qmd-warming");
+  });
+
+  it("getBackend returns real QmdBackend after warmup completes", async () => {
+    const fakeStore = createFakeStore();
+    vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+    const service = new MemoryService({
+      memoryPath: "/proj/memory",
+      sourcesPath: "/proj/sources",
+      dbPath: "/proj/.qmd/index.sqlite",
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await service.init();
+    await flushPromises(); // warmup completes
+    logSpy.mockRestore();
+
+    const backend = service.getBackend();
     expect(backend.name).toBe("qmd");
+  });
+
+  describe("WarmupGatedBackend behavior", () => {
+    it("query returns 'index warming' message during warmup", async () => {
+      const fakeStore = createFakeStore({
+        update: vi.fn(async () => new Promise((r) => setTimeout(r, 5000))), // never completes in test
+        searchLex: vi.fn(async () => []),
+        searchVector: vi.fn(async () => []),
+      });
+      vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+      const service = new MemoryService({
+        memoryPath: "/proj/memory",
+        sourcesPath: "/proj/sources",
+        dbPath: "/proj/.qmd/index.sqlite",
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      await service.init();
+      logSpy.mockRestore();
+
+      const backend = service.getBackend();
+      const hits = await backend.query("test", 5);
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0].source).toBe("_warmup");
+      expect(hits[0].content).toContain("warming up");
+    });
+
+    it("getAmbientHints returns [] during warmup (silent, non-blocking)", async () => {
+      const fakeStore = createFakeStore({
+        update: vi.fn(async () => new Promise((r) => setTimeout(r, 5000))),
+        searchVector: vi.fn(async () => [
+          { filepath: "/x.md", displayPath: "x.md", title: "X", context: null, hash: "h", docid: "d", collectionName: "memory", modifiedAt: "", bodyLength: 10, body: "content", score: 0.9, source: "vec" },
+        ]),
+      });
+      vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+      const service = new MemoryService({
+        memoryPath: "/proj/memory",
+        sourcesPath: "/proj/sources",
+        dbPath: "/proj/.qmd/index.sqlite",
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      await service.init();
+      logSpy.mockRestore();
+
+      const backend = service.getBackend();
+      const hints = await backend.getAmbientHints("test");
+
+      expect(hints).toEqual([]);
+      // searchVector should NOT have been called (gated)
+      expect(fakeStore.searchVector).not.toHaveBeenCalled();
+    });
+
+    it("query delegates to real backend after warmup completes", async () => {
+      const fakeStore = createFakeStore({
+        searchLex: vi.fn(async () => [
+          { filepath: "/proj/memory/note.md", displayPath: "note.md", title: "Note", context: null, hash: "h", docid: "d", collectionName: "memory", modifiedAt: "", bodyLength: 10, body: "content", score: 0.9, source: "fts" },
+        ]),
+        searchVector: vi.fn(async () => []),
+      });
+      vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+      const service = new MemoryService({
+        memoryPath: "/proj/memory",
+        sourcesPath: "/proj/sources",
+        dbPath: "/proj/.qmd/index.sqlite",
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      await service.init();
+      await flushPromises(); // warmup completes
+      logSpy.mockRestore();
+
+      const backend = service.getBackend();
+      const hits = await backend.query("test", 5);
+
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(hits[0].source).toBe("/proj/memory/note.md");
+      expect(fakeStore.searchLex).toHaveBeenCalled();
+    });
+
+    it("getAmbientHints delegates to real backend after warmup", async () => {
+      const fakeStore = createFakeStore({
+        searchVector: vi.fn(async () => [
+          { filepath: "/x.md", displayPath: "x.md", title: "X", context: null, hash: "h", docid: "d", collectionName: "memory", modifiedAt: "", bodyLength: 10, body: "content", score: 0.9, source: "vec" },
+        ]),
+      });
+      vi.mocked(createStore).mockResolvedValueOnce(fakeStore);
+
+      const service = new MemoryService({
+        memoryPath: "/proj/memory",
+        sourcesPath: "/proj/sources",
+        dbPath: "/proj/.qmd/index.sqlite",
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      await service.init();
+      await flushPromises(); // warmup completes
+      logSpy.mockRestore();
+
+      const backend = service.getBackend();
+      const hints = await backend.getAmbientHints("test");
+
+      expect(hints).toHaveLength(1);
+      expect(hints[0].title).toBe("X");
+    });
   });
 
   it("calls embed({ force: true }) when configured model differs from marker", async () => {
@@ -179,6 +321,7 @@ describe("MemoryService", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await service.init();
+    await flushPromises(); // wait for warmup
     logSpy.mockRestore();
 
     expect(fakeStore.embed).toHaveBeenCalledWith({ force: true });
@@ -206,6 +349,7 @@ describe("MemoryService", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await service.init();
+    await flushPromises();
     logSpy.mockRestore();
 
     expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
@@ -226,6 +370,7 @@ describe("MemoryService", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await service.init();
+    await flushPromises();
     logSpy.mockRestore();
 
     expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
@@ -243,6 +388,7 @@ describe("MemoryService", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await service.init();
+    await flushPromises();
     logSpy.mockRestore();
 
     expect(fakeStore.embed).toHaveBeenCalledWith({ force: false });
