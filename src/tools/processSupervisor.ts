@@ -121,7 +121,6 @@ class ProcessSupervisor {
 
     return new Promise((resolve) => {
       const startTime = Date.now();
-      let escalationSent = false;
 
       const graceTimeoutId = setTimeout(() => {
         if (signal === "SIGTERM" && !session.exitedAt) {
@@ -133,7 +132,6 @@ class ProcessSupervisor {
               process.kill(-child.pid, "SIGKILL");
             }
           }
-          escalationSent = true;
         }
       }, KILL_GRACE_MS);
 
