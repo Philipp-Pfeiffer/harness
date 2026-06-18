@@ -73,6 +73,8 @@ export function formatMemoryHint(hits: AmbientHint[]): string | null {
 export interface MemoryBackend {
   name: string;
   search(query: string, k?: number): Promise<MemoryHit[]>;
+  /** L4 Explicit search — hybrid + LLM rerank. Slower but higher precision than search(). */
+  query(query: string, k?: number): Promise<MemoryHit[]>;
   getAmbientHints(query: string, opts?: { k?: number; minCosine?: number }): Promise<AmbientHint[]>;
   write(entry: MemoryEntry): Promise<void>;
 }

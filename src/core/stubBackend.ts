@@ -11,6 +11,10 @@ export class StubBackend implements MemoryBackend {
     return [];
   }
 
+  async query(_query: string, _k?: number): Promise<MemoryHit[]> {
+    return [];
+  }
+
   async getAmbientHints(_query: string, _opts?: { k?: number; minCosine?: number }): Promise<AmbientHint[]> {
     return [];
   }

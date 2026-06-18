@@ -13,6 +13,12 @@ describe("StubBackend", () => {
     expect(hits).toEqual([]);
   });
 
+  it("query returns empty array", async () => {
+    const backend = new StubBackend();
+    const hits = await backend.query("anything");
+    expect(hits).toEqual([]);
+  });
+
   it("getAmbientHints returns empty array", async () => {
     const backend = new StubBackend();
     const hints = await backend.getAmbientHints("anything");

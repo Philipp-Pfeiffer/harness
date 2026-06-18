@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
+import { resolveMemoryConfig } from "../core/memoryFolders.js";
 import { resolveModel } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
@@ -663,7 +664,7 @@ export default function App({
     };
   }, [stdout]);
 
-  const tools = useMemo(() => loadTools(), []);
+  const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
   useEffect(() => {
@@ -673,7 +674,7 @@ export default function App({
   useEffect(() => {
     (async () => {
       const coreMemory = await loadCoreMemoryRaw();
-      const basePrompt = prompt("system-prompt");
+      const basePrompt = prompt("system-prompt", { inboxPath: resolveMemoryConfig().inboxPath });
       const composed = composeSystemPrompt(basePrompt, coreMemory);
       agent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
