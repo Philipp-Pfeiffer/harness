@@ -1,7 +1,7 @@
 import { createStore, type QMDStore } from "@tobilu/qmd";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { MemoryBackend } from "./memoryBackend.js";
+import type { MemoryBackend, MemoryHit, MemoryEntry, AmbientHint } from "./memoryBackend.js";
 import { QmdBackend } from "./qmdBackend.js";
 import { StubBackend } from "./stubBackend.js";
 
@@ -10,6 +10,57 @@ export interface MemoryServiceConfig {
   sourcesPath: string;
   dbPath: string;
   embedModel?: string;
+}
+
+/**
+ * Wraps a QmdBackend and gates all calls behind a warmup Promise.
+ *
+ * - getAmbientHints: returns [] while warming up (ambient is non-blocking)
+ * - query: returns a clear "index warming" message while warming up
+ * - After warmup completes: delegates to the real QmdBackend
+ * - If warmup fails: delegates to QmdBackend which will use whatever
+ *   partial index state exists (or StubBackend if store init failed)
+ */
+class WarmupGatedBackend implements MemoryBackend {
+  readonly name = "qmd-warming";
+  private warmedUp = false;
+
+  constructor(
+    private readonly warmup: Promise<void>,
+    private readonly realBackend: MemoryBackend,
+  ) {
+    warmup.then(
+      () => { this.warmedUp = true; },
+      () => { this.warmedUp = true; }, // even on error, let realBackend handle queries
+    );
+  }
+
+  async search(query: string, k?: number): Promise<MemoryHit[]> {
+    if (!this.warmedUp) await this.warmup.catch(() => {});
+    return this.realBackend.search(query, k);
+  }
+
+  async query(query: string, k?: number): Promise<MemoryHit[]> {
+    if (!this.warmedUp) {
+      return [{
+        source: "_warmup",
+        score: 0,
+        content: "Memory index is warming up. Please retry in a few seconds.",
+      }];
+    }
+    return this.realBackend.query(query, k);
+  }
+
+  async getAmbientHints(query: string, opts?: { k?: number; minCosine?: number }): Promise<AmbientHint[]> {
+    // Ambient during warmup: silent empty (non-blocking, no UX disruption)
+    if (!this.warmedUp) return [];
+    return this.realBackend.getAmbientHints(query, opts);
+  }
+
+  async write(entry: MemoryEntry): Promise<void> {
+    if (!this.warmedUp) await this.warmup.catch(() => {});
+    return this.realBackend.write(entry);
+  }
 }
 
 /**
@@ -23,16 +74,21 @@ export interface MemoryServiceConfig {
 export class MemoryService {
   private store: QMDStore | null = null;
   private backend: MemoryBackend | null = null;
+  private gatedBackend: WarmupGatedBackend | null = null;
+  private warmupPromise: Promise<void> | null = null;
+  private warmupDone = false;
   degraded = false;
 
   constructor(private readonly config: MemoryServiceConfig) {}
 
   /**
-   * Initializes the QMD store, ensures collections are registered,
-   * and runs an initial update + embed.
+   * Creates the QMD store and ensures collections are registered.
    *
-   * On failure (QMD not available, models missing, offline):
-   * sets degraded=true, logs, and resolves cleanly — no crash.
+   * Returns immediately after store creation — the heavy update() + embed()
+   * runs asynchronously in the background (see warmup()). The TUI can render
+   * right away; memory retrieval becomes available once warmup completes.
+   *
+   * On store creation failure: sets degraded=true, logs, resolves cleanly.
    */
   async init(): Promise<void> {
     if (this.config.embedModel) {
@@ -61,8 +117,30 @@ export class MemoryService {
 
     await this.ensureCollections();
 
+    // Create the real backend immediately — it can serve queries
+    // using whatever index state already exists in the SQLite DB.
+    this.backend = new QmdBackend(this.store);
+
+    // Fire warmup (update + embed) in the background.
+    this.warmupPromise = this.warmup();
+    this.warmupPromise.then(
+      () => { this.warmupDone = true; },
+      () => { this.warmupDone = true; },
+    );
+
+    console.log(`[harness] memory service ready (db: ${this.config.dbPath}, warming up in background)`);
+  }
+
+  /**
+   * Background warmup: re-indexes files and computes embeddings.
+   * Stored as a Promise so callers can gate on it (WarmupGatedBackend).
+   */
+  private async warmup(): Promise<void> {
+    if (!this.store) return;
+
     try {
       await this.store.update();
+      console.log(`[harness] QMD update complete`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[harness] QMD update failed: ${message}`);
@@ -74,28 +152,52 @@ export class MemoryService {
       if (force || this.config.embedModel) {
         await this.writeEmbedModelMarker();
       }
+      console.log(`[harness] QMD embed complete — memory fully warm`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[harness] QMD embed failed: ${message}`);
     }
 
-    this.backend = new QmdBackend(this.store);
-    console.log(`[harness] memory service ready (db: ${this.config.dbPath})`);
+    // Pre-warm the embedding model: fire a dummy searchVector call so
+    // the model is loaded into memory before the first user turn.
+    // This eliminates the ~1–2s cold-start latency on the first ambient hint.
+    try {
+      await this.store.searchVector("warmup", { limit: 1 });
+      console.log(`[harness] QMD embedding model pre-warmed`);
+    } catch {
+      // Pre-warm is best-effort; failures are non-critical
+    }
   }
 
   /**
    * Returns the active MemoryBackend.
-   * If degraded, returns a StubBackend that yields empty results.
+   *
+   * If warmup is in progress, returns a WarmupGatedBackend that:
+   *   - getAmbientHints → [] (silent, non-blocking)
+   *   - query → "index warming" message (explicit, user-facing)
+   *
+   * If degraded, returns a StubBackend.
    */
   getBackend(): MemoryBackend {
-    if (this.backend) return this.backend;
-    return new StubBackend();
+    if (this.degraded || !this.backend) return new StubBackend();
+    // After warmup is done, return the real backend directly (no gate)
+    if (this.warmupDone) return this.backend;
+    if (this.gatedBackend) return this.gatedBackend;
+    if (this.warmupPromise) {
+      this.gatedBackend = new WarmupGatedBackend(this.warmupPromise, this.backend);
+      return this.gatedBackend;
+    }
+    return this.backend;
   }
 
   /**
    * Shuts down the store, releasing models and DB connections.
    */
   async shutdown(): Promise<void> {
+    // Wait for warmup to finish before closing the store
+    if (this.warmupPromise) {
+      await this.warmupPromise.catch(() => {});
+    }
     if (this.store) {
       await this.store.close();
       this.store = null;
