@@ -16,6 +16,7 @@ import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 import { loadConfig, type ConfigModel } from "./config.js";
+import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
 
 /* ─── marked config ─── */
 
@@ -667,6 +668,7 @@ export default function App({
   const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
+  const metricsRecorder = useMemo<MetricsRecorder>(() => createMetricsRecorder(), []);
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
@@ -788,12 +790,15 @@ export default function App({
       userAbortedRef.current = false;
       abortCommandRef.current = undefined;
 
+      const runStartMs = Date.now();
+
       agent
         .run(historyRef.current, {
           signal: controller.signal,
           mailbox: mailboxRef.current,
           abortCommand: abortCommandRef,
           memoryBackend: memoryService?.getBackend(),
+          metricsRecorder,
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
@@ -891,6 +896,15 @@ export default function App({
                 : result.usage
             );
           }
+          metricsRecorder.recordTurn({
+            model: activeModel.name,
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            totalTokens: result.usage.totalTokens,
+            latencyMs: Date.now() - runStartMs,
+            toolCallCount: result.aborted ? 0 : result.turns,
+            status: result.aborted ? "aborted" : "ok",
+          });
           abortControllerRef.current = null;
           userAbortedRef.current = false;
         })
@@ -914,9 +928,17 @@ export default function App({
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          metricsRecorder.recordError({ scope: "agent_run", message: errMsg });
+          metricsRecorder.recordTurn({
+            model: activeModel.name,
+            latencyMs: Date.now() - runStartMs,
+            toolCallCount: 0,
+            status: "error",
+          });
         });
     },
-    [agent, exit, forceUpdate]
+    [agent, exit, forceUpdate, metricsRecorder]
   );
 
   const toggleLastTool = useCallback(() => {
