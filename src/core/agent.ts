@@ -197,9 +197,11 @@ export interface Agent {
   setSystemPrompt(prompt: string): void;
 }
 
+import { resolveMemoryConfig } from "./memoryFolders.js";
+
 export function createAgent(config: AgentConfig): Agent {
   const { tools, maxIterations = 10, model, logger } = config;
-  let systemPrompt = config.systemPrompt ?? prompt("system-prompt");
+  let systemPrompt = config.systemPrompt ?? prompt("system-prompt", { inboxPath: resolveMemoryConfig().inboxPath });
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {
