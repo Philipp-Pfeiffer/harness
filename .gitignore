@@ -40,3 +40,4 @@ workspace/
 # Memory runtime data (personal notes, QMD index)
 memory/
 .qmd/
+node_modules
