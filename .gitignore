@@ -36,3 +36,7 @@ coverage/
 
 # Agent workspace
 workspace/
+
+# Memory runtime data (personal notes, QMD index)
+memory/
+.qmd/
