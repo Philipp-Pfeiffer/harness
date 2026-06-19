@@ -64,8 +64,8 @@ export interface TokenUsage {
 }
 
 export type RunResult =
-  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; error?: { type: "provider_aborted"; message: string } }
-  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage };
+  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted"; message: string } }
+  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage; toolCallCount: number };
 
 /**
  * Events emitted during a streaming run.
@@ -252,13 +252,14 @@ export function createAgent(config: AgentConfig): Agent {
       let totalTokens = 0;
       let totalCacheRead = 0;
       let totalCacheWrite = 0;
+      let toolCallCount = 0;
 
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
           pushAbortAnnotation(context.messages, options.abortCommand);
-          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         drainMailbox(mailbox, context.messages);
@@ -296,7 +297,7 @@ export function createAgent(config: AgentConfig): Agent {
             }
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
           throw err;
         }
@@ -326,7 +327,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           // Build buckets: independent calls get their own bucket;
@@ -390,6 +391,7 @@ export function createAgent(config: AgentConfig): Agent {
                   try {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
+                    toolCallCount++;
                     result = await Promise.resolve(tool.execute(toolCall.arguments));
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                     logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
@@ -440,7 +442,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           continue;
@@ -454,7 +456,7 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         if (response.stopReason === "aborted") {
@@ -463,13 +465,14 @@ export function createAgent(config: AgentConfig): Agent {
             turns: i + 1,
             finalMessage: "Anfrage wurde abgebrochen.",
             usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite },
+            toolCallCount,
             error: { type: "provider_aborted", message: "Provider aborted the generation." },
           };
         }
       }
 
       discardMailbox(mailbox);
-      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
+      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
     },
   };
 }

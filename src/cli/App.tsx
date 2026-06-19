@@ -942,7 +942,7 @@ export default function App({
             cacheRead: result.usage.cacheRead,
             cacheWrite: result.usage.cacheWrite,
             latencyMs: Date.now() - runStartMs,
-            toolCallCount: result.aborted ? 0 : result.turns,
+            toolCallCount: result.toolCallCount,
             status: result.aborted ? "aborted" : "ok",
           });
           abortControllerRef.current = null;
