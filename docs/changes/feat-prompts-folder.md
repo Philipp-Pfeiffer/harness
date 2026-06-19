@@ -56,7 +56,7 @@ Unverändert:
 
 ## Restrisiko / Follow-ups
 
-1. **User-Override** aus `~/.harness/prompts/` — später, wenn Bedarf.
+1. **User-Override** aus `~/.harness/prompts/` — **bewusst nicht gebaut.** System-Prompts sind Architektur und bleiben code-relativ. Kein Home-Override.
 2. **Frontmatter-Schema** — falls Prompts komplexer werden (Metadaten, Versionierung).
 3. **Weitere Prompt-Kandidaten** zur Auslagerung: `DEFAULT_SYSTEM_PROMPT`, ggf. Tool-Error-Templates.
 4. **Trailing-Newline-Handling** — aktuell wird der Datei-Inhalt 1:1 übernommen; bei Bedarf könnte man `.trimEnd()` ergänzen.
