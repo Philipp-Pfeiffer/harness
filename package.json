@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "description": "Tarnis – Custom Agent Loop built on @mariozechner/pi-ai",
   "type": "module",
+  "bin": {
+    "harness": "dist/index.js"
+  },
   "scripts": {
     "dev": "tsx watch src/index.tsx",
     "build": "tsc",

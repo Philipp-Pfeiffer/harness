@@ -102,3 +102,54 @@ System-Prompts (Identity / Safety / Tool-Guidance / Layer-Templates) sind **Arch
 
 ### Skills
 `$HARNESS_HOME/skills/` ist vorgesehen, aber noch nicht belegt.
+
+---
+
+## Multi-Agent-Szenario: Geteiltes Wissen, eigene Identität
+
+Die `resolveHarnessPaths()`-Architektur unterstützt von Haus aus mehrere Agents
+mit verschiedener Identität, aber geteiltem Wissen. Jeder Agent bekommt sein
+eigenes `$HARNESS_HOME` (eigene `core.md`, eigene `AGENTS.md`, eigene `config.json`),
+kann aber dasselbe `memory/` und `sources/` nutzen.
+
+### Beispiel: Sub-Agent mit eigener Persönlichkeit
+
+```bash
+# Haupt-Agent (Cliffford) — Default-Home
+harness
+# HARNESS_HOME=~/harness → eigene core.md, eigene config
+
+# Sub-Agent — anderer Home, gleiches Wissen
+HARNESS_HOME=~/harness-sub harness
+# Eigene core.md (andere Persönlichkeit/Rolle)
+# Aber: memory/ und sources/ können geteilt werden
+```
+
+### Wissens-Sharing-Strategien
+
+| Strategie | Setup | Use Case |
+|-----------|-------|----------|
+| **Symlink** | `ln -s ~/harness/memory ~/harness-sub/memory` | Quick & dirty. Beide Agents sehen denselben Ordner. |
+| **Env-Override** | `HARNESS_MEMORY_PATH=~/harness/memory harness` (historisch verfügbar, deprecated). Würde re-aktiviert werden. | Sauber. Memory-Pfad unabhängig von Home. |
+| **Separater Index, shared content** | Jeder Agent hat eigenen `$HARNESS_STATE/index/`, aber `memoryPath` zeigt auf denselben Ordner. | Empfohlen. Vermeidet Index-Kollisionen bei gleichzeitigen Embeds. |
+
+### Was jeder Agent exklusiv hat
+
+| Resource | Pro Agent | Geteilt |
+|----------|-----------|---------|
+| `core.md` | ✅ Eigene Identität | — |
+| `AGENTS.md` | ✅ Eigene Verhaltensregeln | — |
+| `config.json` | ✅ Eigenes Model/Provider | — |
+| `memory/` | Kann geteilt werden | ✅ Möglich |
+| `sources/` | Kann geteilt werden | ✅ Möglich |
+| QMD-Index (`index/`) | ✅ Eigener | — (Kollision bei gleichzeitigen Embeds) |
+| `metrics/` | ✅ Eigene | — |
+
+### Implementierungs-Status
+
+Die DI-Architektur (`resolveHarnessPaths({ home })`) unterstützt Multi-Agent
+bereits. Für eine saubere Trennung von `memory`/`sources` unabhängig von `home`
+würde `resolveHarnessPaths()` um optionale `memory`/`sources` Overrides erweitert
+werden — analog zum bestehenden `home` Parameter.
+
+**Nicht-blockierend:** Über Symlinks heute schon funktionsfähig.
