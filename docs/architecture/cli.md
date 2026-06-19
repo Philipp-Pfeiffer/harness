@@ -1,6 +1,6 @@
 # CLI Architecture
 
-**Stand:** 2026-05-17, HEAD `704b23cf7c5ee6ea3be01926c36807c04834abcc`  
+**Stand:** 2026-06-19, HEAD `a1f3b28`  
 **Stack:** Node ≥20 + TypeScript 5.6 (strict) + Ink 6 + React 19 + marked-terminal 7 + chalk  
 **Core Dependency:** `@mariozechner/pi-ai` (^0.70.2)
 
@@ -82,8 +82,36 @@ graph TD
 | `HelpCard` | `App.tsx:168` | Statische Hilfe-Anzeige (bei `/help`) |
 | `PromptInput` | `App.tsx:271` | Text-Eingabe mit Cursor, Selection, History, Slash-Picker |
 | `StatusBar` | `App.tsx:95` | Bottom-Zeile: Model · Status · Token-Counter · CWD |
-| `ToolCard` | `App.tsx:138` | Karten-UI für einzelne Tool-Calls (pending/done/error) |
+| `ToolCard` | `App.tsx:199` | Karten-UI für einzelne Tool-Calls (pending/done/error), zeigt Args-Summary im Titel |
 | `TurnView` | `App.tsx:218` | Rendert abgeschlossenen Turn mit Markdown |
+
+### ToolCard-Rendering
+
+Code: `src/cli/App.tsx:199` (`ToolCard`), `src/cli/App.tsx:96` (`toolArgsSummary`)
+
+Der ToolCard-Titel zeigt nicht nur den Tool-Namen, sondern auch eine kurze Zusammenfassung der Aufruf-Argumente. Die Helper-Funktion `toolArgsSummary(name, args)` erzeugt pro Tool-Typ einen formatierten String:
+
+| Tool | Format | Beispiel |
+|------|--------|----------|
+| `exec` | `$ <command>` | `$ ls -la` |
+| `readFile` | `<path>` optional `(L<start>-<end>)` | `src/main.ts (L10-50)` |
+| `write` | `<path>` | `src/foo.ts` |
+| `edit` | `<path> (N edits)` | `src/bar.ts (3 edits)` |
+| `search_memory` | `"<query>"` | `"ambient retrieval"` |
+| `process` | `<action> [sessionId]` | `list bg_a1b2c3` |
+| *default* | *(leer)* | — |
+
+Titel-Aufbau:
+```
+<symbol> <name>: <summary>  ── Ctrl+O ─
+```
+
+- **Symbol:** `▸` (pending), `✓` (done), `✗` (error)
+- **Summary:** leer → Titel zeigt nur `<symbol> <name>` ohne Doppelpunkt
+- **Ctrl+O-Hint:** nur beim letzten Tool im aktiven Turn
+- **Truncation:** Titel wird bei `innerWidth - 4` Zeichen abgeschnitten mit `...`
+
+Die `args` werden beim `tool_call_start`-Event gespeichert (`ToolItem.args`) und gleichzeitig als `preview` gesetzt. Die `preview` wird aktuell nicht separat gerendert, sondern durch den Titel ersetzt.
 
 ### Markdown-Rendering
 
@@ -495,8 +523,9 @@ Die `contextWindow` kommt vom `activeModel`-Objekt (pi-ai liefert sie). Fallback
 | `Backspace` | Input | Delete Char / Selection | `App.tsx:498-507` |
 | `Tab` | Input, Picker offen | Picker-Completion | `App.tsx:382-391` |
 | `Esc` | Input, Picker offen | Picker schließen | `App.tsx:378-381` |
-| `Ctrl+O` | Global | Toggle last Tool Card | `App.tsx:971-973` |
-| `Ctrl+L` | Global | Clear screen (`setPastTurns([])`) | `App.tsx:965-967` |
+| `Ctrl+E` | Global | Selection Mode (raw mode off — scroll & copy) | `App.tsx:1086-1089` |
+| `Ctrl+O` | Global | Toggle last Tool Card | `App.tsx:1122-1125` |
+| `Ctrl+L` | Global | Clear screen (`setPastTurns([])`) | `App.tsx:1109-1111` |
 | `Ctrl+C` | Global | Abort / Double-Tap Exit | `App.tsx:945-963` |
 | `↑/↓` | ModelPicker | Model-Navigation | `App.tsx:903-910` |
 | `Enter/Tab` | ModelPicker | Modell auswählen | `App.tsx:916-940` |
