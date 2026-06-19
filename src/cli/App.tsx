@@ -679,7 +679,8 @@ export default function App({
   const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
-  const metricsRecorder = useMemo<MetricsRecorder>(() => createMetricsRecorder(), []);
+  const sessionId = useMemo(() => randomUUID(), []);
+  const metricsRecorder = useMemo<MetricsRecorder>(() => createMetricsRecorder({ sessionId }), [sessionId]);
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
@@ -756,6 +757,7 @@ export default function App({
           model: activeModel.id,
           workspace: process.cwd(),
           sessionState: isRunningRef.current ? "active" : "ready",
+          sessionId,
           sessionUsage,
           memoryReady: !memoryService?.degraded,
           toolCalls: pastTurns.reduce((sum, t) => sum + t.tools.length, 0),

@@ -22,6 +22,8 @@ export interface StatusContext {
   workspace?: string;
   /** "active" if agent is running, "ready" otherwise */
   sessionState: "active" | "ready";
+  /** Session ID for correlating with JSONL metrics */
+  sessionId?: string;
   /** Accumulated session token usage */
   sessionUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
   /** Memory backend availability */
@@ -37,8 +39,10 @@ export interface StatusSummary {
   model: string;
   workspace: string;
   memory: string;
+  sessionId: string;
   tokensIn: string;
   tokensOut: string;
+  sessionTokens: string;
   toolCalls: string;
   errors: string;
   lastTurn: string;
@@ -182,13 +186,19 @@ export async function buildStatusSummary(
 
   const lastTurn = metrics ? formatLatency(metrics.lastTurnLatencyMs) : "n/a";
 
+  const sessionTokens = context.sessionUsage
+    ? formatTokens(context.sessionUsage.totalTokens)
+    : "n/a";
+
   return {
     sessionState: context.sessionState,
     model: context.model ?? "n/a",
     workspace: context.workspace ?? process.cwd(),
     memory: context.memoryReady ? "ready" : "n/a",
+    sessionId: context.sessionId ?? "n/a",
     tokensIn,
     tokensOut,
+    sessionTokens,
     toolCalls,
     errors,
     lastTurn,
@@ -206,7 +216,9 @@ export function formatStatusSummary(summary: StatusSummary): string {
     `Model:        ${summary.model}`,
     `Workspace:    ${summary.workspace}`,
     `Memory:       ${summary.memory}`,
+    `Session ID:   ${summary.sessionId}`,
     `Tokens today: ${summary.tokensIn} in / ${summary.tokensOut} out`,
+    `Session:      ${summary.sessionTokens}`,
     `Tool calls:   ${summary.toolCalls} today`,
     `Errors today: ${summary.errors}`,
     `Last turn:    ${summary.lastTurn}`,
