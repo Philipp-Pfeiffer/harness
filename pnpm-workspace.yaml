@@ -1,12 +1,12 @@
 allowBuilds:
-  '@google/genai': set this to true or false
-  better-sqlite3: set this to true or false
-  esbuild: set this to true or false
-  node-llama-cpp: set this to true or false
-  node-pty: set this to true or false
-  protobufjs: set this to true or false
-  tree-sitter-go: set this to true or false
-  tree-sitter-javascript: set this to true or false
-  tree-sitter-python: set this to true or false
-  tree-sitter-rust: set this to true or false
-  tree-sitter-typescript: set this to true or false
+  '@google/genai': false
+  better-sqlite3: true
+  esbuild: true
+  node-llama-cpp: false
+  node-pty: true
+  protobufjs: false
+  tree-sitter-go: false
+  tree-sitter-javascript: false
+  tree-sitter-python: false
+  tree-sitter-rust: false
+  tree-sitter-typescript: false
