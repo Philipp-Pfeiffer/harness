@@ -939,6 +939,8 @@ export default function App({
             inputTokens: result.usage.inputTokens,
             outputTokens: result.usage.outputTokens,
             totalTokens: result.usage.totalTokens,
+            cacheRead: result.usage.cacheRead,
+            cacheWrite: result.usage.cacheWrite,
             latencyMs: Date.now() - runStartMs,
             toolCallCount: result.aborted ? 0 : result.turns,
             status: result.aborted ? "aborted" : "ok",

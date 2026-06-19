@@ -187,7 +187,7 @@ describe("metrics", () => {
       const dir = resolve(BASE_DIR, "rec1");
       const recorder = createMetricsRecorder({ dir });
 
-      recorder.recordTurn({ latencyMs: 500, toolCallCount: 3, status: "ok", inputTokens: 1000, outputTokens: 500, totalTokens: 1500 });
+      recorder.recordTurn({ latencyMs: 500, toolCallCount: 3, status: "ok", inputTokens: 1000, outputTokens: 500, totalTokens: 1500, cacheRead: 200, cacheWrite: 0 });
 
       // Wait for fire-and-forget write
       await new Promise((r) => setTimeout(r, 50));
@@ -200,6 +200,8 @@ describe("metrics", () => {
         toolCallCount: 3,
         status: "ok",
         inputTokens: 1000,
+        cacheRead: 200,
+        cacheWrite: 0,
       });
       expect(typeof (entries[0] as TurnMetric).ts).toBe("string");
     });

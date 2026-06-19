@@ -51,8 +51,8 @@ describe("readTodayMetrics", () => {
     await writeFile(
       join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 1000, outputTokens: 500, totalTokens: 1500, latencyMs: 4200, toolCallCount: 3, status: "ok" }),
-        JSON.stringify({ type: "turn", ts: "2026-06-18T12:01:00.000Z", inputTokens: 2000, outputTokens: 800, totalTokens: 2800, latencyMs: 8400, toolCallCount: 5, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 1000, outputTokens: 500, totalTokens: 1500, cacheRead: 0, cacheWrite: 0, latencyMs: 4200, toolCallCount: 3, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:01:00.000Z", inputTokens: 2000, outputTokens: 800, totalTokens: 2800, cacheRead: 0, cacheWrite: 0, latencyMs: 8400, toolCallCount: 5, status: "ok" }),
       ].join("\n") + "\n",
     );
     await writeFile(
@@ -72,6 +72,8 @@ describe("readTodayMetrics", () => {
     expect(result!.inputTokens).toBe(3000);
     expect(result!.outputTokens).toBe(1300);
     expect(result!.totalTokens).toBe(4300);
+    expect(result!.cacheRead).toBe(0);
+    expect(result!.cacheWrite).toBe(0);
     expect(result!.toolCalls).toBe(2);
     expect(result!.errors).toBe(2); // 1 tool_call error + 1 system error
     expect(result!.lastTurnLatencyMs).toBe(8400);
@@ -84,10 +86,10 @@ describe("readTodayMetrics", () => {
     await writeFile(
       join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, outputTokens: 50, totalTokens: 150, latencyMs: 100, toolCallCount: 0, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, outputTokens: 50, totalTokens: 150, cacheRead: 0, cacheWrite: 0, latencyMs: 100, toolCallCount: 0, status: "ok" }),
         "{ broken json",
         "",
-        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:01.000Z", inputTokens: 200, outputTokens: 100, totalTokens: 300, latencyMs: 200, toolCallCount: 0, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:01.000Z", inputTokens: 200, outputTokens: 100, totalTokens: 300, cacheRead: 0, cacheWrite: 0, latencyMs: 200, toolCallCount: 0, status: "ok" }),
       ].join("\n") + "\n",
     );
 
@@ -118,7 +120,7 @@ describe("readTodayMetrics", () => {
     await writeFile(
       join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, latencyMs: 50, toolCallCount: 0, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, cacheRead: 0, cacheWrite: 0, latencyMs: 50, toolCallCount: 0, status: "ok" }),
       ].join("\n") + "\n",
     );
     await writeFile(
@@ -153,7 +155,7 @@ describe("buildStatusSummary", () => {
     const summary = await buildStatusSummary(
       {
         ...baseContext,
-        sessionUsage: { inputTokens: 12400, outputTokens: 3100, totalTokens: 15500 },
+        sessionUsage: { inputTokens: 12400, outputTokens: 3100, totalTokens: 15500, cacheRead: 0, cacheWrite: 0 },
       },
       null,
     );
@@ -165,9 +167,9 @@ describe("buildStatusSummary", () => {
     const summary = await buildStatusSummary(
       {
         ...baseContext,
-        sessionUsage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+        sessionUsage: { inputTokens: 100, outputTokens: 50, totalTokens: 150, cacheRead: 0, cacheWrite: 0 },
       },
-      { inputTokens: 12400, outputTokens: 3100, totalTokens: 15500, toolCalls: 18, errors: 0, lastTurnLatencyMs: 8400 },
+      { inputTokens: 12400, outputTokens: 3100, totalTokens: 15500, cacheRead: 0, cacheWrite: 0, toolCalls: 18, errors: 0, lastTurnLatencyMs: 8400 },
     );
     expect(summary.tokensIn).toBe("12.4k");
     expect(summary.tokensOut).toBe("3.1k");
@@ -206,7 +208,7 @@ describe("buildStatusSummary", () => {
 
   it("formats latency in ms when under 1000", async () => {
     const summary = await buildStatusSummary(baseContext, {
-      inputTokens: 0, outputTokens: 0, totalTokens: 0, toolCalls: 0, errors: 0,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, toolCalls: 0, errors: 0,
       lastTurnLatencyMs: 450,
     });
     expect(summary.lastTurn).toBe("450ms");
@@ -214,7 +216,7 @@ describe("buildStatusSummary", () => {
 
   it("formats latency in seconds when >= 1000", async () => {
     const summary = await buildStatusSummary(baseContext, {
-      inputTokens: 0, outputTokens: 0, totalTokens: 0, toolCalls: 0, errors: 0,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, toolCalls: 0, errors: 0,
       lastTurnLatencyMs: 8400,
     });
     expect(summary.lastTurn).toBe("8.4s");
@@ -237,7 +239,7 @@ describe("formatStatusSummary", () => {
 
   it("contains Tokens today", async () => {
     const summary = await buildStatusSummary(baseContext, {
-      inputTokens: 12400, outputTokens: 3100, totalTokens: 15500,
+      inputTokens: 12400, outputTokens: 3100, totalTokens: 15500, cacheRead: 0, cacheWrite: 0,
       toolCalls: 18, errors: 0, lastTurnLatencyMs: 8400,
     });
     const output = formatStatusSummary(summary);

@@ -8,6 +8,8 @@ export interface MetricsAggregate {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
   toolCalls: number;
   errors: number;
   lastTurnLatencyMs: number | null;
@@ -21,7 +23,7 @@ export interface StatusContext {
   /** "active" if agent is running, "ready" otherwise */
   sessionState: "active" | "ready";
   /** Accumulated session token usage */
-  sessionUsage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  sessionUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
   /** Memory backend availability */
   memoryReady?: boolean;
   /** Tool calls in current session (from past turns) */
@@ -89,6 +91,8 @@ export async function readTodayMetrics(
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
     toolCalls: 0,
     errors: 0,
     lastTurnLatencyMs: null,
@@ -103,6 +107,8 @@ export async function readTodayMetrics(
         inputTokens: number;
         outputTokens: number;
         totalTokens: number;
+        cacheRead: number;
+        cacheWrite: number;
         latencyMs: number;
         status: string;
       }>;
@@ -111,6 +117,8 @@ export async function readTodayMetrics(
         if (typeof entry.inputTokens === "number") agg.inputTokens += entry.inputTokens;
         if (typeof entry.outputTokens === "number") agg.outputTokens += entry.outputTokens;
         if (typeof entry.totalTokens === "number") agg.totalTokens += entry.totalTokens;
+        if (typeof entry.cacheRead === "number") agg.cacheRead += entry.cacheRead;
+        if (typeof entry.cacheWrite === "number") agg.cacheWrite += entry.cacheWrite;
         if (typeof entry.latencyMs === "number") agg.lastTurnLatencyMs = entry.latencyMs;
         if (entry.status === "error") agg.errors++;
       } else if (entry.type === "tool_call") {
@@ -153,9 +161,9 @@ export async function buildStatusSummary(
   const metrics = metricsOverride !== undefined ? metricsOverride : await readTodayMetrics();
 
   const tokensIn = metrics
-    ? formatTokens(metrics.inputTokens)
+    ? formatTokens(metrics.inputTokens + metrics.cacheRead + metrics.cacheWrite)
     : context.sessionUsage
-      ? formatTokens(context.sessionUsage.inputTokens)
+      ? formatTokens(context.sessionUsage.inputTokens + context.sessionUsage.cacheRead + context.sessionUsage.cacheWrite)
       : "n/a";
 
   const tokensOut = metrics

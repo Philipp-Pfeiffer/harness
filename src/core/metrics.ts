@@ -12,6 +12,8 @@ export interface TurnMetric {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
   latencyMs: number;
   toolCallCount: number;
   status: "ok" | "aborted" | "error";
