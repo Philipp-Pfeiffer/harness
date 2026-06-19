@@ -17,6 +17,7 @@ import type { Mailbox } from "../core/mailbox.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 import { loadConfig, type ConfigModel } from "./config.js";
 import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
+import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
 
 /* ─── marked config ─── */
 
@@ -739,6 +740,29 @@ export default function App({
         setPastTurns((prev) => [...prev, helpTurn]);
         return;
       }
+      if (isStatusCommand(trimmed)) {
+        void handleStatusCommand(trimmed, {
+          model: activeModel.id,
+          workspace: process.cwd(),
+          sessionState: isRunningRef.current ? "active" : "ready",
+          sessionUsage,
+          memoryReady: !memoryService?.degraded,
+          toolCalls: pastTurns.reduce((sum, t) => sum + t.tools.length, 0),
+          errors: pastTurns.filter((t) => t.error).length,
+        }).then((statusText) => {
+          const statusTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: statusText,
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+          };
+          setPastTurns((prev) => [...prev, statusTurn]);
+        });
+        return;
+      }
       if (trimmed.startsWith("/")) {
         const errorTurn: CompletedTurn = {
           id: randomUUID(),
@@ -938,7 +962,7 @@ export default function App({
           });
         });
     },
-    [agent, exit, forceUpdate, metricsRecorder]
+    [agent, exit, forceUpdate, metricsRecorder, activeModel, sessionUsage, pastTurns, memoryService]
   );
 
   const toggleLastTool = useCallback(() => {
