@@ -431,8 +431,8 @@ describe("Agent", () => {
 
       const usageEvents = events.filter((e) => e.type === "usage");
       expect(usageEvents).toHaveLength(2);
-      expect(usageEvents[0]).toEqual({ type: "usage", inputTokens: 10, outputTokens: 5, totalTokens: 15 });
-      expect(usageEvents[1]).toEqual({ type: "usage", inputTokens: 30, outputTokens: 15, totalTokens: 45 });
+      expect(usageEvents[0]).toEqual({ type: "usage", inputTokens: 10, outputTokens: 5, totalTokens: 15, callInputTokens: 10, callOutputTokens: 5, callTotalTokens: 15 });
+      expect(usageEvents[1]).toEqual({ type: "usage", inputTokens: 30, outputTokens: 15, totalTokens: 45, callInputTokens: 20, callOutputTokens: 10, callTotalTokens: 30 });
     });
 
     it("emits usage event even for single text response", async () => {
@@ -445,7 +445,7 @@ describe("Agent", () => {
       const result = await agent.run([makeUserMessage("Hi")], { onEvent: (e) => events.push(e) });
 
       expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello!", usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 } });
-      expect(events).toContainEqual({ type: "usage", inputTokens: 5, outputTokens: 3, totalTokens: 8 });
+      expect(events).toContainEqual({ type: "usage", inputTokens: 5, outputTokens: 3, totalTokens: 8, callInputTokens: 5, callOutputTokens: 3, callTotalTokens: 8 });
     });
 
     it("emits tool_call_error event for missing tool", async () => {

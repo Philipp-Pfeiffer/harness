@@ -77,7 +77,7 @@ export type AgentEvent =
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
   | { type: "turn_end"; turn: number }
-  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number };
+  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -300,7 +300,7 @@ export function createAgent(config: AgentConfig): Agent {
         totalInput += response.usage.input;
         totalOutput += response.usage.output;
         totalTokens += response.usage.totalTokens;
-        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens });
+        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens });
 
         if (response.stopReason === "error") {
           throw new Error(response.errorMessage ?? "Unbekannter Fehler");
