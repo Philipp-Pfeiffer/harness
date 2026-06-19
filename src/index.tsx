@@ -1,11 +1,18 @@
 #!/usr/bin/env node
-import "dotenv/config";
+import dotenv from "dotenv";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { render } from "ink";
 import { resolveHarnessPaths, ensureDirs, type HarnessPaths } from "./config/paths.js";
 import { ensureInbox } from "./core/memoryFolders.js";
 import { MemoryService } from "./core/memoryService.js";
+
+// ─── Subcommand: migrate-home ─────────────────────────────────
+// Resolve paths early so we can load .env from $HARNESS_HOME.
+const _earlyPaths = resolveHarnessPaths();
+// Load .env from $HARNESS_HOME first (production), then cwd (dev override).
+dotenv.config({ path: resolve(_earlyPaths.home, ".env") });
+dotenv.config({ path: resolve(process.cwd(), ".env") });
 
 // ─── Subcommand: migrate-home ─────────────────────────────────
 if (process.argv[2] === "migrate-home") {
