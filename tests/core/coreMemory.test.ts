@@ -32,10 +32,10 @@ describe("coreMemory", () => {
     it("reads core.md when present", async () => {
       const dir = resolve(tmpdir(), `harness-test-${Date.now()}`);
       await mkdir(dir, { recursive: true });
-      const path = resolve(dir, "core.md");
-      await writeFile(path, TEST_CORE_MD, "utf-8");
+      const corePath = resolve(dir, "core.md");
+      await writeFile(corePath, TEST_CORE_MD, "utf-8");
 
-      const result = await loadCoreMemoryRaw(dir);
+      const result = await loadCoreMemoryRaw(corePath);
       expect(result).toBe(TEST_CORE_MD.trim());
 
       await rm(dir, { recursive: true });
@@ -46,7 +46,7 @@ describe("coreMemory", () => {
       await mkdir(dir, { recursive: true });
 
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const result = await loadCoreMemoryRaw(dir);
+      const result = await loadCoreMemoryRaw(resolve(dir, "core.md"));
       expect(result).toBeUndefined();
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("core.md not found"));
       warnSpy.mockRestore();

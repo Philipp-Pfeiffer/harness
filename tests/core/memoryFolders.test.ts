@@ -1,72 +1,98 @@
-import { describe, it, expect } from "vitest";
-import { resolveMemoryConfig, ensureMemoryFolders } from "../../src/core/memoryFolders.js";
-import { rm, access, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { resolveHarnessPaths, ensureDirs } from "../../src/config/paths.js";
+import { ensureInbox, resolveMemoryConfig } from "../../src/core/memoryFolders.js";
+import { rm, access, readFile, mkdir } from "node:fs/promises";
+import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 
-describe("memoryFolders", () => {
-  describe("resolveMemoryConfig", () => {
-    it("uses project-root defaults when no env is set", () => {
-      const projectRoot = "/fake/project";
-      const config = resolveMemoryConfig({}, projectRoot);
-      expect(config.memoryPath).toBe(resolve(projectRoot, "memory"));
-      expect(config.sourcesPath).toBe(resolve(projectRoot, "sources"));
-      expect(config.inboxPath).toBe(resolve(projectRoot, "memory", "_inbox.md"));
-    });
+const ORIGINAL_ENV = { ...process.env };
 
-    it("reads paths from env vars", () => {
-      const config = resolveMemoryConfig({
-        HARNESS_MEMORY_PATH: "/custom/memory",
-        HARNESS_SOURCES_PATH: "/custom/sources",
-        HARNESS_INBOX_PATH: "/custom/inbox.md",
-      }, "/fake/project");
-      expect(config.memoryPath).toBe("/custom/memory");
-      expect(config.sourcesPath).toBe("/custom/sources");
-      expect(config.inboxPath).toBe("/custom/inbox.md");
-    });
+function resetEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    delete process.env[key];
+  }
+  Object.assign(process.env, ORIGINAL_ENV);
+}
 
-    it("expands ~ to home directory", () => {
-      const config = resolveMemoryConfig({
-        HARNESS_MEMORY_PATH: "~/my-memory",
-      }, "/fake/project");
-      expect(config.memoryPath).not.toContain("~");
-      expect(config.memoryPath).toContain("my-memory");
-    });
+describe("memoryFolders (legacy compat)", () => {
+  beforeEach(() => resetEnv());
 
-    it("env overrides take precedence over project root", () => {
-      const projectRoot = "/fake/project";
-      const config = resolveMemoryConfig({
-        HARNESS_MEMORY_PATH: "/override/memory",
-      }, projectRoot);
-      expect(config.memoryPath).toBe("/override/memory");
-      expect(config.sourcesPath).toBe(resolve(projectRoot, "sources"));
-    });
+  it("resolveMemoryConfig delegates to resolveHarnessPaths", () => {
+    process.env.HARNESS_HOME = "/custom/home";
+    delete process.env.HARNESS_STATE;
+    delete process.env.XDG_STATE_HOME;
+
+    const config = resolveMemoryConfig();
+    expect(config.memoryPath).toBe("/custom/home/memory");
+    expect(config.sourcesPath).toBe("/custom/home/sources");
+    expect(config.inboxPath).toBe("/custom/home/memory/_inbox.md");
   });
 
-  describe("ensureMemoryFolders", () => {
-    it("creates folders and inbox idempotently", async () => {
-      const dir = resolve(tmpdir(), `harness-mem-${Date.now()}`);
-      const memoryPath = resolve(dir, "memory");
-      const sourcesPath = resolve(dir, "sources");
-      const inboxPath = resolve(memoryPath, "_inbox.md");
+  it("resolveMemoryConfig falls back to ~/harness when no env", () => {
+    delete process.env.HARNESS_HOME;
+    delete process.env.HARNESS_STATE;
+    delete process.env.XDG_STATE_HOME;
 
-      const result = await ensureMemoryFolders({ memoryPath, sourcesPath, inboxPath });
-      expect(result.memoryPath).toBe(memoryPath);
-      expect(result.sourcesPath).toBe(sourcesPath);
-      expect(result.inboxPath).toBe(inboxPath);
+    const config = resolveMemoryConfig();
+    expect(config.memoryPath).toBe(join(process.env.HOME ?? "/home/user", "harness", "memory"));
+  });
+});
 
-      // Verify directories exist
-      await access(memoryPath);
-      await access(sourcesPath);
+describe("ensureInbox", () => {
+  let baseDir: string;
 
-      // Verify inbox was created
-      const inboxContent = await readFile(inboxPath, "utf-8");
-      expect(inboxContent).toContain("# Inbox");
+  beforeEach(() => {
+    baseDir = resolve(tmpdir(), `harness-inbox-${Date.now()}`);
+  });
 
-      // Second call should not throw (idempotent)
-      await ensureMemoryFolders({ memoryPath, sourcesPath, inboxPath });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
 
-      await rm(dir, { recursive: true });
-    });
+  it("creates inbox file with default header when missing", async () => {
+    const inboxPath = resolve(baseDir, "memory", "_inbox.md");
+    await mkdir(resolve(baseDir, "memory"), { recursive: true });
+
+    await ensureInbox(inboxPath);
+
+    const content = await readFile(inboxPath, "utf-8");
+    expect(content).toContain("# Inbox");
+  });
+
+  it("does not overwrite existing inbox", async () => {
+    const inboxPath = resolve(baseDir, "memory", "_inbox.md");
+    await mkdir(resolve(baseDir, "memory"), { recursive: true });
+    await readFile;
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(inboxPath, "existing content", "utf-8");
+
+    await ensureInbox(inboxPath);
+
+    const content = await readFile(inboxPath, "utf-8");
+    expect(content).toBe("existing content");
+  });
+
+  it("end-to-end: ensureDirs + ensureInbox creates full structure", async () => {
+    const paths = resolveHarnessPaths({ home: join(baseDir, "home") });
+    // Override state to keep everything under baseDir
+    const customPaths = { ...paths, state: join(baseDir, "state") };
+
+    await ensureDirs(customPaths);
+    await ensureInbox(customPaths.inbox);
+
+    // All dirs exist
+    await access(customPaths.memory);
+    await access(customPaths.sources);
+    await access(customPaths.sessions);
+    await access(customPaths.metrics);
+    await access(customPaths.index);
+
+    // Inbox file exists
+    const inboxContent = await readFile(customPaths.inbox, "utf-8");
+    expect(inboxContent).toContain("# Inbox");
+
+    // Idempotent
+    await ensureDirs(customPaths);
+    await ensureInbox(customPaths.inbox);
   });
 });
