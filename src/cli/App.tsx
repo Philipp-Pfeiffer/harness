@@ -7,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
-import { resolveMemoryConfig } from "../core/memoryFolders.js";
 import { resolveModel } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
@@ -18,6 +17,7 @@ import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands
 import { loadConfig, type ConfigModel } from "./config.js";
 import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
 import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
+import { resolveHarnessPaths, type HarnessPaths } from "../config/paths.js";
 
 /* ─── marked config ─── */
 
@@ -673,10 +673,13 @@ function PromptInput({
 export default function App({
   configPath,
   memoryService,
+  paths: pathsProp,
 }: {
   configPath?: string;
   memoryService?: import("../core/memoryService.js").MemoryService;
+  paths?: HarnessPaths;
 } = {}) {
+  const paths = pathsProp ?? resolveHarnessPaths();
   // memoryService is injected for future phases (ambient retrieval, explicit search)
   const _memoryServiceRef = useRef(memoryService);
   void _memoryServiceRef;
@@ -732,8 +735,8 @@ export default function App({
 
   useEffect(() => {
     (async () => {
-      const coreMemory = await loadCoreMemoryRaw();
-      const basePrompt = prompt("system-prompt", { inboxPath: resolveMemoryConfig().inboxPath });
+      const coreMemory = await loadCoreMemoryRaw(paths.core);
+      const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
       const composed = composeSystemPrompt(basePrompt, coreMemory);
       agent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);

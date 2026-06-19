@@ -9,12 +9,15 @@ export interface CoreMemorySections {
 }
 
 /**
- * Reads core.md from the harness project root and returns its raw content.
+ * Reads core.md and returns its raw content.
  * Returns undefined if the file does not exist, logging a warning.
+ *
+ * @param corePath  Absolute path to core.md. When omitted, falls back to
+ *                  HARNESS_PROJECT_ROOT or cwd (legacy, will be removed).
  */
-export async function loadCoreMemoryRaw(projectRoot?: string): Promise<string | undefined> {
-  const root = projectRoot ?? process.env.HARNESS_PROJECT_ROOT ?? process.cwd();
-  const path = resolve(root, "core.md");
+export async function loadCoreMemoryRaw(corePath?: string): Promise<string | undefined> {
+  const path = corePath
+    ?? resolve(process.env.HARNESS_PROJECT_ROOT ?? process.cwd(), "core.md");
   try {
     const content = await readFile(path, "utf-8");
     return content.trim();
