@@ -788,7 +788,10 @@ describe("CLI App", () => {
       await delay(200);
 
       const frame = lastFrame();
-      expect(frame).toContain("30 / 100.0k");
+      // Per-call: last run had 15 tokens, shown against context window
+      expect(frame).toContain("15 / 100.0k");
+      // Session total (accumulated): 30
+      expect(frame).toContain("Ses: 30");
     });
 
     it("resets token counter on /clear", async () => {
@@ -858,7 +861,10 @@ describe("CLI App", () => {
       await delay(200);
 
       frame = lastFrame();
-      expect(frame).toContain("30 / 100.0k");
+      // Per-call: last run had 15 tokens
+      expect(frame).toContain("15 / 100.0k");
+      // Session total: 15 + 15 = 30
+      expect(frame).toContain("Ses: 30");
     });
   });
 

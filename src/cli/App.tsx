@@ -104,7 +104,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; contextWindow?: number }) {
+function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; lastCallTokens?: number; contextWindow?: number }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -115,7 +115,7 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
           : "cyan";
 
   const cwd = process.cwd();
-  const used = usage?.totalTokens ?? 0;
+  const used = lastCallTokens ?? usage?.totalTokens ?? 0;
   const usedStr = formatTokens(used);
   const maxStr = contextWindow ? formatTokens(contextWindow) : "?";
 
@@ -126,6 +126,9 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
     else if (ratio > 0.8) counterColor = "yellow";
   }
 
+  const sessionTotal = usage?.totalTokens;
+  const showSession = sessionTotal !== undefined && sessionTotal !== used;
+
   return (
     <Box width="100%" height={1}>
       <Text bold color="cyan">
@@ -135,10 +138,16 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
       <Text dimColor>{modelId}</Text>
       <Text dimColor> · </Text>
       <Text color={statusColor}>{status}</Text>
-      {usage !== undefined && (
+      {used > 0 && (
         <>
           <Text dimColor> · </Text>
           <Text color={counterColor}>{usedStr} / {maxStr}</Text>
+        </>
+      )}
+      {showSession && (
+        <>
+          <Text dimColor> · </Text>
+          <Text dimColor>Ses: {formatTokens(sessionTotal)}</Text>
         </>
       )}
       <Text dimColor> · </Text>
@@ -647,6 +656,7 @@ export default function App({
   const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined>(undefined);
+  const [lastCallTokens, setLastCallTokens] = useState<number | undefined>(undefined);
 
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -714,6 +724,7 @@ export default function App({
         setPastTurns([]);
         historyRef.current = [];
         setSessionUsage(undefined);
+        setLastCallTokens(undefined);
         return;
       }
       if (trimmed === "/quit") {
@@ -886,8 +897,7 @@ export default function App({
                 forceUpdate();
               }
             } else if (event.type === "usage") {
-              // Live-Update während des Turns; finale Aggregation erfolgt aus result.usage
-              // um Doppelzählung bei Multi-Turn-Runs zu vermeiden.
+              setLastCallTokens(event.callTotalTokens ?? event.totalTokens);
             }
           },
         })
@@ -919,6 +929,10 @@ export default function App({
                   }
                 : result.usage
             );
+            // For single-turn runs the usage event may not fire, so set lastCallTokens here.
+            if (!result.aborted && result.turns <= 1) {
+              setLastCallTokens(result.usage.totalTokens);
+            }
           }
           metricsRecorder.recordTurn({
             model: activeModel.name,
@@ -962,7 +976,7 @@ export default function App({
           });
         });
     },
-    [agent, exit, forceUpdate, metricsRecorder, activeModel, sessionUsage, pastTurns, memoryService]
+    [agent, exit, forceUpdate, metricsRecorder, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -1093,7 +1107,7 @@ export default function App({
         )}
       </Box>
       <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />
-      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
+      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} />
     </Box>
   );
 }
