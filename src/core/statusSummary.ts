@@ -43,6 +43,7 @@ export interface StatusSummary {
   tokensIn: string;
   tokensOut: string;
   sessionTokens: string;
+  cacheHitRate: string;
   toolCalls: string;
   errors: string;
   lastTurn: string;
@@ -159,6 +160,13 @@ function formatLatency(ms: number | null): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function formatCacheHitRate(inputTokens: number, cacheRead: number, cacheWrite: number): string {
+  const denom = inputTokens + cacheRead + cacheWrite;
+  if (denom === 0) return "n/a";
+  const rate = (cacheRead / denom) * 100;
+  return `${rate.toFixed(1)}%`;
+}
+
 export async function buildStatusSummary(
   context: StatusContext,
   metricsOverride?: MetricsAggregate | null,
@@ -191,6 +199,10 @@ export async function buildStatusSummary(
     ? formatTokens(context.sessionUsage.totalTokens)
     : "n/a";
 
+  const cacheHitRate = metrics
+    ? formatCacheHitRate(metrics.inputTokens, metrics.cacheRead, metrics.cacheWrite)
+    : "n/a";
+
   return {
     sessionState: context.sessionState,
     model: context.model ?? "n/a",
@@ -200,6 +212,7 @@ export async function buildStatusSummary(
     tokensIn,
     tokensOut,
     sessionTokens,
+    cacheHitRate,
     toolCalls,
     errors,
     lastTurn,
@@ -219,6 +232,7 @@ export function formatStatusSummary(summary: StatusSummary): string {
     `Memory:       ${summary.memory}`,
     `Session ID:   ${summary.sessionId}`,
     `Tokens today: ${summary.tokensIn} in / ${summary.tokensOut} out`,
+    `Cache hit:    ${summary.cacheHitRate}`,
     `Session:      ${summary.sessionTokens}`,
     `Tool calls:   ${summary.toolCalls} today`,
     `Errors today: ${summary.errors}`,
