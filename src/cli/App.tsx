@@ -51,6 +51,7 @@ export type ToolItem = {
   id: string;
   name: string;
   status: "pending" | "done" | "error";
+  args?: unknown;
   preview: string;
   result?: string;
   expanded?: boolean;
@@ -86,6 +87,40 @@ function truncate(str: string, max: number): string {
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(1)}k`;
+}
+
+/**
+ * Generates a short summary of what a tool was called with, based on its args.
+ * Used in the ToolCard title to show *what* the tool did (e.g. which file, which command).
+ */
+function toolArgsSummary(name: string, args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+
+  switch (name) {
+    case "exec":
+      return `$ ${a.command ?? ""}`;
+    case "readFile": {
+      const path = String(a.path ?? "");
+      const start = a.lineStart;
+      const end = a.lineEnd;
+      if (start && end) return `${path} (L${start}-${end})`;
+      if (start) return `${path} (L${start}+)`;
+      return path;
+    }
+    case "write":
+      return String(a.path ?? "");
+    case "edit": {
+      const edits = Array.isArray(a.edits) ? a.edits : [];
+      return `${a.path ?? ""} (${edits.length} edit${edits.length === 1 ? "" : "s"})`;
+    }
+    case "search_memory":
+      return `"${a.query ?? ""}"`;
+    case "process":
+      return `${a.action ?? ""}${a.sessionId ? ` ${a.sessionId}` : ""}`;
+    default:
+      return "";
+  }
 }
 
 function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
@@ -168,7 +203,10 @@ export function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) 
   const innerWidth = Math.max(20, (process.stdout.columns || 80) - 4);
   const contentWidth = innerWidth;
 
-  let titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
+  const summary = toolArgsSummary(item.name, item.args);
+  const titleBase = summary ? `${symbol} ${item.name}: ${summary}` : `${symbol} ${item.name}`;
+  const ctrlHint = isLast ? " ── Ctrl+O ─" : "";
+  let titleContent = `${titleBase}${ctrlHint}`;
   if (titleContent.length > innerWidth - 4) {
     titleContent = titleContent.slice(0, innerWidth - 7) + "...";
   }
@@ -842,7 +880,7 @@ export default function App({
                   ...activeTurnRef.current,
                   tools: [
                     ...activeTurnRef.current.tools,
-                    { id: randomUUID(), name: event.name, status: "pending", preview: "" },
+                    { id: randomUUID(), name: event.name, status: "pending", args: event.args, preview: toolArgsSummary(event.name, event.args) },
                   ],
                   toolOffsets: [...activeTurnRef.current.toolOffsets, currentTextLen],
                   status: "tool",
