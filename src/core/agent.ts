@@ -17,6 +17,7 @@ import type { Tool } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
 import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
+import type { MetricsRecorder } from "./metrics.js";
 
 export interface ToolCallLog {
   name: string;
@@ -43,6 +44,8 @@ export interface RunOptions {
   abortCommand?: { current: string | undefined };
   /** Optional memory backend for ambient hint retrieval. */
   memoryBackend?: MemoryBackend;
+  /** Optional metrics recorder for turn/tool/error events. */
+  metricsRecorder?: MetricsRecorder;
 }
 
 /**
@@ -212,7 +215,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent, mailbox, memoryBackend } = options;
+      const { signal, onEvent, mailbox, memoryBackend, metricsRecorder } = options;
       let effectiveSystemPrompt = systemPrompt;
 
       if (memoryBackend) {
@@ -369,22 +372,27 @@ export function createAgent(config: AgentConfig): Agent {
                 result = `Tool "${toolCall.name}" nicht gefunden.`;
                 isError = true;
                 logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
               } else {
                 if (!Value.Check(tool.parameters, toolCall.arguments)) {
                   result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
                   isError = true;
                   logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
+                  metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
                 } else {
+                  const toolStart = Date.now();
                   try {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
                     result = await Promise.resolve(tool.execute(toolCall.arguments));
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                     logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
+                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "ok" });
                   } catch (err) {
                     result = err instanceof Error ? err.message : String(err);
                     isError = true;
                     logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "error", error: result });
                   }
                 }
               }
