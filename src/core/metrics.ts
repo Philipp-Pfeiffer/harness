@@ -1,6 +1,7 @@
 import { mkdir, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { resolveHarnessPaths } from "../config/paths.js";
 
 // ─── Event Types ───────────────────────────────────────────────
 
@@ -44,10 +45,13 @@ export type MetricEvent = TurnMetric | ToolCallMetric | ErrorMetric;
 /**
  * Resolves the metrics directory.
  *
- * Default: `~/.harness/metrics/` — following the existing `~/.harness/`
- * convention from config.ts.
+ * Resolution order:
+ * 1. `HARNESS_METRICS_DIR` env var (legacy alias, deprecated)
+ * 2. `paths.metrics` from `resolveHarnessPaths()` which uses:
+ *    `$HARNESS_STATE/metrics` → `$XDG_STATE_HOME/harness/metrics` → `~/.harness/metrics`
  *
- * Override via `HARNESS_METRICS_DIR` env var for testing.
+ * @param env    Optional env override (for tests)
+ * @param home   Optional home dir override (for tests, legacy)
  */
 export function resolveMetricsDir(
   env: Record<string, string | undefined> = process.env,
@@ -56,7 +60,19 @@ export function resolveMetricsDir(
   if (env.HARNESS_METRICS_DIR) {
     return env.HARNESS_METRICS_DIR;
   }
-  return join(home, ".harness", "metrics");
+  const paths = resolveHarnessPaths(
+    env.HARNESS_HOME ? { home: env.HARNESS_HOME } : undefined
+  );
+  // When HARNESS_STATE or XDG_STATE_HOME are set via env, resolveHarnessPaths
+  // picks them up automatically. The `home` param is only used for the legacy
+  // fallback path (~/.harness/metrics).
+  if (
+    !env.HARNESS_STATE &&
+    !env.XDG_STATE_HOME
+  ) {
+    return join(home, ".harness", "metrics");
+  }
+  return paths.metrics;
 }
 
 // ─── JSONL Append ──────────────────────────────────────────────

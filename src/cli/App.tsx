@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp, useStdout, Static } from "ink";
+import { Box, Text, useInput, useApp, useStdout, useStdin, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -7,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
-import { resolveMemoryConfig } from "../core/memoryFolders.js";
 import { resolveModel } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
@@ -18,6 +17,7 @@ import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands
 import { loadConfig, type ConfigModel } from "./config.js";
 import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
 import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
+import { resolveHarnessPaths, type HarnessPaths } from "../config/paths.js";
 
 /* ─── marked config ─── */
 
@@ -51,6 +51,7 @@ export type ToolItem = {
   id: string;
   name: string;
   status: "pending" | "done" | "error";
+  args?: unknown;
   preview: string;
   result?: string;
   expanded?: boolean;
@@ -87,6 +88,40 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * Generates a short summary of what a tool was called with, based on its args.
+ * Used in the ToolCard title to show *what* the tool did (e.g. which file, which command).
+ */
+function toolArgsSummary(name: string, args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+
+  switch (name) {
+    case "exec":
+      return `$ ${a.command ?? ""}`;
+    case "readFile": {
+      const path = String(a.path ?? "");
+      const start = a.lineStart;
+      const end = a.lineEnd;
+      if (start && end) return `${path} (L${start}-${end})`;
+      if (start) return `${path} (L${start}+)`;
+      return path;
+    }
+    case "write":
+      return String(a.path ?? "");
+    case "edit": {
+      const edits = Array.isArray(a.edits) ? a.edits : [];
+      return `${a.path ?? ""} (${edits.length} edit${edits.length === 1 ? "" : "s"})`;
+    }
+    case "search_memory":
+      return `"${a.query ?? ""}"`;
+    case "process":
+      return `${a.action ?? ""}${a.sessionId ? ` ${a.sessionId}` : ""}`;
+    default:
+      return "";
+  }
 }
 
 function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
@@ -178,7 +213,10 @@ export function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) 
   const innerWidth = Math.max(20, (process.stdout.columns || 80) - 4);
   const contentWidth = innerWidth;
 
-  let titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
+  const summary = toolArgsSummary(item.name, item.args);
+  const titleBase = summary ? `${symbol} ${item.name}: ${summary}` : `${symbol} ${item.name}`;
+  const ctrlHint = isLast ? " ── Ctrl+O ─" : "";
+  let titleContent = `${titleBase}${ctrlHint}`;
   if (titleContent.length > innerWidth - 4) {
     titleContent = titleContent.slice(0, innerWidth - 7) + "...";
   }
@@ -215,6 +253,7 @@ function HelpCard() {
       ))}
       <Text bold>Keybinds</Text>
       <Text>  Ctrl+O  – Toggle last tool card</Text>
+      <Text>  Ctrl+E  – Selection mode (scroll & copy)</Text>
       <Text>  Ctrl+L  – Clear screen</Text>
       <Text>  Ctrl+C  – Abort stream / double-tap to exit</Text>
     </Box>
@@ -313,10 +352,12 @@ function PromptInput({
   onSubmit,
   history,
   commands,
+  paused = false,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
   commands?: SlashCommandInfo[];
+  paused?: boolean;
 }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
@@ -334,12 +375,13 @@ function PromptInput({
   }, [history]);
 
   useEffect(() => {
+    if (paused) return;
     const id = setInterval(() => {
       blinkRef.current = !blinkRef.current;
       setRenderTick((t) => t + 1);
     }, 530);
     return () => clearInterval(id);
-  }, []);
+  }, [paused]);
 
   function hasSelection(): boolean {
     return selStartRef.current !== -1 && selEndRef.current !== -1 && selStartRef.current !== selEndRef.current;
@@ -381,7 +423,7 @@ function PromptInput({
   }
 
   useInput((inputStr, key) => {
-    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o")) {
+    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o" || inputStr === "e")) {
       return;
     }
 
@@ -641,17 +683,22 @@ function PromptInput({
 export default function App({
   configPath,
   memoryService,
+  paths: pathsProp,
 }: {
   configPath?: string;
   memoryService?: import("../core/memoryService.js").MemoryService;
+  paths?: HarnessPaths;
 } = {}) {
+  const paths = pathsProp ?? resolveHarnessPaths();
   // memoryService is injected for future phases (ambient retrieval, explicit search)
   const _memoryServiceRef = useRef(memoryService);
   void _memoryServiceRef;
 
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const { setRawMode } = useStdin();
   const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });
+  const [selectionMode, setSelectionMode] = useState(false);
   const [pastTurns, setPastTurns] = useState<CompletedTurn[]>([]);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
@@ -677,6 +724,18 @@ export default function App({
     };
   }, [stdout]);
 
+  // Selection mode: disable raw mode so the terminal handles mouse selection & scroll
+  useEffect(() => {
+    if (!selectionMode) return;
+    setRawMode(false);
+    const exitHandler = () => setSelectionMode(false);
+    process.stdin.once("data", exitHandler);
+    return () => {
+      process.stdin.removeListener("data", exitHandler);
+      setRawMode(true);
+    };
+  }, [selectionMode, setRawMode]);
+
   const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
@@ -688,8 +747,8 @@ export default function App({
 
   useEffect(() => {
     (async () => {
-      const coreMemory = await loadCoreMemoryRaw();
-      const basePrompt = prompt("system-prompt", { inboxPath: resolveMemoryConfig().inboxPath });
+      const coreMemory = await loadCoreMemoryRaw(paths.core);
+      const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
       const composed = composeSystemPrompt(basePrompt, coreMemory);
       agent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
@@ -856,7 +915,7 @@ export default function App({
                   ...activeTurnRef.current,
                   tools: [
                     ...activeTurnRef.current.tools,
-                    { id: randomUUID(), name: event.name, status: "pending", preview: "" },
+                    { id: randomUUID(), name: event.name, status: "pending", args: event.args, preview: toolArgsSummary(event.name, event.args) },
                   ],
                   toolOffsets: [...activeTurnRef.current.toolOffsets, currentTextLen],
                   status: "tool",
@@ -1052,6 +1111,11 @@ export default function App({
       return;
     }
 
+    if (key.ctrl && inputStr === "e" && !selectionMode) {
+      setSelectionMode(true);
+      return;
+    }
+
     if (key.ctrl && inputStr === "c") {
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
@@ -1111,7 +1175,14 @@ export default function App({
           </Box>
         )}
       </Box>
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />
+      {selectionMode && (
+        <Box marginY={1}>
+          <Text bold color="yellow">
+            ⬛ Selection mode — scroll & select freely, press Enter to return
+          </Text>
+        </Box>
+      )}
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
       <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} />
     </Box>
   );

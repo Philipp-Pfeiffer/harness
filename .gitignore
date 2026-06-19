@@ -37,6 +37,6 @@ coverage/
 # Agent workspace
 workspace/
 
-# Memory runtime data (personal notes, QMD index)
+# Runtime artifacts (now live in $HARNESS_HOME / $HARNESS_STATE, outside the repo)
 memory/
 .qmd/

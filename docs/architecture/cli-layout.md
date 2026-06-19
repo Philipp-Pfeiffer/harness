@@ -68,7 +68,7 @@ const liveTurns   = pastTurns.slice(-1);      // nur der letzte
 Rendert einen abgeschlossenen Turn:
 - User-Prompt (`❯ <text>`)
 - Assistant-Text (mit Markdown-Rendering via `marked`)
-- Tool-Cards (collapsed oder expanded)
+- Tool-Cards (collapsed oder expanded), Titel zeigt Args-Summary (z. B. ` exec: $ ls -la`)
 - Fehler- oder Abort-Marker
 - Help-Card (bei `/help`)
 
@@ -82,13 +82,14 @@ Rendert den aktuell laufenden Turn:
 ### `PromptInput`
 
 State-basierte Eingabe mit folgenden Features:
-- Cursor-Blink (530ms Intervall)
+- Cursor-Blink (530ms Intervall, pausiert im Selection Mode)
 - Text-Selection mit Shift+←/→
 - Ctrl+A (Select All)
 - Ctrl+Backspace / Alt+Backspace (Word-Delete)
 - Shift+Enter (Multi-Line)
 - History-Navigation (↑/↓)
 - **Slash-Command Picker** (↑/↓/Tab/Esc) — nur wenn `commands` Prop übergeben
+- `paused` Prop: deaktiviert Blink-Timer + Input-Handler (während Selection Mode)
 
 ### `StatusBar`
 
@@ -111,6 +112,7 @@ harness · MiniMax-M2.7 · ready · 15 / 100.0k · /home/user/project
 User Input (Keyboard)
   → useInput (Ink)
   → [Ctrl+C] → AbortController.abort() + mailbox.drainAll()
+  → [Ctrl+E] → setSelectionMode(true) → setRawMode(false) → terminal handles scroll & select
   → [Ctrl+L] → setPastTurns([])
   → [Ctrl+O] → toggleLastTool()
   → [/...]   → Slash-Picker öffnet/schließt
