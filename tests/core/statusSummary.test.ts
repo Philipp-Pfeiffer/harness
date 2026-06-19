@@ -275,6 +275,74 @@ describe("formatStatusSummary", () => {
     const summary = await buildStatusSummary(baseContext, null);
     const output = formatStatusSummary(summary);
     const lines = output.split("\n");
-    expect(lines.length).toBe(13);
+    expect(lines.length).toBe(14);
+  });
+});
+
+describe("cache hit rate", () => {
+  it("calculates cache hit rate from metrics", async () => {
+    // cacheRead=152, cacheWrite=219, input=0 → 152 / (0+152+219) = 152/371 = 41.0%
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 0, outputTokens: 105, totalTokens: 324,
+      cacheRead: 152, cacheWrite: 219, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 4200,
+    });
+    expect(summary.cacheHitRate).toBe("41.0%");
+  });
+
+  it("returns n/a when all cache and input tokens are zero", async () => {
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 0, outputTokens: 0, totalTokens: 0,
+      cacheRead: 0, cacheWrite: 0, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 100,
+    });
+    expect(summary.cacheHitRate).toBe("n/a");
+  });
+
+  it("returns 0.0% when cache is inactive (no cache tokens, only input)", async () => {
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 1000, outputTokens: 500, totalTokens: 1500,
+      cacheRead: 0, cacheWrite: 0, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 100,
+    });
+    expect(summary.cacheHitRate).toBe("0.0%");
+  });
+
+  it("returns n/a when no metrics available", async () => {
+    const summary = await buildStatusSummary(baseContext, null);
+    expect(summary.cacheHitRate).toBe("n/a");
+  });
+
+  it("aggregates cache hit rate across multiple turns", async () => {
+    // Turn 1: input=0, cacheRead=0, cacheWrite=219
+    // Turn 2: input=0, cacheRead=152, cacheWrite=128
+    // Total: input=0, cacheRead=152, cacheWrite=347 → 152 / (0+152+347) = 152/499 = 30.5%
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 0, outputTokens: 389, totalTokens: 888,
+      cacheRead: 152, cacheWrite: 347, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 8400,
+    });
+    expect(summary.cacheHitRate).toBe("30.5%");
+  });
+
+  it("handles input tokens in denominator", async () => {
+    // input=100, cacheRead=200, cacheWrite=0 → 200 / (100+200+0) = 200/300 = 66.7%
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 100, outputTokens: 50, totalTokens: 350,
+      cacheRead: 200, cacheWrite: 0, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 100,
+    });
+    expect(summary.cacheHitRate).toBe("66.7%");
+  });
+
+  it("includes cache hit rate in formatted output", async () => {
+    const summary = await buildStatusSummary(baseContext, {
+      inputTokens: 0, outputTokens: 105, totalTokens: 324,
+      cacheRead: 152, cacheWrite: 219, toolCalls: 0, errors: 0,
+      lastTurnLatencyMs: 4200,
+    });
+    const output = formatStatusSummary(summary);
+    expect(output).toContain("Cache hit:");
+    expect(output).toContain("41.0%");
   });
 });
