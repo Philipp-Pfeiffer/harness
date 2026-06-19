@@ -85,6 +85,23 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Phase 1: Single-Agent-Loop. Keine Sub-Agents, kein MCP, kein TUI.
 - Output wird als AST gerendert, Channels haben eigene Render-Profile.
 
+### Runtime-Topologie: HOME vs. STATE vs. CODE
+
+**`src/config/paths.ts` ist die einzige Pfad-Quelle.** Niemand sonst baut Pfade selbst.
+
+| Kategorie | Pfad | Inhalt | Git? |
+|-----------|------|--------|------|
+| **HOME** (durable) | `$HARNESS_HOME` (Default `~/harness`) | `core.md`, `AGENTS.md`, `config.json`, `memory/`, `sources/`, `skills/` | Eigenes Git |
+| **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/` | Nein |
+| **CODE** | Repo | `src/`, `prompts/`, `tests/`, `docs/` | Ja |
+
+- **HOME** ist portabel und wird von mehreren Agent-Prozessen geteilt.
+- **STATE** ist regenerierbar — `harness reindex` baut den Index neu.
+- **Workspace** (cwd) ≠ **HOME** — niemals vermischen.
+- Env-Overrides: `HARNESS_HOME`, `HARNESS_STATE`, `XDG_STATE_HOME`.
+- Der `harness migrate-home` Command migriert Legacy-Substrat nach `$HARNESS_HOME`.
+- Siehe: `docs/architecture/topology.md`
+
 ## Bei Unsicherheit
 
 - Frag explizit nach, statt zu spekulieren.
