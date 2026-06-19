@@ -655,7 +655,7 @@ export default function App({
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
-  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined>(undefined);
+  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number } | undefined>(undefined);
   const [lastCallTokens, setLastCallTokens] = useState<number | undefined>(undefined);
 
   const historyRef = useRef<Message[]>([]);
@@ -928,6 +928,8 @@ export default function App({
                     inputTokens: prev.inputTokens + result.usage.inputTokens,
                     outputTokens: prev.outputTokens + result.usage.outputTokens,
                     totalTokens: prev.totalTokens + result.usage.totalTokens,
+                    cacheRead: prev.cacheRead + result.usage.cacheRead,
+                    cacheWrite: prev.cacheWrite + result.usage.cacheWrite,
                   }
                 : result.usage
             );
