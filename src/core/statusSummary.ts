@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { resolveMetricsDir } from "./metrics.js";
 
 /* ─── Types ─── */
 
@@ -46,28 +46,42 @@ export interface StatusSummary {
 /* ─── Metrics Reader ─── */
 
 /**
- * Reads today's JSONL metrics files from ~/.harness/metrics/.
+ * Reads today's JSONL metrics files from the metrics directory.
  *
- * Expected file naming: YYYY-MM-DD.jsonl
- * Each line is a JSON object with optional fields:
- *   inputTokens, outputTokens, totalTokens, toolCalls, errors, latencyMs
+ * The metrics directory defaults to `~/.harness/metrics/` and can be
+ * overridden via the `HARNESS_METRICS_DIR` environment variable.
  *
- * Robust against missing files, empty files, and corrupt lines.
- * Returns null if the metrics directory or today's file doesn't exist.
+ * Expected files (all optional):
+ *   - turns-YYYY-MM-DD.jsonl  → turn events
+ *   - tools-YYYY-MM-DD.jsonl  → tool_call events
+ *   - system-YYYY-MM-DD.jsonl → error events
+ *
+ * Returns null if none of today's metric files exist. Empty or corrupt
+ * lines are skipped silently.
  */
 export async function readTodayMetrics(
   metricsDir?: string,
   dateOverride?: Date,
 ): Promise<MetricsAggregate | null> {
-  const dir = metricsDir ?? join(homedir(), ".harness", "metrics");
+  const dir = metricsDir ?? resolveMetricsDir();
   const now = dateOverride ?? new Date();
   const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
-  const filePath = join(dir, `${dateStr}.jsonl`);
 
-  let raw: string;
-  try {
-    raw = await readFile(filePath, "utf-8");
-  } catch {
+  const prefixes = ["turns", "tools", "system"] as const;
+  const files = prefixes.map((prefix) => join(dir, `${prefix}-${dateStr}.jsonl`));
+
+  const contents: string[] = [];
+  let anyExists = false;
+  for (const filePath of files) {
+    try {
+      contents.push(await readFile(filePath, "utf-8"));
+      anyExists = true;
+    } catch {
+      contents.push("");
+    }
+  }
+
+  if (!anyExists) {
     return null;
   }
 
@@ -80,27 +94,39 @@ export async function readTodayMetrics(
     lastTurnLatencyMs: null,
   };
 
-  for (const line of raw.split("\n")) {
+  function processLine(line: string): void {
     const trimmed = line.trim();
-    if (!trimmed) continue;
+    if (!trimmed) return;
     try {
       const entry = JSON.parse(trimmed) as Partial<{
+        type: string;
         inputTokens: number;
         outputTokens: number;
         totalTokens: number;
-        toolCalls: number;
-        errors: number;
         latencyMs: number;
+        status: string;
       }>;
 
-      if (typeof entry.inputTokens === "number") agg.inputTokens += entry.inputTokens;
-      if (typeof entry.outputTokens === "number") agg.outputTokens += entry.outputTokens;
-      if (typeof entry.totalTokens === "number") agg.totalTokens += entry.totalTokens;
-      if (typeof entry.toolCalls === "number") agg.toolCalls += entry.toolCalls;
-      if (typeof entry.errors === "number") agg.errors += entry.errors;
-      if (typeof entry.latencyMs === "number") agg.lastTurnLatencyMs = entry.latencyMs;
+      if (entry.type === "turn") {
+        if (typeof entry.inputTokens === "number") agg.inputTokens += entry.inputTokens;
+        if (typeof entry.outputTokens === "number") agg.outputTokens += entry.outputTokens;
+        if (typeof entry.totalTokens === "number") agg.totalTokens += entry.totalTokens;
+        if (typeof entry.latencyMs === "number") agg.lastTurnLatencyMs = entry.latencyMs;
+        if (entry.status === "error") agg.errors++;
+      } else if (entry.type === "tool_call") {
+        agg.toolCalls++;
+        if (entry.status === "error") agg.errors++;
+      } else if (entry.type === "error") {
+        agg.errors++;
+      }
     } catch {
       // Skip corrupt lines silently
+    }
+  }
+
+  for (const raw of contents) {
+    for (const line of raw.split("\n")) {
+      processLine(line);
     }
   }
 
@@ -158,7 +184,7 @@ export async function buildStatusSummary(
     toolCalls,
     errors,
     lastTurn,
-    metricsPath: join(homedir(), ".harness", "metrics") + "/",
+    metricsPath: resolveMetricsDir() + "/",
   };
 }
 

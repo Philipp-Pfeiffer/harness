@@ -27,18 +27,24 @@ Wenn der User `/status` in der Harness-TUI eingibt:
 | Tool calls | JSONL-Metrics → Context | `0` |
 | Errors today | JSONL-Metrics → Context | `0` |
 | Last turn | JSONL-Metrics (`latencyMs`) | `n/a` |
-| Metrics | `~/.harness/metrics/` Pfad | — |
+| Metrics | `~/.harness/metrics/` Pfad (Override via `HARNESS_METRICS_DIR`) | — |
 
 ## Metrics-Reader
 
 `src/core/statusSummary.ts` enthält `readTodayMetrics()`:
 
-- Liest `~/.harness/metrics/YYYY-MM-DD.jsonl`
-- Summiert `inputTokens`, `outputTokens`, `totalTokens`, `toolCalls`, `errors`
-- Letzte `latencyMs` wird als `lastTurnLatencyMs` gespeichert
+- Liest die heutigen JSONL-Dateien aus dem Metrics-Verzeichnis:
+  - `turns-YYYY-MM-DD.jsonl` → Turn-Events (Tokens, Latenz, Status)
+  - `tools-YYYY-MM-DD.jsonl` → Tool-Call-Events
+  - `system-YYYY-MM-DD.jsonl` → Error-Events
+- Summiert `inputTokens`, `outputTokens`, `totalTokens` aus Turn-Events
+- Zählt Tool-Call-Events als `toolCalls`
+- Zählt Fehler aus `error`-Events, fehlgeschlagenen Tool-Calls und fehlgeschlagenen Turns als `errors`
+- Letzte Turn-Latenz wird als `lastTurnLatencyMs` gespeichert
+- Verzeichnis-Override via `HARNESS_METRICS_DIR` Umgebungsvariable
 - **Robust:** fehlende Dateien → `null`, kaputte JSON-Zeilen → übersprungen
 
-Wenn Metrics noch nicht existieren (aktuell der Fall), degradiert die Ausgabe sauber zu `n/a` bzw. zu Session-Werten.
+Wenn Metrics noch nicht existieren, degradiert die Ausgabe sauber zu `n/a` bzw. zu Session-Werten.
 
 ## Beispielausgabe
 

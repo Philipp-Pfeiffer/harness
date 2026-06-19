@@ -15,16 +15,17 @@ const BASE_DIR = resolve(tmpdir(), `harness-metrics-test-${Date.now()}`);
 
 async function readJsonl(dir: string, prefix: string): Promise<Record<string, unknown>[]> {
   const entries: Record<string, unknown>[] = [];
-  // Find the file for today's date in UTC
-  const dateKey = new Date().toISOString().slice(0, 10);
-  const filepath = join(dir, `${prefix}-${dateKey}.jsonl`);
+  const { readdir } = await import("node:fs/promises");
   try {
-    const raw = await readFile(filepath, "utf-8");
-    for (const line of raw.trim().split("\n")) {
-      if (line) entries.push(JSON.parse(line));
+    const files = (await readdir(dir)).filter((f) => f.startsWith(`${prefix}-`) && f.endsWith(".jsonl"));
+    for (const file of files) {
+      const raw = await readFile(join(dir, file), "utf-8");
+      for (const line of raw.trim().split("\n")) {
+        if (line) entries.push(JSON.parse(line));
+      }
     }
   } catch {
-    // file doesn't exist yet
+    // directory or files don't exist yet
   }
   return entries;
 }

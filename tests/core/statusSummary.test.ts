@@ -29,27 +29,42 @@ const baseContext: StatusContext = {
   errors: 0,
 };
 
+function dateStr(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
 describe("readTodayMetrics", () => {
   it("returns null when metrics directory does not exist", async () => {
     const result = await readTodayMetrics(join(TEST_DIR, "nonexistent"));
     expect(result).toBeNull();
   });
 
-  it("returns null when today's file does not exist", async () => {
+  it("returns null when today's metric files do not exist", async () => {
     const result = await readTodayMetrics(TEST_DIR);
     expect(result).toBeNull();
   });
 
-  it("reads and sums metrics from today's JSONL file", async () => {
+  it("reads and sums metrics from today's JSONL files", async () => {
     const date = new Date("2026-06-18T12:00:00Z");
-    const dateStr = date.toISOString().slice(0, 10);
-    const filePath = join(TEST_DIR, `${dateStr}.jsonl`);
+    const d = dateStr(date);
+
     await writeFile(
-      filePath,
+      join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ inputTokens: 1000, outputTokens: 500, totalTokens: 1500, toolCalls: 3, errors: 0, latencyMs: 4200 }),
-        JSON.stringify({ inputTokens: 2000, outputTokens: 800, totalTokens: 2800, toolCalls: 5, errors: 1, latencyMs: 8400 }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 1000, outputTokens: 500, totalTokens: 1500, latencyMs: 4200, toolCallCount: 3, status: "ok" }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:01:00.000Z", inputTokens: 2000, outputTokens: 800, totalTokens: 2800, latencyMs: 8400, toolCallCount: 5, status: "ok" }),
       ].join("\n") + "\n",
+    );
+    await writeFile(
+      join(TEST_DIR, `tools-${d}.jsonl`),
+      [
+        JSON.stringify({ type: "tool_call", ts: "2026-06-18T12:00:01.000Z", tool: "read_file", latencyMs: 120, status: "ok" }),
+        JSON.stringify({ type: "tool_call", ts: "2026-06-18T12:00:02.000Z", tool: "edit", latencyMs: 80, status: "error", error: "not found" }),
+      ].join("\n") + "\n",
+    );
+    await writeFile(
+      join(TEST_DIR, `system-${d}.jsonl`),
+      JSON.stringify({ type: "error", ts: "2026-06-18T12:02:00.000Z", scope: "agent_run", message: "boom" }) + "\n",
     );
 
     const result = await readTodayMetrics(TEST_DIR, date);
@@ -57,22 +72,22 @@ describe("readTodayMetrics", () => {
     expect(result!.inputTokens).toBe(3000);
     expect(result!.outputTokens).toBe(1300);
     expect(result!.totalTokens).toBe(4300);
-    expect(result!.toolCalls).toBe(8);
-    expect(result!.errors).toBe(1);
+    expect(result!.toolCalls).toBe(2);
+    expect(result!.errors).toBe(2); // 1 tool_call error + 1 system error
     expect(result!.lastTurnLatencyMs).toBe(8400);
   });
 
   it("skips corrupt JSON lines without crashing", async () => {
     const date = new Date("2026-06-18T12:00:00Z");
-    const dateStr = date.toISOString().slice(0, 10);
-    const filePath = join(TEST_DIR, `${dateStr}.jsonl`);
+    const d = dateStr(date);
+
     await writeFile(
-      filePath,
+      join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ inputTokens: 100, outputTokens: 50, totalTokens: 150 }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, outputTokens: 50, totalTokens: 150, latencyMs: 100, toolCallCount: 0, status: "ok" }),
         "{ broken json",
         "",
-        JSON.stringify({ inputTokens: 200, outputTokens: 100, totalTokens: 300 }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:01.000Z", inputTokens: 200, outputTokens: 100, totalTokens: 300, latencyMs: 200, toolCallCount: 0, status: "ok" }),
       ].join("\n") + "\n",
     );
 
@@ -85,9 +100,9 @@ describe("readTodayMetrics", () => {
 
   it("handles empty file gracefully", async () => {
     const date = new Date("2026-06-18T12:00:00Z");
-    const dateStr = date.toISOString().slice(0, 10);
-    const filePath = join(TEST_DIR, `${dateStr}.jsonl`);
-    await writeFile(filePath, "\n\n\n");
+    const d = dateStr(date);
+
+    await writeFile(join(TEST_DIR, `turns-${d}.jsonl`), "\n\n\n");
 
     const result = await readTodayMetrics(TEST_DIR, date);
     expect(result).not.toBeNull();
@@ -98,13 +113,19 @@ describe("readTodayMetrics", () => {
 
   it("handles partial entries (missing fields)", async () => {
     const date = new Date("2026-06-18T12:00:00Z");
-    const dateStr = date.toISOString().slice(0, 10);
-    const filePath = join(TEST_DIR, `${dateStr}.jsonl`);
+    const d = dateStr(date);
+
     await writeFile(
-      filePath,
+      join(TEST_DIR, `turns-${d}.jsonl`),
       [
-        JSON.stringify({ inputTokens: 100 }),
-        JSON.stringify({ toolCalls: 2 }),
+        JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, latencyMs: 50, toolCallCount: 0, status: "ok" }),
+      ].join("\n") + "\n",
+    );
+    await writeFile(
+      join(TEST_DIR, `tools-${d}.jsonl`),
+      [
+        JSON.stringify({ type: "tool_call", ts: "2026-06-18T12:00:01.000Z", tool: "x", latencyMs: 10, status: "ok" }),
+        JSON.stringify({ type: "tool_call", ts: "2026-06-18T12:00:02.000Z", tool: "y", latencyMs: 20, status: "ok" }),
       ].join("\n") + "\n",
     );
 
@@ -114,6 +135,7 @@ describe("readTodayMetrics", () => {
     expect(result!.toolCalls).toBe(2);
     expect(result!.outputTokens).toBe(0);
   });
+
 });
 
 describe("buildStatusSummary", () => {
