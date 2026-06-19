@@ -54,7 +54,7 @@ describe("CLI App", () => {
     mockRun.mockImplementation(async (_messages, options) => {
       options?.onEvent?.({ type: "token", text: "Hello" });
       options?.onEvent?.({ type: "token", text: " world!" });
-      return { aborted: false, turns: 1, finalMessage: "Hello world!", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+      return { aborted: false, turns: 1, finalMessage: "Hello world!", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -77,7 +77,7 @@ describe("CLI App", () => {
       await delay(50);
       options?.onEvent?.({ type: "tool_call_done", name: "echo", result: "hello world" });
       await delay(500); // keep turn active so Ctrl+O can toggle
-      return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+      return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -227,7 +227,7 @@ describe("CLI App", () => {
     mockRun.mockImplementation(async (_messages, options) => {
       callCount++;
       options?.onEvent?.({ type: "token", text: `Response ${callCount}` });
-      return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+      return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
     const { stdin, frames } = render(<App />);
@@ -262,7 +262,7 @@ describe("CLI App", () => {
       options?.onEvent?.({ type: "tool_call_start", name: "slow", args: {} });
       // Wait for abort
       await runPromise;
-      return { aborted: true, turns: 0, finalMessage: "", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+      return { aborted: true, turns: 0, finalMessage: "", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
     const { lastFrame, stdin, frames } = render(<App />);
@@ -328,7 +328,7 @@ describe("CLI App", () => {
       options?.onEvent?.({ type: "tool_call_done", name: "exec", result: "Sat May 16" });
       await delay(20);
       options?.onEvent?.({ type: "token", text: "After tools." });
-      return { aborted: false, turns: 1, finalMessage: "Before tools. After tools.", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+      return { aborted: false, turns: 1, finalMessage: "Before tools. After tools.", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
     const { lastFrame, stdin } = render(<App />);
@@ -582,7 +582,7 @@ describe("CLI App", () => {
         await delay(50);
         options?.onEvent?.({ type: "token", text: "working" });
         await runPromise;
-        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin, frames } = render(<App />);
@@ -613,7 +613,7 @@ describe("CLI App", () => {
       expect(frame).toContain("steer two");
 
       // End the turn
-      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } });
+      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } });
       await delay(200);
 
       // Both steers should have been visible during the active turn
@@ -636,7 +636,7 @@ describe("CLI App", () => {
         await delay(50);
         options?.onEvent?.({ type: "token", text: "working" });
         await runPromise;
-        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin, frames } = render(<App />);
@@ -657,7 +657,7 @@ describe("CLI App", () => {
       expect(frame).toContain("stopp");
 
       // Resolve the run — but it should have been aborted
-      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } });
+      resolveRun!({ aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } });
       await delay(200);
 
       const allFrames = frames.join("\n");
@@ -702,7 +702,7 @@ describe("CLI App", () => {
     it("shows token counter after first turn", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "token", text: "Hello" });
-        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -719,7 +719,7 @@ describe("CLI App", () => {
     it("formats tokens with k-suffix above 999", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "usage", inputTokens: 17654, outputTokens: 1000, totalTokens: 18654 });
-        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 17654, outputTokens: 1000, totalTokens: 18654, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 17654, outputTokens: 1000, totalTokens: 18654, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -736,7 +736,7 @@ describe("CLI App", () => {
     it("shows yellow counter above 80% context window", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "usage", inputTokens: 85000, outputTokens: 1000, totalTokens: 86000 });
-        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 85000, outputTokens: 1000, totalTokens: 86000, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 85000, outputTokens: 1000, totalTokens: 86000, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -753,7 +753,7 @@ describe("CLI App", () => {
     it("shows red counter above 95% context window", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "usage", inputTokens: 96000, outputTokens: 1000, totalTokens: 97000 });
-        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 96000, outputTokens: 1000, totalTokens: 97000, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 96000, outputTokens: 1000, totalTokens: 97000, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -772,7 +772,7 @@ describe("CLI App", () => {
       mockRun.mockImplementation(async (_messages, options) => {
         callCount++;
         options?.onEvent?.({ type: "token", text: `Response ${callCount}` });
-        return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -797,7 +797,7 @@ describe("CLI App", () => {
     it("resets token counter on /clear", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "token", text: "Hello" });
-        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
@@ -826,7 +826,7 @@ describe("CLI App", () => {
     it("keeps token counter across /model switch", async () => {
       mockRun.mockImplementation(async (_messages, options) => {
         options?.onEvent?.({ type: "token", text: "Hello" });
-        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } };
+        return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
       const { lastFrame, stdin } = render(<App />);
