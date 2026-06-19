@@ -55,6 +55,26 @@ describe("resolveHarnessPaths", () => {
     expect(paths.state).toBe("/xdg/state/harness");
   });
 
+  it("defaults do not resolve to cwd or repo", () => {
+    delete process.env.HARNESS_HOME;
+    delete process.env.HARNESS_STATE;
+    delete process.env.XDG_STATE_HOME;
+
+    const paths = resolveHarnessPaths();
+    const cwd = process.cwd();
+
+    // HOME must not be under cwd
+    expect(paths.home).not.toBe(cwd);
+    expect(paths.home.startsWith(cwd + "/")).toBe(false);
+    // STATE must not be under cwd
+    expect(paths.state).not.toBe(cwd);
+    expect(paths.state.startsWith(cwd + "/")).toBe(false);
+    // QMD index must not be in <cwd>/.qmd
+    expect(paths.index).not.toBe(join(cwd, ".qmd"));
+    // Memory must not be <cwd>/memory
+    expect(paths.memory).not.toBe(join(cwd, "memory"));
+  });
+
   it("opts.home takes precedence over env", () => {
     process.env.HARNESS_HOME = "/env/home";
     delete process.env.HARNESS_STATE;

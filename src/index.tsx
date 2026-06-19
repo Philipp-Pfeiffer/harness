@@ -22,9 +22,6 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
-const projectRoot = process.cwd();
-process.env.HARNESS_PROJECT_ROOT = projectRoot;
-
 // Resolve all harness paths from a single source of truth.
 const paths: HarnessPaths = resolveHarnessPaths();
 
@@ -33,9 +30,6 @@ await ensureDirs(paths);
 await ensureInbox(paths.inbox);
 console.log(`[harness] home: ${paths.home}`);
 console.log(`[harness] state: ${paths.state}`);
-
-// Workspace stays cwd-based (the "workspace" concept ≠ HARNESS_HOME).
-await mkdir(resolve(projectRoot, "workspace"), { recursive: true });
 
 const dbPath = resolve(paths.index, "index.sqlite");
 await mkdir(paths.index, { recursive: true });
@@ -47,8 +41,7 @@ const memoryService = new MemoryService({
 });
 await memoryService.init();
 
-process.chdir(resolve(projectRoot, "workspace"));
-
+// Workspace = cwd (where the user started harness). No subdir creation.
 const { default: App } = await import("./cli/App.js");
 render(<App memoryService={memoryService} paths={paths} />);
 

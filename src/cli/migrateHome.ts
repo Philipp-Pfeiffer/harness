@@ -1,5 +1,5 @@
-import { rename, stat, access } from "node:fs/promises";
-import { resolve, basename } from "node:path";
+import { rename, stat, access, mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { resolveHarnessPaths, ensureDirs, type HarnessPaths } from "../config/paths.js";
 
 interface PlannedMove {
