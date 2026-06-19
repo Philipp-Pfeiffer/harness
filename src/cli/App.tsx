@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp, useStdout, Static } from "ink";
+import { Box, Text, useInput, useApp, useStdout, useStdin, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -243,6 +243,7 @@ function HelpCard() {
       ))}
       <Text bold>Keybinds</Text>
       <Text>  Ctrl+O  – Toggle last tool card</Text>
+      <Text>  Ctrl+E  – Selection mode (scroll & copy)</Text>
       <Text>  Ctrl+L  – Clear screen</Text>
       <Text>  Ctrl+C  – Abort stream / double-tap to exit</Text>
     </Box>
@@ -341,10 +342,12 @@ function PromptInput({
   onSubmit,
   history,
   commands,
+  paused = false,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
   commands?: SlashCommandInfo[];
+  paused?: boolean;
 }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
@@ -362,12 +365,13 @@ function PromptInput({
   }, [history]);
 
   useEffect(() => {
+    if (paused) return;
     const id = setInterval(() => {
       blinkRef.current = !blinkRef.current;
       setRenderTick((t) => t + 1);
     }, 530);
     return () => clearInterval(id);
-  }, []);
+  }, [paused]);
 
   function hasSelection(): boolean {
     return selStartRef.current !== -1 && selEndRef.current !== -1 && selStartRef.current !== selEndRef.current;
@@ -409,7 +413,7 @@ function PromptInput({
   }
 
   useInput((inputStr, key) => {
-    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o")) {
+    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o" || inputStr === "e")) {
       return;
     }
 
@@ -679,7 +683,9 @@ export default function App({
 
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const { setRawMode } = useStdin();
   const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });
+  const [selectionMode, setSelectionMode] = useState(false);
   const [pastTurns, setPastTurns] = useState<CompletedTurn[]>([]);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
@@ -703,6 +709,18 @@ export default function App({
       stdout.off("resize", handleResize);
     };
   }, [stdout]);
+
+  // Selection mode: disable raw mode so the terminal handles mouse selection & scroll
+  useEffect(() => {
+    if (!selectionMode) return;
+    setRawMode(false);
+    const exitHandler = () => setSelectionMode(false);
+    process.stdin.once("data", exitHandler);
+    return () => {
+      process.stdin.removeListener("data", exitHandler);
+      setRawMode(true);
+    };
+  }, [selectionMode, setRawMode]);
 
   const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
@@ -1071,6 +1089,11 @@ export default function App({
       return;
     }
 
+    if (key.ctrl && inputStr === "e" && !selectionMode) {
+      setSelectionMode(true);
+      return;
+    }
+
     if (key.ctrl && inputStr === "c") {
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
@@ -1130,7 +1153,14 @@ export default function App({
           </Box>
         )}
       </Box>
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />
+      {selectionMode && (
+        <Box marginY={1}>
+          <Text bold color="yellow">
+            ⬛ Selection mode — scroll & select freely, press Enter to return
+          </Text>
+        </Box>
+      )}
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
       <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
     </Box>
   );

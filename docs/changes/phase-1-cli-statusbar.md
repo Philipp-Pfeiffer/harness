@@ -56,5 +56,5 @@ Die CLI von einem Header-oben-Layout auf ein dreizoniges Bottom-Layout umstellen
 ## Out of Scope
 
 - Steering-Logik / Mailbox / Queue
-- Mouse-Selection
+- Mouse-Selection (→ nachträglich umgesetzt: `Ctrl+E` Selection Mode, siehe `fix-cli-selection-mode.md`)
 - Themes / Farbschemata
