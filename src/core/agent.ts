@@ -59,6 +59,8 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 export type RunResult =
@@ -77,7 +79,7 @@ export type AgentEvent =
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
   | { type: "turn_end"; turn: number }
-  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number };
+  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number; cacheRead: number; cacheWrite: number; callCacheRead: number; callCacheWrite: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -248,13 +250,15 @@ export function createAgent(config: AgentConfig): Agent {
       let totalInput = 0;
       let totalOutput = 0;
       let totalTokens = 0;
+      let totalCacheRead = 0;
+      let totalCacheWrite = 0;
 
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
           pushAbortAnnotation(context.messages, options.abortCommand);
-          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
         }
 
         drainMailbox(mailbox, context.messages);
@@ -292,7 +296,7 @@ export function createAgent(config: AgentConfig): Agent {
             }
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
           }
           throw err;
         }
@@ -300,7 +304,9 @@ export function createAgent(config: AgentConfig): Agent {
         totalInput += response.usage.input;
         totalOutput += response.usage.output;
         totalTokens += response.usage.totalTokens;
-        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens });
+        totalCacheRead += response.usage.cacheRead;
+        totalCacheWrite += response.usage.cacheWrite;
+        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, callCacheRead: response.usage.cacheRead, callCacheWrite: response.usage.cacheWrite });
 
         if (response.stopReason === "error") {
           throw new Error(response.errorMessage ?? "Unbekannter Fehler");
@@ -320,7 +326,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
           }
 
           // Build buckets: independent calls get their own bucket;
@@ -434,7 +440,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
           }
 
           continue;
@@ -448,7 +454,7 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
         }
 
         if (response.stopReason === "aborted") {
@@ -456,14 +462,14 @@ export function createAgent(config: AgentConfig): Agent {
             aborted: false,
             turns: i + 1,
             finalMessage: "Anfrage wurde abgebrochen.",
-            usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens },
+            usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite },
             error: { type: "provider_aborted", message: "Provider aborted the generation." },
           };
         }
       }
 
       discardMailbox(mailbox);
-      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite } };
     },
   };
 }
