@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 
 export interface CoreMemorySections {
   wer: string;
@@ -12,19 +11,17 @@ export interface CoreMemorySections {
  * Reads core.md and returns its raw content.
  * Returns undefined if the file does not exist, logging a warning.
  *
- * @param corePath  Absolute path to core.md. When omitted, falls back to
- *                  HARNESS_PROJECT_ROOT or cwd (legacy, will be removed).
+ * @param corePath  Absolute path to core.md (from HarnessPaths.core).
+ *                  Required — no cwd/projectRoot fallback.
  */
-export async function loadCoreMemoryRaw(corePath?: string): Promise<string | undefined> {
-  const path = corePath
-    ?? resolve(process.env.HARNESS_PROJECT_ROOT ?? process.cwd(), "core.md");
+export async function loadCoreMemoryRaw(corePath: string): Promise<string | undefined> {
   try {
-    const content = await readFile(path, "utf-8");
+    const content = await readFile(corePath, "utf-8");
     return content.trim();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("ENOENT")) {
-      console.warn(`[coreMemory] core.md not found at ${path}. Using empty core memory block.`);
+      console.warn(`[coreMemory] core.md not found at ${corePath}. Using empty core memory block.`);
       return undefined;
     }
     throw err;

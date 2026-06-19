@@ -31,7 +31,7 @@ export async function loadConfig(options?: {
   error?: string;
   source?: string;
 }> {
-  const cwd = options?.cwd ?? process.env.HARNESS_PROJECT_ROOT ?? process.cwd();
+  const cwd = options?.cwd ?? process.cwd();
   const xdgConfigHome = options?.xdgConfigHome ?? process.env.XDG_CONFIG_HOME;
   const homeDir = options?.homeDir ?? os.homedir();
 
