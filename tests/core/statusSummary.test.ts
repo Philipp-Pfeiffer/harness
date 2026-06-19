@@ -138,6 +138,23 @@ describe("readTodayMetrics", () => {
     expect(result!.outputTokens).toBe(0);
   });
 
+  it("does not double-count agent-run errors (only turn error, no error event)", async () => {
+    const date = new Date("2026-06-18T12:00:00Z");
+    const d = dateStr(date);
+
+    // Simulate a failed agent run: only a turn event with status "error"
+    // (no separate "error" type event should be written for the same failure)
+    await writeFile(
+      join(TEST_DIR, `turns-${d}.jsonl`),
+      JSON.stringify({ type: "turn", ts: "2026-06-18T12:00:00.000Z", inputTokens: 100, outputTokens: 0, totalTokens: 100, cacheRead: 0, cacheWrite: 0, latencyMs: 500, toolCallCount: 0, status: "error" }) + "\n",
+    );
+
+    const result = await readTodayMetrics(TEST_DIR, date);
+    expect(result).not.toBeNull();
+    expect(result!.errors).toBe(1); // NOT 2 — no double-counting
+    expect(result!.inputTokens).toBe(100);
+  });
+
 });
 
 describe("buildStatusSummary", () => {

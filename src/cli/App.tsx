@@ -968,8 +968,6 @@ export default function App({
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          metricsRecorder.recordError({ scope: "agent_run", message: errMsg });
           metricsRecorder.recordTurn({
             model: activeModel.name,
             latencyMs: Date.now() - runStartMs,
