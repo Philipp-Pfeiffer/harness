@@ -149,7 +149,8 @@ export async function readTodayMetrics(
 
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  return `${(n / 1000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 function formatLatency(ms: number | null): string {
