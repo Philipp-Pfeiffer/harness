@@ -17,8 +17,8 @@ function createFakeBackend(hits: MemoryHit[] = [], queryImpl?: (q: string, k?: n
 }
 
 const sampleHits: MemoryHit[] = [
-  { source: "/proj/memory/arch.md", score: 0.92, content: "Architecture: MVC pattern with Ink" },
-  { source: "/proj/memory/tools.md", score: 0.81, content: "Tool registry pattern" },
+  { source: "/proj/memory/arch.md", title: "Architecture", score: 0.92, content: "Architecture: MVC pattern with Ink" },
+  { source: "/proj/memory/tools.md", title: "Tools", score: 0.81, content: "Tool registry pattern" },
 ];
 
 describe("search_memory tool", () => {
@@ -55,7 +55,7 @@ describe("search_memory tool", () => {
       const result = await tool.execute({ query: "phase 2 memory" });
 
       expect(backend.query).toHaveBeenCalledOnce();
-      expect(backend.query).toHaveBeenCalledWith("phase 2 memory", 10);
+      expect(backend.query).toHaveBeenCalledWith("phase 2 memory", 8);
       expect(result).toContain("arch.md");
       expect(result).toContain("tools.md");
     });
@@ -67,7 +67,7 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       await tool.execute({ query: "  ambient hook  " });
 
-      expect(backend.query).toHaveBeenCalledWith("ambient hook", 10);
+      expect(backend.query).toHaveBeenCalledWith("ambient hook", 8);
     });
   });
 
@@ -77,7 +77,7 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "nonexistent topic" });
 
-      expect(result).toContain("0 results");
+      expect(result).toContain("0 strong results");
       expect(result).not.toContain("error");
     });
   });
@@ -117,6 +117,84 @@ describe("search_memory tool", () => {
       await tool.execute({ query: "architecture" });
 
       expect(backend.getAmbientHints).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("H. Snippet format", () => {
+    it("returns title, path, score, and snippet — never full file bodies", async () => {
+      const backend = createFakeBackend([
+        { source: "/proj/memory/daily.md", title: "Daily Tape", score: 0.92, content: "Line one.\nLine two about the query term.\nLine three.\nLine four.\nLine five." },
+      ]);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "query term" });
+
+      expect(result).toContain("Title: Daily Tape");
+      expect(result).toContain("Path: /proj/memory/daily.md");
+      expect(result).toContain("Score:");
+      expect(result).toContain("Snippet:");
+      expect(result).not.toContain("Line five");
+    });
+
+    it("advises lazy loading via read_file(path)", async () => {
+      const backend = createFakeBackend(sampleHits);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "architecture" });
+
+      expect(result).toContain("read_file(path)");
+    });
+  });
+
+  describe("I. Relevance threshold", () => {
+    it("filters hits below the strong threshold", async () => {
+      const backend = createFakeBackend([
+        { source: "/proj/memory/strong.md", title: "Strong", score: 0.92, content: "Very relevant content" },
+        { source: "/proj/memory/weak.md", title: "Weak", score: 0.009, content: "Barely relevant content" },
+      ]);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "relevant" });
+
+      expect(result).toContain("strong.md");
+      expect(result).not.toContain("weak.md");
+    });
+
+    it("returns 'no strong results' when all hits are below threshold", async () => {
+      const backend = createFakeBackend([
+        { source: "/proj/memory/noise.md", title: "Noise", score: 0.009, content: "Unrelated content" },
+      ]);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "anything" });
+
+      expect(result).toContain("0 strong results");
+      expect(result).toContain("No strongly relevant notes found");
+    });
+  });
+
+  describe("J. Output budget", () => {
+    it("keeps a previously full-file query under 6k characters", async () => {
+      const hugeBody = "Daily entry line.\n".repeat(2000);
+      const backend = createFakeBackend([
+        { source: "/proj/memory/daily.md", title: "Daily Tape", score: 0.92, content: hugeBody },
+      ]);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "daily entry" });
+
+      expect(result.length).toBeLessThan(6000);
+      expect(result).toContain("Snippet:");
+      expect(result).not.toContain(hugeBody);
+    });
+
+    it("caps each snippet to roughly 500 characters", async () => {
+      const longParagraph = "word ".repeat(300);
+      const backend = createFakeBackend([
+        { source: "/proj/memory/long.md", title: "Long Note", score: 0.92, content: longParagraph },
+      ]);
+      const tool = createSearchMemoryTool(backend);
+      const result = await tool.execute({ query: "word" });
+
+      const snippetMatch = result.match(/Snippet:\n([\s\S]*?)(?=\n\n|\n\[|$)/);
+      expect(snippetMatch).toBeTruthy();
+      const snippet = snippetMatch![1]!;
+      expect(snippet.length).toBeLessThanOrEqual(520);
     });
   });
 });

@@ -4,6 +4,8 @@
 export interface MemoryHit {
   /** Source file path or URI */
   source: string;
+  /** Document title (filename fallback) */
+  title: string;
   /** Relevance score (0.0–1.0, backend-specific) */
   score: number;
   /** Chunk text content */

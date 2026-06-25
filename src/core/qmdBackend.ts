@@ -11,6 +11,7 @@ export interface QmdBackendOptions {
 function searchResultToHit(r: SearchResult): MemoryHit {
   return {
     source: r.filepath,
+    title: r.title || r.filepath,
     score: r.score,
     content: (r.body ?? r.title ?? "").trim(),
     line: r.chunkPos,

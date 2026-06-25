@@ -83,6 +83,7 @@ interface MemoryBackend {
 
 interface MemoryHit {
   source: string;   // file path
+  title: string;    // document title
   score: number;    // 0.0–1.0
   content: string;  // chunk text
   line?: number;    // optional
