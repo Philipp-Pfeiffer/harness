@@ -1,7 +1,15 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
+import { mkdtempSync, rmdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import App from "../../src/cli/App.js";
 import { createAgent } from "../../src/core/agent.js";
+import { createSession, recordTurn } from "../../src/core/session.js";
+import type { HarnessPaths } from "../../src/config/paths.js";
+import type { SessionTurn } from "../../src/core/session.js";
+import type { Message } from "@mariozechner/pi-ai";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -28,6 +36,26 @@ vi.mock("../../src/core/agent.js", () => ({
 
 const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {}) as any);
 
+let testBaseDir: string | undefined;
+
+function testPaths(): HarnessPaths {
+  testBaseDir = mkdtempSync(join(tmpdir(), "harness-app-test-"));
+  return {
+    home: join(testBaseDir, "home"),
+    state: join(testBaseDir, "state"),
+    core: join(testBaseDir, "home", "core.md"),
+    agents: join(testBaseDir, "home", "AGENTS.md"),
+    config: join(testBaseDir, "home", "config.json"),
+    memory: join(testBaseDir, "home", "memory"),
+    inbox: join(testBaseDir, "home", "memory", "_inbox.md"),
+    sources: join(testBaseDir, "home", "sources"),
+    skills: join(testBaseDir, "home", "skills"),
+    sessions: join(testBaseDir, "state", "sessions"),
+    metrics: join(testBaseDir, "state", "metrics"),
+    index: join(testBaseDir, "state", "index"),
+  };
+}
+
 beforeEach(() => {
   exitSpy.mockClear();
   vi.spyOn(process, "cwd").mockReturnValue("/tmp");
@@ -36,18 +64,72 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   mockRun.mockReset();
+  if (testBaseDir) {
+    try {
+      rmdirSync(testBaseDir, { recursive: true });
+    } catch {
+      // ignore cleanup failures
+    }
+    testBaseDir = undefined;
+  }
 });
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function readJsonl(path: string): Promise<SessionTurn[]> {
+  try {
+    const raw = await readFile(path, "utf-8");
+    return raw
+      .trim()
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as SessionTurn);
+  } catch {
+    return [];
+  }
+}
+
+function baseTurn(overrides: Partial<SessionTurn> = {}): SessionTurn {
+  return {
+    id: "turn-1",
+    role: "assistant",
+    content: "Hello",
+    userContent: "Hi",
+    tokens: {
+      input: 10,
+      output: 5,
+      total: 15,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    timing: {
+      startedAt: "2026-06-25T10:00:00.000Z",
+      latencyMs: 1234,
+    },
+    model: "test-model",
+    timestamp: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 describe("CLI App", () => {
   it("renders header with model and status", () => {
-    const { lastFrame } = render(<App />);
+    const { lastFrame } = render(<App paths={testPaths()} />);
     const frame = lastFrame();
     expect(frame).toContain("harness");
     expect(frame).toContain("test-model");
     expect(frame).toContain("ready");
     expect(frame).toContain("❯");
+  });
+
+  it("creates a session on startup", async () => {
+    render(<App paths={testPaths()} />);
+    await delay(100);
+    expect(testBaseDir).toBeDefined();
+    const indexRaw = await readFile(join(testBaseDir!, "state", "sessions", "sessions.json"), "utf-8");
+    const index = JSON.parse(indexRaw) as unknown[];
+    expect(index).toHaveLength(1);
+    expect(index[0]).toMatchObject({ status: "active", title: "CLI Session" });
   });
 
   it("streams agent tokens after user input", async () => {
@@ -57,7 +139,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Hello world!", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("hi");
     await delay(50);
@@ -80,7 +162,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run echo");
     await delay(50);
@@ -113,7 +195,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run 3 tools");
     await delay(50);
@@ -139,7 +221,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run read");
     await delay(50);
@@ -166,7 +248,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run exec");
     await delay(50);
@@ -180,7 +262,7 @@ describe("CLI App", () => {
   });
 
   it("/help renders help card", async () => {
-    const { lastFrame, stdin, frames } = render(<App />);
+    const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("/help");
     await delay(50);
@@ -197,7 +279,7 @@ describe("CLI App", () => {
   });
 
   it("/quit exits cleanly", async () => {
-    const { stdin } = render(<App />);
+    const { stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/quit");
     await delay(50);
@@ -211,7 +293,7 @@ describe("CLI App", () => {
   });
 
   it("unknown slash command shows error", async () => {
-    const { lastFrame, stdin, frames } = render(<App />);
+    const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("/foo");
     await delay(50);
@@ -230,7 +312,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
-    const { stdin, frames } = render(<App />);
+    const { stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("first");
     await delay(50);
@@ -265,7 +347,7 @@ describe("CLI App", () => {
       return { aborted: true, turns: 0, finalMessage: "", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
-    const { lastFrame, stdin, frames } = render(<App />);
+    const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("run slow");
     await delay(50);
@@ -304,7 +386,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Done" };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run read");
     await delay(50);
@@ -331,7 +413,7 @@ describe("CLI App", () => {
       return { aborted: false, turns: 1, finalMessage: "Before tools. After tools.", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
     });
 
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("run date");
     await delay(50);
@@ -352,7 +434,7 @@ describe("CLI App", () => {
 
   describe("PromptInput editing", () => {
     it("deletes a word with Ctrl+Backspace (kitty protocol)", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello world test");
       await delay(50);
@@ -368,7 +450,7 @@ describe("CLI App", () => {
     });
 
     it("deletes a word with Alt+Backspace", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello world test");
       await delay(50);
@@ -383,7 +465,7 @@ describe("CLI App", () => {
     });
 
     it("selects text with Shift+Left/Right arrows", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello");
       await delay(50);
@@ -400,7 +482,7 @@ describe("CLI App", () => {
     });
 
     it("replaces selected text on typing", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello world");
       await delay(50);
@@ -427,7 +509,7 @@ describe("CLI App", () => {
     });
 
     it("deletes selected text with Backspace", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello world");
       await delay(50);
@@ -454,7 +536,7 @@ describe("CLI App", () => {
     });
 
     it("does not clear text on Down arrow when no history exists", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("keep me");
       await delay(50);
@@ -468,7 +550,7 @@ describe("CLI App", () => {
     });
 
     it("deletes a word with Ctrl+H (terminal sends BS for Ctrl+Backspace)", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hello world test");
       await delay(50);
@@ -485,7 +567,7 @@ describe("CLI App", () => {
 
   describe("Persistent input and status bar", () => {
     it("shows status bar at bottom with model, status and cwd", () => {
-      const { lastFrame } = render(<App />);
+      const { lastFrame } = render(<App paths={testPaths()} />);
       const frame = lastFrame();
       // Status bar should contain model, harness label, ready status, and cwd
       expect(frame).toContain("harness");
@@ -504,7 +586,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "streaming" };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("test");
       await delay(50);
@@ -525,7 +607,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "first" };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("run");
       await delay(50);
@@ -549,7 +631,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "first" };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("run");
       await delay(50);
@@ -585,7 +667,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin, frames } = render(<App />);
+      const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
       stdin.write("run");
       await delay(50);
@@ -639,7 +721,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "done", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin, frames } = render(<App />);
+      const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
       stdin.write("run");
       await delay(50);
@@ -675,7 +757,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "stream" };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("run");
       await delay(50);
@@ -705,7 +787,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hi");
       await delay(50);
@@ -722,7 +804,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 17654, outputTokens: 1000, totalTokens: 18654, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("test");
       await delay(50);
@@ -739,7 +821,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 85000, outputTokens: 1000, totalTokens: 86000, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("test");
       await delay(50);
@@ -756,7 +838,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Done", usage: { inputTokens: 96000, outputTokens: 1000, totalTokens: 97000, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("test");
       await delay(50);
@@ -775,7 +857,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: `Response ${callCount}`, usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("first");
       await delay(50);
@@ -800,7 +882,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       stdin.write("hi");
       await delay(50);
@@ -829,7 +911,7 @@ describe("CLI App", () => {
         return { aborted: false, turns: 1, finalMessage: "Hello", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 } };
       });
 
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       // Wait for config fallback to load
       await delay(100);
@@ -870,7 +952,7 @@ describe("CLI App", () => {
 
   describe("/model command", () => {
     it("opens model picker and shows fallback models", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       // Wait for config fallback to load
       await delay(100);
@@ -889,7 +971,7 @@ describe("CLI App", () => {
     });
 
     it("switches model and updates header", async () => {
-      const { lastFrame, stdin } = render(<App />);
+      const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
       // Wait for config fallback to load
       await delay(100);
@@ -919,7 +1001,7 @@ describe("CLI App", () => {
         setSystemPrompt: vi.fn(),
       } as any);
 
-      const { stdin } = render(<App />);
+      const { stdin } = render(<App paths={testPaths()} />);
 
       // Wait for config fallback to load
       await delay(100);
@@ -937,6 +1019,265 @@ describe("CLI App", () => {
       await delay(100);
 
       expect(setModelSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe("/session command", () => {
+    it("lists sessions with id, date, model, turns and token total", async () => {
+      const paths = testPaths();
+      const { lastFrame, stdin } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model", title: "Target Session" });
+      await recordTurn(target, baseTurn({ id: "t1", content: "Listed" }), paths);
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Picker consumes first Enter to complete the command
+      stdin.write("\r");
+      await delay(200);
+
+      const frame = lastFrame();
+      expect(frame).toContain(target.id);
+      expect(frame).toContain("test-model");
+      expect(frame).toContain("1 turns");
+    });
+
+    it("resumes a session and appends new turns to it", async () => {
+      const paths = testPaths();
+      const { frames, stdin } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "old-turn", userContent: "Old question", content: "Old answer" }),
+        paths,
+      );
+
+      stdin.write(`/session ${target.id}`);
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("Old question");
+      expect(allFrames).toContain("Old answer");
+      expect(allFrames).toContain("Resumed session");
+
+      mockRun.mockImplementation(async (_messages, options) => {
+        options?.onEvent?.({ type: "token", text: "New response" });
+        return {
+          aborted: false,
+          turns: 1,
+          finalMessage: "New response",
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0, toolCallCount: 0 },
+        };
+      });
+
+      stdin.write("new question");
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      expect(frames.join("\n")).toContain("New response");
+
+      const transcript = await readJsonl(target.transcriptPath);
+      expect(transcript).toHaveLength(2);
+      expect(transcript[1].userContent).toBe("new question");
+    });
+
+    it("warns before loading a large session and resumes only after confirmation or --force", async () => {
+      const paths = testPaths();
+      const { frames, stdin } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      const bigText = "x".repeat(210_000);
+      await recordTurn(
+        target,
+        baseTurn({
+          id: "big-turn",
+          userContent: "Big",
+          content: "Big answer",
+          messages: [{ role: "user", content: bigText, timestamp: Date.now() } as unknown as Message],
+        }),
+        paths,
+      );
+
+      stdin.write(`/session ${target.id}`);
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      let allFrames = frames.join("\n");
+      expect(allFrames).toContain("will load ~");
+      expect(allFrames).toContain("threshold");
+      expect(allFrames).not.toContain("Resumed session");
+
+      // Cancel the pending resume
+      stdin.write("n");
+      await delay(50);
+      stdin.write("\r");
+      await delay(200);
+
+      allFrames = frames.join("\n");
+      expect(allFrames).toContain("Resume cancelled");
+
+      // Force resume
+      stdin.write(`/session ${target.id} --force`);
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      allFrames = frames.join("\n");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("opens interactive picker and resumes selected session with Enter", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "pick-turn", userContent: "Pick me", content: "Picked" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /session command
+      stdin.write("\r");
+      await delay(200);
+
+      let frame = lastFrame();
+      expect(frame).toContain("Select session:");
+      expect(frame).toContain(target.id);
+
+      // Target is the most recent session and should be preselected at index 0
+      stdin.write("\r");
+      await delay(300);
+
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("Pick me");
+      expect(allFrames).toContain("Picked");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("cancels the picker with Escape without resuming", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "esc-turn", userContent: "Esc me", content: "Escaped" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      expect(lastFrame()).toContain("Select session:");
+
+      stdin.write("\x1b");
+      await delay(100);
+
+      expect(lastFrame()).not.toContain("Select session:");
+      expect(frames.join("\n")).not.toContain("Resumed session");
+    });
+
+    it("filters the picker by typing and resumes the matching session", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "filter-turn", userContent: "Filter me", content: "Filtered" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      // Type the last 6 characters of the target id as a filter
+      const filter = target.id.slice(-6);
+      stdin.write(filter);
+      await delay(100);
+
+      expect(lastFrame()).toContain(`Filter: ${filter}`);
+
+      stdin.write("\r");
+      await delay(300);
+
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("Filter me");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("warns before resuming a large session selected from the picker", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      const bigText = "x".repeat(210_000);
+      await recordTurn(
+        target,
+        baseTurn({
+          id: "big-pick-turn",
+          userContent: "Big pick",
+          content: "Big answer",
+          messages: [{ role: "user", content: bigText, timestamp: Date.now() } as unknown as Message],
+        }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      stdin.write("\r");
+      await delay(300);
+
+      let allFrames = frames.join("\n");
+      expect(allFrames).toContain("will load ~");
+      expect(allFrames).not.toContain("Resumed session");
+
+      stdin.write("y");
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      allFrames = frames.join("\n");
+      expect(allFrames).toContain("Resumed session");
     });
   });
 });

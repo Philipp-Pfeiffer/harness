@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
+import { mkdtempSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import App from "../../src/cli/App.js";
+import type { HarnessPaths } from "../../src/config/paths.js";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -25,9 +29,37 @@ vi.mock("../../src/core/agent.js", () => ({
   })),
 }));
 
+let testBaseDir: string | undefined;
+
+function testPaths(): HarnessPaths {
+  testBaseDir = mkdtempSync(join(tmpdir(), "harness-keywarning-test-"));
+  return {
+    home: join(testBaseDir, "home"),
+    state: join(testBaseDir, "state"),
+    core: join(testBaseDir, "home", "core.md"),
+    agents: join(testBaseDir, "home", "AGENTS.md"),
+    config: join(testBaseDir, "home", "config.json"),
+    memory: join(testBaseDir, "home", "memory"),
+    inbox: join(testBaseDir, "home", "memory", "_inbox.md"),
+    sources: join(testBaseDir, "home", "sources"),
+    skills: join(testBaseDir, "home", "skills"),
+    sessions: join(testBaseDir, "state", "sessions"),
+    metrics: join(testBaseDir, "state", "metrics"),
+    index: join(testBaseDir, "state", "index"),
+  };
+}
+
 afterEach(() => {
   cleanup();
   mockRun.mockReset();
+  if (testBaseDir) {
+    try {
+      rmdirSync(testBaseDir, { recursive: true });
+    } catch {
+      // ignore cleanup failures
+    }
+    testBaseDir = undefined;
+  }
 });
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -44,7 +76,7 @@ describe("React Key Warning", () => {
       originalError.apply(console, args);
     };
 
-    const { stdin } = render(<App />);
+    const { stdin } = render(<App paths={testPaths()} />);
     await delay(100); // wait for config load
 
     stdin.write("/model");

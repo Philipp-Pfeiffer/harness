@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
+import { mkdtempSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import App from "../../src/cli/App.js";
+import type { HarnessPaths } from "../../src/config/paths.js";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -25,19 +29,47 @@ vi.mock("../../src/core/agent.js", () => ({
   })),
 }));
 
+let testBaseDir: string | undefined;
+
+function testPaths(): HarnessPaths {
+  testBaseDir = mkdtempSync(join(tmpdir(), "harness-commands-test-"));
+  return {
+    home: join(testBaseDir, "home"),
+    state: join(testBaseDir, "state"),
+    core: join(testBaseDir, "home", "core.md"),
+    agents: join(testBaseDir, "home", "AGENTS.md"),
+    config: join(testBaseDir, "home", "config.json"),
+    memory: join(testBaseDir, "home", "memory"),
+    inbox: join(testBaseDir, "home", "memory", "_inbox.md"),
+    sources: join(testBaseDir, "home", "sources"),
+    skills: join(testBaseDir, "home", "skills"),
+    sessions: join(testBaseDir, "state", "sessions"),
+    metrics: join(testBaseDir, "state", "metrics"),
+    index: join(testBaseDir, "state", "index"),
+  };
+}
+
 beforeEach(() => {
   mockRun.mockReset();
 });
 
 afterEach(() => {
   cleanup();
+  if (testBaseDir) {
+    try {
+      rmdirSync(testBaseDir, { recursive: true });
+    } catch {
+      // ignore cleanup failures
+    }
+    testBaseDir = undefined;
+  }
 });
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("Slash command autocomplete picker", () => {
   it("opens picker when / is typed and shows all commands", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/");
     await delay(50);
@@ -49,7 +81,7 @@ describe("Slash command autocomplete picker", () => {
   });
 
   it("filters commands live while typing", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/cl");
     await delay(50);
@@ -61,7 +93,7 @@ describe("Slash command autocomplete picker", () => {
   });
 
   it("closes picker on space and keeps input", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/cl");
     await delay(50);
@@ -78,7 +110,7 @@ describe("Slash command autocomplete picker", () => {
   });
 
   it("completes command with Enter without auto-executing", async () => {
-    const { lastFrame, stdin, frames } = render(<App />);
+    const { lastFrame, stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("/cl");
     await delay(50);
@@ -95,7 +127,7 @@ describe("Slash command autocomplete picker", () => {
   });
 
   it("closes picker on Escape and leaves input as-is", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/cl");
     await delay(50);
@@ -112,7 +144,7 @@ describe("Slash command autocomplete picker", () => {
   });
 
   it("navigates with up/down arrows", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/");
     await delay(50);
