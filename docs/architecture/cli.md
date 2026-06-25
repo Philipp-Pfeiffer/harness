@@ -410,6 +410,7 @@ export const slashCommands: SlashCommandInfo[] = [
   { name: "/help", description: "Show this help" },
   { name: "/model", description: "Switch model" },
   { name: "/quit", description: "Exit" },
+  { name: "/session", description: "List or resume sessions" },
 ];
 ```
 
@@ -437,6 +438,22 @@ Code: `src/cli/App.tsx:344-392`
 - **Wechsel:** `agent.setModel(newModel)` + `setActiveModel(newModel)`
 
 Code: `src/cli/App.tsx:695-701` (Trigger), `src/cli/App.tsx:902-941` (Navigation)
+
+### Session-Picker
+
+- **Trigger:** `/session` + Enter (ohne Argument)
+- **Datenquelle:** `listSessionsWithDetails()` → `~/.harness/sessions/sessions.json` + Transcripts
+- **Sortierung:** `lastActivity` absteigend (neueste zuerst)
+- **Filter:** Live-Filter auf id, Titel, Model beim Tippen
+- **Keybinds:**
+  - `↑/↓` — Navigation
+  - `Enter / Tab` — Session auswählen und resumen
+  - `Esc` — Abbrechen
+- **Wechsel:** `endSession(current)` → `loadSession(id)` → `turnsToMessages()` → Scrollback-Replay → `sessionRef.current = loaded.session`
+- **Threshold:** Bei ≥50k geschätzten Tokens wird vor dem Laden eine `y/N`-Bestätigung im Chat verlangt
+- **Direkt-Shortcut:** `/session <id>` und `/session <id> --force` umgehen den Picker
+
+Code: `src/cli/App.tsx` (`handleSubmit` für `/session`, `useInput` für Picker-Navigation, JSX für Rendering)
 
 ---
 
@@ -530,6 +547,11 @@ Die `contextWindow` kommt vom `activeModel`-Objekt (pi-ai liefert sie). Fallback
 | `↑/↓` | ModelPicker | Model-Navigation | `App.tsx:903-910` |
 | `Enter/Tab` | ModelPicker | Modell auswählen | `App.tsx:916-940` |
 | `Esc` | ModelPicker | Picker schließen | `App.tsx:912-915` |
+| `↑/↓` | SessionPicker | Session-Navigation | `App.tsx` |
+| `Enter/Tab` | SessionPicker | Session resumen | `App.tsx` |
+| `Esc` | SessionPicker | Picker schließen | `App.tsx` |
+| `a-z, 0-9` | SessionPicker | Live-Filter | `App.tsx` |
+| `Backspace` | SessionPicker | Filter löschen | `App.tsx` |
 
 ---
 
@@ -583,7 +605,8 @@ Der bisher generierte Text (`assistantText`) wird **nicht verworfen**. Der Turn 
 | Datei | Zweck |
 |-------|-------|
 | `App.tsx` | Hauptkomponente: Layout, State-Management, Event-Routing, Agent-Integration |
-| `commands.ts` | Slash-Command-Registry (`/clear`, `/help`, `/model`, `/quit`) + Filter-Logik |
+| `commands.ts` | Slash-Command-Registry (`/clear`, `/help`, `/model`, `/quit`, `/session`) + Filter-Logik |
+| `sessionCommand.ts` | Parser/Formatter für `/session` und Token-Warnung |
 
 ### `src/core/`
 
@@ -592,6 +615,7 @@ Der bisher generierte Text (`assistantText`) wird **nicht verworfen**. Der Turn 
 | `agent.ts` | Agent-Loop: LLM-Streaming, Tool-Execution, Mailbox-Poll, Token-Aggregation, Abort-Handling |
 | `mailbox.ts` | Steering-Puffer: `push`, `drainAll`, `isEmpty` |
 | `parallel.ts` | Utility für parallele Tool-Bucket-Ausführung |
+| `session.ts` | Session-Lifecycle, datiertes Transcript-Layout, Resume-Helpers, Token-Schätzung |
 
 ### `src/tools/`
 
