@@ -29,11 +29,11 @@ import {
   SESSION_LOAD_WARN_THRESHOLD,
   type Session,
   type SessionTurn,
+  type SessionListDetail,
 } from "../core/session.js";
 import {
   isSessionCommand,
   parseSessionCommand,
-  formatSessionList,
   formatSessionLoadWarning,
 } from "./sessionCommand.js";
 
@@ -806,6 +806,10 @@ export default function App({
   const [configError, setConfigError] = useState<string | undefined>(undefined);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
+  const [showSessionPicker, setShowSessionPicker] = useState(false);
+  const [sessionPickerIndex, setSessionPickerIndex] = useState(0);
+  const [sessionPickerOptions, setSessionPickerOptions] = useState<SessionListDetail[]>([]);
+  const [sessionPickerFilter, setSessionPickerFilter] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -982,6 +986,57 @@ export default function App({
     }
   }
 
+  async function initiateSessionResume(sessionId: string, userText = `/session ${sessionId}`) {
+    const loaded = await loadSession(sessionId, paths);
+    if (!loaded) {
+      const errorTurn: CompletedTurn = {
+        id: randomUUID(),
+        userText,
+        assistantText: "",
+        assistantRendered: false,
+        tools: [],
+        toolOffsets: [],
+        aborted: false,
+        error: `Session not found: ${sessionId}`,
+      };
+      setPastTurns((prev) => [...prev, errorTurn]);
+      return;
+    }
+
+    if (loaded.tokenEstimate >= SESSION_LOAD_WARN_THRESHOLD) {
+      pendingResumeRef.current = {
+        sessionId,
+        tokens: loaded.tokenEstimate,
+      };
+      const warnTurn: CompletedTurn = {
+        id: randomUUID(),
+        userText,
+        assistantText: formatSessionLoadWarning(sessionId, loaded.tokenEstimate),
+        assistantRendered: false,
+        tools: [],
+        toolOffsets: [],
+        aborted: false,
+      };
+      setPastTurns((prev) => [...prev, warnTurn]);
+    } else {
+      void resumeSession(sessionId);
+    }
+  }
+
+  const filteredSessionPickerOptions = useMemo(() => {
+    const filter = sessionPickerFilter.trim().toLowerCase();
+    const sorted = [...sessionPickerOptions].sort((a, b) =>
+      b.lastActivity.localeCompare(a.lastActivity),
+    );
+    if (!filter) return sorted;
+    return sorted.filter(
+      (s) =>
+        s.sessionId.toLowerCase().includes(filter) ||
+        s.title.toLowerCase().includes(filter) ||
+        s.model?.toLowerCase().includes(filter),
+    );
+  }, [sessionPickerOptions, sessionPickerFilter]);
+
   const handleSubmit = useCallback(
     async (value: string) => {
       const trimmed = value.trim();
@@ -1151,16 +1206,10 @@ export default function App({
 
         if (cmd.type === "list") {
           const sessions = await listSessionsWithDetails(paths);
-          const listTurn: CompletedTurn = {
-            id: randomUUID(),
-            userText: trimmed,
-            assistantText: formatSessionList(sessions),
-            assistantRendered: false,
-            tools: [],
-            toolOffsets: [],
-            aborted: false,
-          };
-          setPastTurns((prev) => [...prev, listTurn]);
+          setSessionPickerOptions(sessions);
+          setSessionPickerIndex(0);
+          setSessionPickerFilter("");
+          setShowSessionPicker(true);
           return;
         }
 
@@ -1180,23 +1229,10 @@ export default function App({
           return;
         }
 
-        if (cmd.force || loaded.tokenEstimate < SESSION_LOAD_WARN_THRESHOLD) {
+        if (cmd.force) {
           void resumeSession(cmd.sessionId);
         } else {
-          pendingResumeRef.current = {
-            sessionId: cmd.sessionId,
-            tokens: loaded.tokenEstimate,
-          };
-          const warnTurn: CompletedTurn = {
-            id: randomUUID(),
-            userText: trimmed,
-            assistantText: formatSessionLoadWarning(cmd.sessionId, loaded.tokenEstimate),
-            assistantRendered: false,
-            tools: [],
-            toolOffsets: [],
-            aborted: false,
-          };
-          setPastTurns((prev) => [...prev, warnTurn]);
+          void initiateSessionResume(cmd.sessionId, trimmed);
         }
         return;
       }
@@ -1528,7 +1564,7 @@ export default function App({
           });
         });
     },
-    [agent, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession]
+    [agent, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession, initiateSessionResume]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -1560,6 +1596,42 @@ export default function App({
   }, [pastTurns, forceUpdate]);
 
   useInput((inputStr, key) => {
+    if (showSessionPicker) {
+      if (key.upArrow) {
+        setSessionPickerIndex((i) => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setSessionPickerIndex((i) =>
+          Math.min(filteredSessionPickerOptions.length - 1, i + 1),
+        );
+        return;
+      }
+      if (key.escape) {
+        setShowSessionPicker(false);
+        return;
+      }
+      if (key.return || key.tab) {
+        const selected = filteredSessionPickerOptions[sessionPickerIndex];
+        if (selected) {
+          setShowSessionPicker(false);
+          void initiateSessionResume(selected.sessionId, `/session ${selected.sessionId}`);
+        }
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setSessionPickerFilter((f) => f.slice(0, -1));
+        setSessionPickerIndex(0);
+        return;
+      }
+      if (inputStr && !key.ctrl && !key.meta) {
+        setSessionPickerFilter((f) => f + inputStr);
+        setSessionPickerIndex(0);
+        return;
+      }
+      return;
+    }
+
     if (showModelPicker) {
       if (key.upArrow) {
         setModelPickerIndex((i) => Math.max(0, i - 1));
@@ -1668,6 +1740,30 @@ export default function App({
             ))}
           </Box>
         )}
+        {showSessionPicker && (
+          <Box flexDirection="column" marginY={1} paddingLeft={2}>
+            <Text bold>Select session:</Text>
+            {sessionPickerFilter && (
+              <Text dimColor>Filter: {sessionPickerFilter}</Text>
+            )}
+            {filteredSessionPickerOptions.length === 0 && (
+              <Text color="gray">No sessions match.</Text>
+            )}
+            {filteredSessionPickerOptions.map((s, idx) => {
+              const isCurrent = s.sessionId === sessionRef.current?.id;
+              const marker = isCurrent ? "● " : "  ";
+              return (
+                <Text
+                  key={`${s.sessionId}-${idx}`}
+                  color={idx === sessionPickerIndex ? "cyan" : "gray"}
+                  bold={idx === sessionPickerIndex || isCurrent}
+                >
+                  {marker}{s.sessionId} · {s.created.slice(0, 10)} · {s.model} · {s.turnCount} turns · {formatTokens(s.tokenTotals.totalTokens)} tokens
+                </Text>
+              );
+            })}
+          </Box>
+        )}
       </Box>
       {selectionMode && (
         <Box marginY={1}>
@@ -1676,7 +1772,9 @@ export default function App({
           </Text>
         </Box>
       )}
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
+      {!showSessionPicker && (
+        <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
+      )}
       <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} />
     </Box>
   );

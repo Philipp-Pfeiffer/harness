@@ -107,7 +107,7 @@ function baseTurn(overrides: Partial<SessionTurn> = {}): SessionTurn {
       latencyMs: 1234,
     },
     model: "test-model",
-    timestamp: "2026-06-25T10:00:01.000Z",
+    timestamp: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -1131,6 +1131,147 @@ describe("CLI App", () => {
 
       // Force resume
       stdin.write(`/session ${target.id} --force`);
+      await delay(50);
+      stdin.write("\r");
+      await delay(300);
+
+      allFrames = frames.join("\n");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("opens interactive picker and resumes selected session with Enter", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "pick-turn", userContent: "Pick me", content: "Picked" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      // Submit /session command
+      stdin.write("\r");
+      await delay(200);
+
+      let frame = lastFrame();
+      expect(frame).toContain("Select session:");
+      expect(frame).toContain(target.id);
+
+      // Target is the most recent session and should be preselected at index 0
+      stdin.write("\r");
+      await delay(300);
+
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("Pick me");
+      expect(allFrames).toContain("Picked");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("cancels the picker with Escape without resuming", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "esc-turn", userContent: "Esc me", content: "Escaped" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      expect(lastFrame()).toContain("Select session:");
+
+      stdin.write("\x1b");
+      await delay(100);
+
+      expect(lastFrame()).not.toContain("Select session:");
+      expect(frames.join("\n")).not.toContain("Resumed session");
+    });
+
+    it("filters the picker by typing and resumes the matching session", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      await recordTurn(
+        target,
+        baseTurn({ id: "filter-turn", userContent: "Filter me", content: "Filtered" }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      // Type the last 6 characters of the target id as a filter
+      const filter = target.id.slice(-6);
+      stdin.write(filter);
+      await delay(100);
+
+      expect(lastFrame()).toContain(`Filter: ${filter}`);
+
+      stdin.write("\r");
+      await delay(300);
+
+      const allFrames = frames.join("\n");
+      expect(allFrames).toContain("Filter me");
+      expect(allFrames).toContain("Resumed session");
+    });
+
+    it("warns before resuming a large session selected from the picker", async () => {
+      const paths = testPaths();
+      const { frames, stdin, lastFrame } = render(<App paths={paths} />);
+
+      await delay(100);
+
+      const target = await createSession(paths, { model: "test-model" });
+      const bigText = "x".repeat(210_000);
+      await recordTurn(
+        target,
+        baseTurn({
+          id: "big-pick-turn",
+          userContent: "Big pick",
+          content: "Big answer",
+          messages: [{ role: "user", content: bigText, timestamp: Date.now() } as unknown as Message],
+        }),
+        paths,
+      );
+
+      stdin.write("/session");
+      await delay(50);
+      stdin.write("\r");
+      await delay(100);
+      stdin.write("\r");
+      await delay(200);
+
+      stdin.write("\r");
+      await delay(300);
+
+      let allFrames = frames.join("\n");
+      expect(allFrames).toContain("will load ~");
+      expect(allFrames).not.toContain("Resumed session");
+
+      stdin.write("y");
       await delay(50);
       stdin.write("\r");
       await delay(300);
