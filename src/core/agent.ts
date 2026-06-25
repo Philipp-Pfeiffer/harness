@@ -1,5 +1,5 @@
 import { stream } from "@mariozechner/pi-ai";
-import { resolveModel } from "./resolveModel.js";
+import { resolveModel, getApiKey } from "./resolveModel.js";
 import { prompt } from "../prompts.js";
 import { Value } from "typebox/value";
 import type {
@@ -262,7 +262,8 @@ export function createAgent(config: AgentConfig): Agent {
 
         drainMailbox(mailbox, context.messages);
 
-        const eventStream = stream(resolvedModel, context, { signal });
+        const apiKey = getApiKey(resolvedModel);
+        const eventStream = stream(resolvedModel, context, { signal, apiKey });
         let response: AssistantMessage;
         let partialText = "";
 

@@ -13,6 +13,9 @@ dist/
 .env.local
 .env.*.local
 
+# Harness config (may contain API keys)
+harness.config.json
+
 # Logs
 logs/
 *.log

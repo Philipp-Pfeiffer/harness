@@ -15,6 +15,13 @@ describe("loadConfig", () => {
     rmSync(tmpBase, { recursive: true, force: true });
   });
 
+  // Helper: isolated harnessHome so tests don't pick up real ~/harness/config.json
+  function opts(extra: Record<string, string> = {}) {
+    const homeDir = path.join(tmpBase, "home");
+    mkdirSync(homeDir, { recursive: true });
+    return { cwd: tmpBase, homeDir, harnessHome: tmpBase, ...extra };
+  }
+
   it("finds user config in ~/.harness when started from a foreign directory", async () => {
     const foreignDir = path.join(tmpBase, "foreign");
     mkdirSync(foreignDir, { recursive: true });
@@ -28,7 +35,7 @@ describe("loadConfig", () => {
     ];
     writeFileSync(path.join(harnessDir, "config.json"), JSON.stringify({ models: userModels }));
 
-    const result = await loadConfig({ cwd: foreignDir, homeDir });
+    const result = await loadConfig({ cwd: foreignDir, homeDir, harnessHome: tmpBase });
 
     expect(result.models).toEqual(userModels);
     expect(result.source).toBe("home");
@@ -53,7 +60,7 @@ describe("loadConfig", () => {
     writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify({ models: cwdModels }));
     writeFileSync(path.join(harnessDir, "config.json"), JSON.stringify({ models: homeModels }));
 
-    const result = await loadConfig({ cwd, homeDir });
+    const result = await loadConfig({ cwd, homeDir, harnessHome: tmpBase });
 
     expect(result.models).toEqual(cwdModels);
     expect(result.source).toBe("cwd");
@@ -67,12 +74,95 @@ describe("loadConfig", () => {
     const homeDir = path.join(tmpBase, "empty_home");
     mkdirSync(homeDir, { recursive: true });
 
-    const result = await loadConfig({ cwd: foreignDir, homeDir });
+    const result = await loadConfig({ cwd: foreignDir, homeDir, harnessHome: tmpBase });
 
     expect(result.models).toEqual([
       { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" },
     ]);
     expect(result.source).toBeUndefined();
     expect(result.error).toContain("No config found");
+  });
+
+  it("merges provider defaults into models", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "sk-test",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.providers.neuralwatt?.baseUrl).toBe("https://api.neuralwatt.com/v1");
+    expect(result.models[0]?.baseUrl).toBe("https://api.neuralwatt.com/v1");
+    expect(result.models[0]?.apiKey).toBe("sk-test");
+    expect(result.models[0]?.api).toBe("openai-completions");
+  });
+
+  it("expands environment variables in config values", async () => {
+    process.env.HARNESS_TEST_API_KEY = "sk-from-env";
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "${HARNESS_TEST_API_KEY}",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.providers.neuralwatt?.apiKey).toBe("sk-from-env");
+    expect(result.models[0]?.apiKey).toBe("sk-from-env");
+
+    delete process.env.HARNESS_TEST_API_KEY;
+  });
+
+  it("returns defaultModel with merged provider defaults", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "sk-test",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+      defaultModel: {
+        provider: "neuralwatt",
+        model: "kimi-k2.7-code",
+        alias: "Kimi K2.7 Code",
+      },
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.defaultModel).toBeDefined();
+    expect(result.defaultModel?.provider).toBe("neuralwatt");
+    expect(result.defaultModel?.apiKey).toBe("sk-test");
   });
 });

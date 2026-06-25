@@ -1,4 +1,11 @@
 {
+  "providers": {
+    "neuralwatt": {
+      "type": "openai",
+      "baseUrl": "https://api.neuralwatt.com/v1",
+      "apiKey": "${NEURALWATT_API_KEY}"
+    }
+  },
   "models": [
     {
       "provider": "minimax",
@@ -9,6 +16,29 @@
       "provider": "openai",
       "model": "gpt-5.2",
       "alias": "GPT 5.2"
+    },
+    {
+      "provider": "neuralwatt",
+      "model": "kimi-k2.7-code",
+      "alias": "Kimi K2.7 Code",
+      "reasoning": true,
+      "input": ["text", "image"],
+      "contextWindow": 262000,
+      "maxTokens": 8192
+    },
+    {
+      "provider": "neuralwatt",
+      "model": "kimi-k2.6",
+      "alias": "Kimi K2.6",
+      "reasoning": true,
+      "input": ["text", "image"],
+      "contextWindow": 262000,
+      "maxTokens": 8192
     }
-  ]
+  ],
+  "defaultModel": {
+    "provider": "neuralwatt",
+    "model": "kimi-k2.7-code",
+    "alias": "Kimi K2.7 Code"
+  }
 }

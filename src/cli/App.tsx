@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
-import { resolveModel } from "../core/resolveModel.js";
+import { resolveModel, resolveModelFromConfig } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
@@ -756,6 +756,7 @@ export default function App({
   }, [agent]);
 
   const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
+  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(undefined);
   const [configError, setConfigError] = useState<string | undefined>(undefined);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
@@ -764,11 +765,23 @@ export default function App({
     (async () => {
       const result = await loadConfig({ configPath });
       setConfigModels(result.models);
+      setConfigDefaultModel(result.defaultModel);
       if (result.error) {
         setConfigError(result.error);
       }
     })();
   }, [configPath]);
+
+  useEffect(() => {
+    if (!configDefaultModel) return;
+    try {
+      setActiveModel(resolveModelFromConfig(configDefaultModel));
+    } catch {
+      setConfigError((prev) =>
+        prev ?? `Failed to load default model ${configDefaultModel.provider}/${configDefaultModel.model}`,
+      );
+    }
+  }, [configDefaultModel]);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
@@ -1089,7 +1102,7 @@ export default function App({
         const selected = configModels[modelPickerIndex];
         if (selected) {
           try {
-            const newModel = resolveModel(selected.provider, selected.model);
+            const newModel = resolveModelFromConfig(selected);
             setActiveModel(newModel);
           } catch {
             const errorTurn: CompletedTurn = {
