@@ -13,6 +13,18 @@ describe("StubBackend", () => {
     expect(hits).toEqual([]);
   });
 
+  it("query returns empty array", async () => {
+    const backend = new StubBackend();
+    const hits = await backend.query("anything");
+    expect(hits).toEqual([]);
+  });
+
+  it("getAmbientHints returns empty array", async () => {
+    const backend = new StubBackend();
+    const hints = await backend.getAmbientHints("anything");
+    expect(hints).toEqual([]);
+  });
+
   it("write does not throw", async () => {
     const backend = new StubBackend();
     await expect(backend.write({ path: "/tmp/x.md", content: "y" })).resolves.toBeUndefined();

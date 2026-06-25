@@ -13,6 +13,9 @@ dist/
 .env.local
 .env.*.local
 
+# Harness config (may contain API keys)
+harness.config.json
+
 # Logs
 logs/
 *.log
@@ -36,3 +39,7 @@ coverage/
 
 # Agent workspace
 workspace/
+
+# Runtime artifacts (now live in $HARNESS_HOME / $HARNESS_STATE, outside the repo)
+memory/
+.qmd/

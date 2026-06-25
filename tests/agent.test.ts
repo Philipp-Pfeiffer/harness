@@ -5,6 +5,7 @@ import { createMailbox } from "../src/core/mailbox.js";
 import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../src/tools/types.js";
 import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
+import type { MemoryBackend, AmbientHint } from "../src/core/memoryBackend.js";
 
 vi.mock("@mariozechner/pi-ai", async () => {
   const actual = await vi.importActual("@mariozechner/pi-ai");
@@ -90,7 +91,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Hi")]);
 
-    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, human!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
     expect(stream).toHaveBeenCalledTimes(1);
   });
 
@@ -115,7 +116,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -135,7 +136,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Hi")]);
 
-    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 }, error: { type: "provider_aborted", message: "Provider aborted the generation." } });
+    expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Anfrage wurde abgebrochen.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0, error: { type: "provider_aborted", message: "Provider aborted the generation." } });
   });
 
   it("returns error when tool is not found", async () => {
@@ -152,7 +153,7 @@ describe("Agent", () => {
     const agent = createAgent({ tools: [], model });
     const result = await agent.run([makeUserMessage("Call nonexistent tool")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter gehts", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -177,7 +178,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Call echo with bad args")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -199,7 +200,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Keep calling tool")]);
 
-    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 2 });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
@@ -211,7 +212,7 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [], model });
       const result = await agent.run([makeUserMessage("Hi")], { signal: controller.signal });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
       expect(stream).not.toHaveBeenCalled();
     });
 
@@ -236,7 +237,7 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [echoTool], model });
       const result = await agent.run([makeUserMessage("Call echo")], { signal: controller.signal });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
       expect(stream).toHaveBeenCalledTimes(1);
     });
 
@@ -271,7 +272,7 @@ describe("Agent", () => {
       const result = await agent.run([makeUserMessage("Call slow")], { signal: controller.signal });
 
       expect(toolRuns).toBe(1);
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
       expect(stream).toHaveBeenCalledTimes(1);
     });
   });
@@ -288,7 +289,7 @@ describe("Agent", () => {
         onEvent: (e) => events.push(e),
       });
 
-      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, world!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello, world!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBeGreaterThanOrEqual(2);
       expect(tokenEvents.map((e) => e.text).join("")).toBe("Hello, world!");
@@ -330,7 +331,7 @@ describe("Agent", () => {
 
       const result = await agent.run([makeUserMessage("Bitte rufe echo auf")]);
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Ja, das Echo-Tool funktioniert!", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
       expect(stream).toHaveBeenCalledTimes(2);
     });
 
@@ -362,7 +363,7 @@ describe("Agent", () => {
         onEvent: (e) => events.push(e),
       });
 
-      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBe(1);
       expect(tokenEvents[0].text).toBe("First");
@@ -425,13 +426,14 @@ describe("Agent", () => {
         aborted: false,
         turns: 2,
         finalMessage: "Done",
-        usage: { inputTokens: 30, outputTokens: 15, totalTokens: 45 },
+        usage: { inputTokens: 30, outputTokens: 15, totalTokens: 45, cacheRead: 0, cacheWrite: 0 },
+        toolCallCount: 1,
       });
 
       const usageEvents = events.filter((e) => e.type === "usage");
       expect(usageEvents).toHaveLength(2);
-      expect(usageEvents[0]).toEqual({ type: "usage", inputTokens: 10, outputTokens: 5, totalTokens: 15 });
-      expect(usageEvents[1]).toEqual({ type: "usage", inputTokens: 30, outputTokens: 15, totalTokens: 45 });
+      expect(usageEvents[0]).toEqual({ type: "usage", inputTokens: 10, outputTokens: 5, totalTokens: 15, callInputTokens: 10, callOutputTokens: 5, callTotalTokens: 15, cacheRead: 0, cacheWrite: 0, callCacheRead: 0, callCacheWrite: 0 });
+      expect(usageEvents[1]).toEqual({ type: "usage", inputTokens: 30, outputTokens: 15, totalTokens: 45, callInputTokens: 20, callOutputTokens: 10, callTotalTokens: 30, cacheRead: 0, cacheWrite: 0, callCacheRead: 0, callCacheWrite: 0 });
     });
 
     it("emits usage event even for single text response", async () => {
@@ -443,8 +445,8 @@ describe("Agent", () => {
       const agent = createAgent({ tools: [], model });
       const result = await agent.run([makeUserMessage("Hi")], { onEvent: (e) => events.push(e) });
 
-      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello!", usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 } });
-      expect(events).toContainEqual({ type: "usage", inputTokens: 5, outputTokens: 3, totalTokens: 8 });
+      expect(result).toEqual({ aborted: false, turns: 1, finalMessage: "Hello!", usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
+      expect(events).toContainEqual({ type: "usage", inputTokens: 5, outputTokens: 3, totalTokens: 8, callInputTokens: 5, callOutputTokens: 3, callTotalTokens: 8, cacheRead: 0, cacheWrite: 0, callCacheRead: 0, callCacheWrite: 0 });
     });
 
     it("emits tool_call_error event for missing tool", async () => {
@@ -745,7 +747,7 @@ describe("Agent", () => {
 
       const result = await runPromise;
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
       expect(history.length).toBe(5); // user + assistant + toolResult + steer user + assistant
       expect(history[3].role).toBe("user");
     });
@@ -785,7 +787,7 @@ describe("Agent", () => {
 
       const result = await runPromise;
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
       const steerMsg = history.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
       expect(steerMsg).toBeDefined();
     });
@@ -871,7 +873,7 @@ describe("Agent", () => {
       });
 
       const result = await runPromise;
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
 
       // Both stream calls should have received the same context object
       expect(capturedContexts.length).toBe(2);
@@ -988,7 +990,7 @@ describe("Agent", () => {
 
       const result = await runPromise;
 
-      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+      expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
     });
   });
 
@@ -1073,6 +1075,147 @@ describe("Agent", () => {
       expect(annotation).toContain("User-Abort");
       expect(annotation).toContain("synthetisch");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
+    });
+  });
+
+  describe("Ambient memory hint", () => {
+    function createMockMemoryBackend(hints: AmbientHint[]): MemoryBackend {
+      return {
+        name: "mock",
+        search: vi.fn(async () => []),
+        query: vi.fn(async () => []),
+        getAmbientHints: vi.fn(async () => hints),
+        write: vi.fn(async () => {}),
+      };
+    }
+
+    it("appends memory_hint to systemPrompt when hits exist", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toContain("<memory_hint>");
+        expect(context.systemPrompt).toContain("Architecture Notes");
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([
+        { title: "Architecture Notes", path: "/proj/memory/arch.md", score: 0.92, snippet: "Use MVC" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history, { memoryBackend: backend });
+
+      expect(result.aborted).toBe(false);
+      expect(backend.getAmbientHints).toHaveBeenCalledWith("Tell me about architecture");
+    });
+
+    it("does not inject when memoryBackend returns no hits", async () => {
+      const basePrompt = "You are a test agent";
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe(basePrompt);
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([]);
+
+      const agent = createAgent({ tools: [], model, systemPrompt: basePrompt });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history, { memoryBackend: backend });
+
+      expect(result.aborted).toBe(false);
+      expect(backend.getAmbientHints).toHaveBeenCalled();
+    });
+
+    it("does not inject when no memoryBackend provided", async () => {
+      const basePrompt = "You are a test agent";
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe(basePrompt);
+        return mockStream(mockResponse);
+      });
+
+      const agent = createAgent({ tools: [], model, systemPrompt: basePrompt });
+      const history: Message[] = [makeUserMessage("Tell me about architecture")];
+      const result = await agent.run(history);
+
+      expect(result.aborted).toBe(false);
+    });
+
+    it("does not mutate the passed messages array via ambient injection", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
+
+      const backend = createMockMemoryBackend([
+        { title: "Architecture Notes", path: "/proj/memory/arch.md", score: 0.92, snippet: "Use MVC" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const userMsg = makeUserMessage("Tell me about architecture");
+      const history: Message[] = [userMsg];
+
+      await agent.run(history, { memoryBackend: backend });
+
+      // The user message itself must be untouched by ambient injection
+      expect(history[0]).toBe(userMsg);
+      expect((history[0] as any).content).toBe("Tell me about architecture");
+
+      // No memory-hint message injected; only normal assistant response appended
+      expect(history).toHaveLength(2);
+      expect(history[1].role).toBe("assistant");
+    });
+
+    it("preserves multimodal user messages unchanged", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      let capturedContext: any;
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        capturedContext = context;
+        return mockStream(mockResponse);
+      });
+
+      const backend = createMockMemoryBackend([
+        { title: "Image Note", path: "/proj/memory/img.md", score: 0.92, snippet: "About images" },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const userMsg: Message = {
+        role: "user",
+        content: [
+          { type: "text", text: "Describe this image" },
+          { type: "image", data: "base64abc", mimeType: "image/png" },
+        ],
+        timestamp: Date.now(),
+      };
+      const history: Message[] = [userMsg];
+
+      await agent.run(history, { memoryBackend: backend });
+
+      // messages array must be reference-identical and unchanged
+      expect(capturedContext.messages).toBe(history);
+      expect(capturedContext.messages[0]).toBe(userMsg);
+      expect((capturedContext.messages[0] as any).content).toEqual([
+        { type: "text", text: "Describe this image" },
+        { type: "image", data: "base64abc", mimeType: "image/png" },
+      ]);
+
+      // hint lives only in systemPrompt
+      expect(capturedContext.systemPrompt).toContain("<memory_hint>");
+    });
+
+    it("latency discipline: uses getAmbientHints, not search", async () => {
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
+
+      const backend = createMockMemoryBackend([
+        { title: "Note", path: "/proj/memory/note.md", score: 0.92 },
+      ]);
+
+      const agent = createAgent({ tools: [], model });
+      const history: Message[] = [makeUserMessage("Query")];
+      await agent.run(history, { memoryBackend: backend });
+
+      expect(backend.getAmbientHints).toHaveBeenCalled();
+      expect(backend.search).not.toHaveBeenCalled();
     });
   });
 });

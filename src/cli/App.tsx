@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { Box, Text, useInput, useApp, useStdout, Static } from "ink";
+import { Box, Text, useInput, useApp, useStdout, useStdin, Static } from "ink";
 import chalk from "chalk";
 import { marked } from "marked";
 import { markedTerminal } from "marked-terminal";
@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
-import { resolveModel } from "../core/resolveModel.js";
+import { resolveModel, resolveModelFromConfig } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
@@ -15,6 +15,9 @@ import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 import { loadConfig, type ConfigModel } from "./config.js";
+import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
+import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
+import { resolveHarnessPaths, type HarnessPaths } from "../config/paths.js";
 
 /* ─── marked config ─── */
 
@@ -48,6 +51,7 @@ export type ToolItem = {
   id: string;
   name: string;
   status: "pending" | "done" | "error";
+  args?: unknown;
   preview: string;
   result?: string;
   expanded?: boolean;
@@ -82,7 +86,42 @@ function truncate(str: string, max: number): string {
 
 function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  return `${(n / 1000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * Generates a short summary of what a tool was called with, based on its args.
+ * Used in the ToolCard title to show *what* the tool did (e.g. which file, which command).
+ */
+function toolArgsSummary(name: string, args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+
+  switch (name) {
+    case "exec":
+      return `$ ${a.command ?? ""}`;
+    case "readFile": {
+      const path = String(a.path ?? "");
+      const start = a.lineStart;
+      const end = a.lineEnd;
+      if (start && end) return `${path} (L${start}-${end})`;
+      if (start) return `${path} (L${start}+)`;
+      return path;
+    }
+    case "write":
+      return String(a.path ?? "");
+    case "edit": {
+      const edits = Array.isArray(a.edits) ? a.edits : [];
+      return `${a.path ?? ""} (${edits.length} edit${edits.length === 1 ? "" : "s"})`;
+    }
+    case "search_memory":
+      return `"${a.query ?? ""}"`;
+    case "process":
+      return `${a.action ?? ""}${a.sessionId ? ` ${a.sessionId}` : ""}`;
+    default:
+      return "";
+  }
 }
 
 function findLastPendingToolIndex(tools: ToolItem[], name: string): number {
@@ -101,7 +140,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; contextWindow?: number }) {
+function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; lastCallTokens?: number; contextWindow?: number }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -112,7 +151,7 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
           : "cyan";
 
   const cwd = process.cwd();
-  const used = usage?.totalTokens ?? 0;
+  const used = lastCallTokens ?? usage?.totalTokens ?? 0;
   const usedStr = formatTokens(used);
   const maxStr = contextWindow ? formatTokens(contextWindow) : "?";
 
@@ -123,6 +162,9 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
     else if (ratio > 0.8) counterColor = "yellow";
   }
 
+  const sessionTotal = usage?.totalTokens;
+  const showSession = sessionTotal !== undefined && sessionTotal !== used;
+
   return (
     <Box width="100%" height={1}>
       <Text bold color="cyan">
@@ -132,10 +174,16 @@ function StatusBar({ modelId, status, usage, contextWindow }: { modelId: string;
       <Text dimColor>{modelId}</Text>
       <Text dimColor> · </Text>
       <Text color={statusColor}>{status}</Text>
-      {usage !== undefined && (
+      {used > 0 && (
         <>
           <Text dimColor> · </Text>
           <Text color={counterColor}>{usedStr} / {maxStr}</Text>
+        </>
+      )}
+      {showSession && (
+        <>
+          <Text dimColor> · </Text>
+          <Text dimColor>Ses: {formatTokens(sessionTotal)}</Text>
         </>
       )}
       <Text dimColor> · </Text>
@@ -165,7 +213,10 @@ export function ToolCard({ item, isLast }: { item: ToolItem; isLast: boolean }) 
   const innerWidth = Math.max(20, (process.stdout.columns || 80) - 4);
   const contentWidth = innerWidth;
 
-  let titleContent = `${symbol} ${item.name}${isLast ? " ── Ctrl+O ─" : ""}`;
+  const summary = toolArgsSummary(item.name, item.args);
+  const titleBase = summary ? `${symbol} ${item.name}: ${summary}` : `${symbol} ${item.name}`;
+  const ctrlHint = isLast ? " ── Ctrl+O ─" : "";
+  let titleContent = `${titleBase}${ctrlHint}`;
   if (titleContent.length > innerWidth - 4) {
     titleContent = titleContent.slice(0, innerWidth - 7) + "...";
   }
@@ -202,6 +253,7 @@ function HelpCard() {
       ))}
       <Text bold>Keybinds</Text>
       <Text>  Ctrl+O  – Toggle last tool card</Text>
+      <Text>  Ctrl+E  – Selection mode (scroll & copy)</Text>
       <Text>  Ctrl+L  – Clear screen</Text>
       <Text>  Ctrl+C  – Abort stream / double-tap to exit</Text>
     </Box>
@@ -300,10 +352,12 @@ function PromptInput({
   onSubmit,
   history,
   commands,
+  paused = false,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
   commands?: SlashCommandInfo[];
+  paused?: boolean;
 }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
@@ -321,12 +375,13 @@ function PromptInput({
   }, [history]);
 
   useEffect(() => {
+    if (paused) return;
     const id = setInterval(() => {
       blinkRef.current = !blinkRef.current;
       setRenderTick((t) => t + 1);
     }, 530);
     return () => clearInterval(id);
-  }, []);
+  }, [paused]);
 
   function hasSelection(): boolean {
     return selStartRef.current !== -1 && selEndRef.current !== -1 && selStartRef.current !== selEndRef.current;
@@ -368,7 +423,7 @@ function PromptInput({
   }
 
   useInput((inputStr, key) => {
-    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o")) {
+    if (key.ctrl && (inputStr === "c" || inputStr === "l" || inputStr === "o" || inputStr === "e")) {
       return;
     }
 
@@ -628,22 +683,28 @@ function PromptInput({
 export default function App({
   configPath,
   memoryService,
+  paths: pathsProp,
 }: {
   configPath?: string;
   memoryService?: import("../core/memoryService.js").MemoryService;
+  paths?: HarnessPaths;
 } = {}) {
+  const paths = pathsProp ?? resolveHarnessPaths();
   // memoryService is injected for future phases (ambient retrieval, explicit search)
   const _memoryServiceRef = useRef(memoryService);
   void _memoryServiceRef;
 
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const { setRawMode } = useStdin();
   const [termSize, setTermSize] = useState({ columns: stdout.columns, rows: stdout.rows });
+  const [selectionMode, setSelectionMode] = useState(false);
   const [pastTurns, setPastTurns] = useState<CompletedTurn[]>([]);
   const activeTurnRef = useRef<ActiveTurn | null>(null);
   const forceUpdate = useForceUpdate();
   const [inputHistory, setInputHistory] = useState<string[]>([]);
-  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined>(undefined);
+  const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number } | undefined>(undefined);
+  const [lastCallTokens, setLastCallTokens] = useState<number | undefined>(undefined);
 
   const historyRef = useRef<Message[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -663,17 +724,31 @@ export default function App({
     };
   }, [stdout]);
 
-  const tools = useMemo(() => loadTools(), []);
+  // Selection mode: disable raw mode so the terminal handles mouse selection & scroll
+  useEffect(() => {
+    if (!selectionMode) return;
+    setRawMode(false);
+    const exitHandler = () => setSelectionMode(false);
+    process.stdin.once("data", exitHandler);
+    return () => {
+      process.stdin.removeListener("data", exitHandler);
+      setRawMode(true);
+    };
+  }, [selectionMode, setRawMode]);
+
+  const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
+  const sessionId = useMemo(() => randomUUID(), []);
+  const metricsRecorder = useMemo<MetricsRecorder>(() => createMetricsRecorder({ sessionId }), [sessionId]);
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
 
   useEffect(() => {
     (async () => {
-      const coreMemory = await loadCoreMemoryRaw();
-      const basePrompt = prompt("system-prompt");
+      const coreMemory = await loadCoreMemoryRaw(paths.core);
+      const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
       const composed = composeSystemPrompt(basePrompt, coreMemory);
       agent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
@@ -681,6 +756,7 @@ export default function App({
   }, [agent]);
 
   const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
+  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(undefined);
   const [configError, setConfigError] = useState<string | undefined>(undefined);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
@@ -689,11 +765,23 @@ export default function App({
     (async () => {
       const result = await loadConfig({ configPath });
       setConfigModels(result.models);
+      setConfigDefaultModel(result.defaultModel);
       if (result.error) {
         setConfigError(result.error);
       }
     })();
   }, [configPath]);
+
+  useEffect(() => {
+    if (!configDefaultModel) return;
+    try {
+      setActiveModel(resolveModelFromConfig(configDefaultModel));
+    } catch {
+      setConfigError((prev) =>
+        prev ?? `Failed to load default model ${configDefaultModel.provider}/${configDefaultModel.model}`,
+      );
+    }
+  }, [configDefaultModel]);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
@@ -710,6 +798,7 @@ export default function App({
         setPastTurns([]);
         historyRef.current = [];
         setSessionUsage(undefined);
+        setLastCallTokens(undefined);
         return;
       }
       if (trimmed === "/quit") {
@@ -734,6 +823,30 @@ export default function App({
           help: true,
         };
         setPastTurns((prev) => [...prev, helpTurn]);
+        return;
+      }
+      if (isStatusCommand(trimmed)) {
+        void handleStatusCommand(trimmed, {
+          model: activeModel.id,
+          workspace: process.cwd(),
+          sessionState: isRunningRef.current ? "active" : "ready",
+          sessionId,
+          sessionUsage,
+          memoryReady: !memoryService?.degraded,
+          toolCalls: pastTurns.reduce((sum, t) => sum + t.tools.length, 0),
+          errors: pastTurns.filter((t) => t.error).length,
+        }).then((statusText) => {
+          const statusTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: statusText,
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+          };
+          setPastTurns((prev) => [...prev, statusTurn]);
+        });
         return;
       }
       if (trimmed.startsWith("/")) {
@@ -787,11 +900,15 @@ export default function App({
       userAbortedRef.current = false;
       abortCommandRef.current = undefined;
 
+      const runStartMs = Date.now();
+
       agent
         .run(historyRef.current, {
           signal: controller.signal,
           mailbox: mailboxRef.current,
           abortCommand: abortCommandRef,
+          memoryBackend: memoryService?.getBackend(),
+          metricsRecorder,
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
@@ -811,7 +928,7 @@ export default function App({
                   ...activeTurnRef.current,
                   tools: [
                     ...activeTurnRef.current.tools,
-                    { id: randomUUID(), name: event.name, status: "pending", preview: "" },
+                    { id: randomUUID(), name: event.name, status: "pending", args: event.args, preview: toolArgsSummary(event.name, event.args) },
                   ],
                   toolOffsets: [...activeTurnRef.current.toolOffsets, currentTextLen],
                   status: "tool",
@@ -855,8 +972,7 @@ export default function App({
                 forceUpdate();
               }
             } else if (event.type === "usage") {
-              // Live-Update während des Turns; finale Aggregation erfolgt aus result.usage
-              // um Doppelzählung bei Multi-Turn-Runs zu vermeiden.
+              setLastCallTokens(event.callTotalTokens ?? event.totalTokens);
             }
           },
         })
@@ -885,10 +1001,27 @@ export default function App({
                     inputTokens: prev.inputTokens + result.usage.inputTokens,
                     outputTokens: prev.outputTokens + result.usage.outputTokens,
                     totalTokens: prev.totalTokens + result.usage.totalTokens,
+                    cacheRead: prev.cacheRead + result.usage.cacheRead,
+                    cacheWrite: prev.cacheWrite + result.usage.cacheWrite,
                   }
                 : result.usage
             );
+            // For single-turn runs the usage event may not fire, so set lastCallTokens here.
+            if (!result.aborted && result.turns <= 1) {
+              setLastCallTokens(result.usage.totalTokens);
+            }
           }
+          metricsRecorder.recordTurn({
+            model: activeModel.name,
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+            totalTokens: result.usage.totalTokens,
+            cacheRead: result.usage.cacheRead,
+            cacheWrite: result.usage.cacheWrite,
+            latencyMs: Date.now() - runStartMs,
+            toolCallCount: result.toolCallCount,
+            status: result.aborted ? "aborted" : "ok",
+          });
           abortControllerRef.current = null;
           userAbortedRef.current = false;
         })
@@ -912,9 +1045,15 @@ export default function App({
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
+          metricsRecorder.recordTurn({
+            model: activeModel.name,
+            latencyMs: Date.now() - runStartMs,
+            toolCallCount: 0,
+            status: "error",
+          });
         });
     },
-    [agent, exit, forceUpdate]
+    [agent, exit, forceUpdate, metricsRecorder, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -963,7 +1102,7 @@ export default function App({
         const selected = configModels[modelPickerIndex];
         if (selected) {
           try {
-            const newModel = resolveModel(selected.provider, selected.model);
+            const newModel = resolveModelFromConfig(selected);
             setActiveModel(newModel);
           } catch {
             const errorTurn: CompletedTurn = {
@@ -982,6 +1121,11 @@ export default function App({
         setShowModelPicker(false);
         return;
       }
+      return;
+    }
+
+    if (key.ctrl && inputStr === "e" && !selectionMode) {
+      setSelectionMode(true);
       return;
     }
 
@@ -1044,8 +1188,15 @@ export default function App({
           </Box>
         )}
       </Box>
-      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} />
-      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} contextWindow={activeModel.contextWindow} />
+      {selectionMode && (
+        <Box marginY={1}>
+          <Text bold color="yellow">
+            ⬛ Selection mode — scroll & select freely, press Enter to return
+          </Text>
+        </Box>
+      )}
+      <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
+      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} />
     </Box>
   );
 }

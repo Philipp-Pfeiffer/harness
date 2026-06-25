@@ -8,6 +8,7 @@ export const slashCommands: SlashCommandInfo[] = [
   { name: "/help", description: "Show this help" },
   { name: "/model", description: "Switch model" },
   { name: "/quit", description: "Exit" },
+  { name: "/status", description: "Show harness status" },
 ];
 
 export function getCommand(name: string): SlashCommandInfo | undefined {

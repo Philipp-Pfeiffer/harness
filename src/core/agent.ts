@@ -1,5 +1,5 @@
 import { stream } from "@mariozechner/pi-ai";
-import { resolveModel } from "./resolveModel.js";
+import { resolveModel, getApiKey } from "./resolveModel.js";
 import { prompt } from "../prompts.js";
 import { Value } from "typebox/value";
 import type {
@@ -15,6 +15,9 @@ import type {
 } from "@mariozechner/pi-ai";
 import type { Tool } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
+import { formatMemoryHint } from "./memoryBackend.js";
+import type { MemoryBackend } from "./memoryBackend.js";
+import type { MetricsRecorder } from "./metrics.js";
 
 export interface ToolCallLog {
   name: string;
@@ -39,6 +42,10 @@ export interface RunOptions {
   mailbox?: Mailbox;
   /** Optional mutable ref to the abort command string (set by CLI when user types stop/stopp/abort). */
   abortCommand?: { current: string | undefined };
+  /** Optional memory backend for ambient hint retrieval. */
+  memoryBackend?: MemoryBackend;
+  /** Optional metrics recorder for turn/tool/error events. */
+  metricsRecorder?: MetricsRecorder;
 }
 
 /**
@@ -52,11 +59,13 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 export type RunResult =
-  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; error?: { type: "provider_aborted"; message: string } }
-  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage };
+  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted"; message: string } }
+  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage; toolCallCount: number };
 
 /**
  * Events emitted during a streaming run.
@@ -70,7 +79,7 @@ export type AgentEvent =
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
   | { type: "turn_end"; turn: number }
-  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number };
+  | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number; cacheRead: number; cacheWrite: number; callCacheRead: number; callCacheWrite: number };
 
 function toPiTool(tool: Tool): PiTool {
   return {
@@ -78,6 +87,19 @@ function toPiTool(tool: Tool): PiTool {
     description: tool.description,
     parameters: tool.parameters,
   };
+}
+
+function extractUserText(msg: Message): string {
+  if (msg.role !== "user") return "";
+  const content = msg.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c): c is TextContent => c.type === "text")
+      .map((c) => c.text)
+      .join(" ");
+  }
+  return "";
 }
 
 function createToolResultMessage(
@@ -193,9 +215,32 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent, mailbox } = options;
+      const { signal, onEvent, mailbox, memoryBackend, metricsRecorder } = options;
+      let effectiveSystemPrompt = systemPrompt;
+
+      if (memoryBackend) {
+        let lastUserIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === "user") {
+            lastUserIndex = i;
+            break;
+          }
+        }
+
+        if (lastUserIndex !== -1) {
+          const query = extractUserText(messages[lastUserIndex]);
+          if (query.trim()) {
+            const hints = await memoryBackend.getAmbientHints(query);
+            const hintBlock = formatMemoryHint(hints);
+            if (hintBlock) {
+              effectiveSystemPrompt = `${systemPrompt}\n\n${hintBlock}`;
+            }
+          }
+        }
+      }
+
       const context: PiContext = {
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         messages,
         tools: tools.map(toPiTool),
       };
@@ -203,18 +248,22 @@ export function createAgent(config: AgentConfig): Agent {
       let totalInput = 0;
       let totalOutput = 0;
       let totalTokens = 0;
+      let totalCacheRead = 0;
+      let totalCacheWrite = 0;
+      let toolCallCount = 0;
 
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
           pushAbortAnnotation(context.messages, options.abortCommand);
-          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         drainMailbox(mailbox, context.messages);
 
-        const eventStream = stream(resolvedModel, context, { signal });
+        const apiKey = getApiKey(resolvedModel);
+        const eventStream = stream(resolvedModel, context, { signal, apiKey });
         let response: AssistantMessage;
         let partialText = "";
 
@@ -247,7 +296,7 @@ export function createAgent(config: AgentConfig): Agent {
             }
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
           throw err;
         }
@@ -255,7 +304,9 @@ export function createAgent(config: AgentConfig): Agent {
         totalInput += response.usage.input;
         totalOutput += response.usage.output;
         totalTokens += response.usage.totalTokens;
-        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens });
+        totalCacheRead += response.usage.cacheRead;
+        totalCacheWrite += response.usage.cacheWrite;
+        onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, callCacheRead: response.usage.cacheRead, callCacheWrite: response.usage.cacheWrite });
 
         if (response.stopReason === "error") {
           throw new Error(response.errorMessage ?? "Unbekannter Fehler");
@@ -275,7 +326,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           // Build buckets: independent calls get their own bucket;
@@ -327,22 +378,28 @@ export function createAgent(config: AgentConfig): Agent {
                 result = `Tool "${toolCall.name}" nicht gefunden.`;
                 isError = true;
                 logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
               } else {
                 if (!Value.Check(tool.parameters, toolCall.arguments)) {
                   result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
                   isError = true;
                   logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
+                  metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
                 } else {
+                  const toolStart = Date.now();
                   try {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
+                    toolCallCount++;
                     result = await Promise.resolve(tool.execute(toolCall.arguments));
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                     logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
+                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "ok" });
                   } catch (err) {
                     result = err instanceof Error ? err.message : String(err);
                     isError = true;
                     logger?.(`[TOOL ERROR] ${toolCall.name}: ${result}`);
+                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "error", error: result });
                   }
                 }
               }
@@ -384,7 +441,7 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           continue;
@@ -398,7 +455,7 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
-          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+          return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         if (response.stopReason === "aborted") {
@@ -406,14 +463,15 @@ export function createAgent(config: AgentConfig): Agent {
             aborted: false,
             turns: i + 1,
             finalMessage: "Anfrage wurde abgebrochen.",
-            usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens },
+            usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite },
+            toolCallCount,
             error: { type: "provider_aborted", message: "Provider aborted the generation." },
           };
         }
       }
 
       discardMailbox(mailbox);
-      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens } };
+      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
     },
   };
 }
