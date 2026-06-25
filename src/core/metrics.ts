@@ -2,6 +2,7 @@ import { mkdir, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { resolveHarnessPaths } from "../config/paths.js";
+import { traceTokenUsage } from "./tokenTrace.js";
 
 // ─── Event Types ───────────────────────────────────────────────
 
@@ -145,6 +146,13 @@ export function createMetricsRecorder(options?: {
 
   return {
     recordTurn(metric) {
+      traceTokenUsage("metrics-jsonl", {
+        inputTokens: metric.inputTokens ?? 0,
+        outputTokens: metric.outputTokens ?? 0,
+        totalTokens: metric.totalTokens ?? 0,
+        cacheRead: metric.cacheRead ?? 0,
+        cacheWrite: metric.cacheWrite ?? 0,
+      }, { sessionId, status: metric.status });
       void appendMetric(stamp(metric, "turn"), dir);
     },
     recordToolCall(metric) {

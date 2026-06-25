@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveMetricsDir } from "./metrics.js";
+import { traceTokenUsage } from "./tokenTrace.js";
 
 /* ─── Types ─── */
 
@@ -142,6 +143,14 @@ export async function readTodayMetrics(
       processLine(line);
     }
   }
+
+  traceTokenUsage("status-summary", {
+    inputTokens: agg.inputTokens,
+    outputTokens: agg.outputTokens,
+    totalTokens: agg.totalTokens,
+    cacheRead: agg.cacheRead,
+    cacheWrite: agg.cacheWrite,
+  }, { toolCalls: agg.toolCalls, errors: agg.errors });
 
   return agg;
 }

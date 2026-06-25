@@ -18,6 +18,7 @@ import type { Mailbox } from "./mailbox.js";
 import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
 import type { MetricsRecorder } from "./metrics.js";
+import { traceTokenUsage } from "./tokenTrace.js";
 
 export interface ToolCallLog {
   name: string;
@@ -275,6 +276,13 @@ export function createAgent(config: AgentConfig): Agent {
             }
           }
           response = await eventStream.result();
+          traceTokenUsage("provider-response", {
+            inputTokens: response.usage.input,
+            outputTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+            cacheRead: response.usage.cacheRead,
+            cacheWrite: response.usage.cacheWrite,
+          }, { turn: i + 1, model: resolvedModel.name });
         } catch (err) {
           // If the signal triggered the cancellation, return gracefully.
           // pi-ai may throw an AbortError or the signal may simply be set.
@@ -306,6 +314,14 @@ export function createAgent(config: AgentConfig): Agent {
         totalTokens += response.usage.totalTokens;
         totalCacheRead += response.usage.cacheRead;
         totalCacheWrite += response.usage.cacheWrite;
+        const cumulativeUsage = {
+          inputTokens: totalInput,
+          outputTokens: totalOutput,
+          totalTokens,
+          cacheRead: totalCacheRead,
+          cacheWrite: totalCacheWrite,
+        };
+        traceTokenUsage("agent-result", cumulativeUsage, { turn: i + 1, model: resolvedModel.name });
         onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, callCacheRead: response.usage.cacheRead, callCacheWrite: response.usage.cacheWrite });
 
         if (response.stopReason === "error") {
