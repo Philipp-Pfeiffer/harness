@@ -44,6 +44,7 @@ class WarmupGatedBackend implements MemoryBackend {
     if (!this.warmedUp) {
       return [{
         source: "_warmup",
+        title: "Memory index warming up",
         score: 0,
         content: "Memory index is warming up. Please retry in a few seconds.",
       }];
