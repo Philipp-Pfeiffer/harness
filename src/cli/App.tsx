@@ -18,6 +18,24 @@ import { loadConfig, type ConfigModel } from "./config.js";
 import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
 import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
 import { resolveHarnessPaths, type HarnessPaths } from "../config/paths.js";
+import {
+  createSession,
+  endSession,
+  recordTurn,
+  calculateTurnCost,
+  loadSession,
+  listSessionsWithDetails,
+  turnsToMessages,
+  SESSION_LOAD_WARN_THRESHOLD,
+  type Session,
+  type SessionTurn,
+} from "../core/session.js";
+import {
+  isSessionCommand,
+  parseSessionCommand,
+  formatSessionList,
+  formatSessionLoadWarning,
+} from "./sessionCommand.js";
 
 /* ─── marked config ─── */
 
@@ -57,7 +75,7 @@ export type ToolItem = {
   expanded?: boolean;
 };
 
-type CompletedTurn = {
+export type CompletedTurn = {
   id: string;
   userText: string;
   assistantText: string;
@@ -88,6 +106,31 @@ function formatTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function turnToCompletedTurn(turn: SessionTurn): CompletedTurn {
+  const tools: ToolItem[] = (turn.tool_calls ?? []).map((call) => {
+    const result = turn.tool_results?.find((r) => r.toolCallId === call.id);
+    return {
+      id: call.id,
+      name: call.name,
+      status: result ? (result.isError ? "error" : "done") : "done",
+      args: call.arguments,
+      preview: result ? truncate(result.result, 80) : "",
+      result: result?.result,
+      expanded: false,
+    };
+  });
+
+  return {
+    id: turn.id,
+    userText: turn.userContent,
+    assistantText: turn.content,
+    assistantRendered: true,
+    tools,
+    toolOffsets: [],
+    aborted: false,
+  };
 }
 
 /**
@@ -713,6 +756,11 @@ export default function App({
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
   const mailboxRef = useRef<Mailbox>(createMailbox());
+  const sessionRef = useRef<Session | null>(null);
+  const pendingResumeRef = useRef<{ sessionId: string; tokens: number } | null>(null);
+  const metricsRecorderRef = useRef<MetricsRecorder>(createMetricsRecorder({}));
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionInitializedRef = useRef(false);
 
   useEffect(() => {
     const handleResize = () => {
@@ -739,8 +787,6 @@ export default function App({
   const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
-  const sessionId = useMemo(() => randomUUID(), []);
-  const metricsRecorder = useMemo<MetricsRecorder>(() => createMetricsRecorder({ sessionId }), [sessionId]);
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
@@ -763,14 +809,14 @@ export default function App({
 
   useEffect(() => {
     (async () => {
-      const result = await loadConfig({ configPath });
+      const result = await loadConfig({ configPath, harnessHome: paths.home });
       setConfigModels(result.models);
       setConfigDefaultModel(result.defaultModel);
       if (result.error) {
         setConfigError(result.error);
       }
     })();
-  }, [configPath]);
+  }, [configPath, paths.home]);
 
   useEffect(() => {
     if (!configDefaultModel) return;
@@ -783,16 +829,183 @@ export default function App({
     }
   }, [configDefaultModel]);
 
+  // Initialize session once on startup.
+  useEffect(() => {
+    if (sessionInitializedRef.current) return;
+    sessionInitializedRef.current = true;
+
+    void (async () => {
+      try {
+        const s = await createSession(paths, {
+          model: activeModel.name,
+          title: "CLI Session",
+        });
+        sessionRef.current = s;
+        metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+      } catch (err) {
+        console.error("[harness] failed to create session:", err instanceof Error ? err.message : String(err));
+      }
+    })();
+  }, []);
+
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
       ? `tool: ${activeTurnRef.current.tools[activeTurnRef.current.tools.length - 1]?.name || ""}`
       : activeTurnRef.current.status
     : "ready";
 
+  const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+  const clearIdleTimer = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }, []);
+
+  const resetIdleTimer = useCallback(() => {
+    clearIdleTimer();
+    idleTimerRef.current = setTimeout(() => {
+      if (sessionRef.current) {
+        void endSession(sessionRef.current, paths)
+          .then(() => {
+            sessionRef.current = null;
+            historyRef.current = [];
+            setPastTurns([]);
+            setSessionUsage(undefined);
+            setLastCallTokens(undefined);
+            const infoTurn: CompletedTurn = {
+              id: randomUUID(),
+              userText: "",
+              assistantText: "Session ended due to idle timeout. Type a message to start a new session.",
+              assistantRendered: false,
+              tools: [],
+              toolOffsets: [],
+              aborted: false,
+            };
+            setPastTurns((prev) => [...prev, infoTurn]);
+          })
+          .catch((err) => {
+            console.error("[harness] idle timeout end session failed:", err instanceof Error ? err.message : String(err));
+          });
+      }
+    }, IDLE_TIMEOUT_MS);
+  }, [clearIdleTimer, paths]);
+
+  // Cleanup idle timer and end active session on unmount.
+  useEffect(() => {
+    return () => {
+      clearIdleTimer();
+      if (sessionRef.current) {
+        void endSession(sessionRef.current, paths).catch((err) => {
+          console.error("[harness] failed to end session:", err instanceof Error ? err.message : String(err));
+        });
+      }
+    };
+  }, [clearIdleTimer, paths]);
+
+  function resolveModelByName(name: string): Model<Api> | undefined {
+    const match = configModels.find(
+      (m) => m.alias === name || m.model === name,
+    );
+    if (!match) return undefined;
+    try {
+      return resolveModelFromConfig(match);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function resumeSession(sessionId: string) {
+    try {
+      if (sessionRef.current) {
+        await endSession(sessionRef.current, paths);
+        sessionRef.current = null;
+      }
+
+      const loaded = await loadSession(sessionId, paths);
+      if (!loaded) {
+        const errorTurn: CompletedTurn = {
+          id: randomUUID(),
+          userText: `/session ${sessionId}`,
+          assistantText: "",
+          assistantRendered: false,
+          tools: [],
+          toolOffsets: [],
+          aborted: false,
+          error: `Session not found: ${sessionId}`,
+        };
+        setPastTurns((prev) => [...prev, errorTurn]);
+        return;
+      }
+
+      const targetModel = resolveModelByName(loaded.session.model) ?? activeModel;
+      if (targetModel.id !== activeModel.id) {
+        setActiveModel(targetModel);
+      }
+
+      sessionRef.current = loaded.session;
+      metricsRecorderRef.current = createMetricsRecorder({
+        sessionId: loaded.session.id,
+      });
+      historyRef.current = turnsToMessages(loaded.turns);
+
+      const replayTurns = loaded.turns.map(turnToCompletedTurn);
+      const infoTurn: CompletedTurn = {
+        id: randomUUID(),
+        userText: "",
+        assistantText: `Resumed session ${loaded.session.id} (${replayTurns.length} turns, ~${formatTokens(loaded.tokenEstimate)} tokens)`,
+        assistantRendered: false,
+        tools: [],
+        toolOffsets: [],
+        aborted: false,
+      };
+      setPastTurns([...replayTurns, infoTurn]);
+      setSessionUsage(loaded.session.tokenTotals);
+      setLastCallTokens(loaded.tokenEstimate);
+    } catch (err) {
+      console.error(
+        "[harness] /session resume failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+      const errorTurn: CompletedTurn = {
+        id: randomUUID(),
+        userText: `/session ${sessionId}`,
+        assistantText: "",
+        assistantRendered: false,
+        tools: [],
+        toolOffsets: [],
+        aborted: false,
+        error: `Failed to resume session: ${err instanceof Error ? err.message : String(err)}`,
+      };
+      setPastTurns((prev) => [...prev, errorTurn]);
+    }
+  }
+
   const handleSubmit = useCallback(
-    (value: string) => {
+    async (value: string) => {
       const trimmed = value.trim();
       if (!trimmed) return;
+
+      if (pendingResumeRef.current) {
+        const answer = trimmed.toLowerCase();
+        if (answer === "y" || answer === "yes") {
+          void resumeSession(pendingResumeRef.current.sessionId);
+        } else {
+          const cancelTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: "Resume cancelled.",
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+          };
+          setPastTurns((prev) => [...prev, cancelTurn]);
+        }
+        pendingResumeRef.current = null;
+        return;
+      }
 
       if (trimmed === "/clear") {
         setPastTurns([]);
@@ -801,7 +1014,78 @@ export default function App({
         setLastCallTokens(undefined);
         return;
       }
+      if (trimmed === "/new") {
+        try {
+          if (sessionRef.current) {
+            await endSession(sessionRef.current, paths);
+          }
+          const s = await createSession(paths, { model: activeModel.name, title: "CLI Session" });
+          sessionRef.current = s;
+          metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+          historyRef.current = [];
+          setPastTurns([]);
+          setSessionUsage(undefined);
+          setLastCallTokens(undefined);
+          const infoTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: `Started new session: ${s.id}`,
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+          };
+          setPastTurns((prev) => [...prev, infoTurn]);
+        } catch (err) {
+          console.error("[harness] /new failed:", err instanceof Error ? err.message : String(err));
+          const errorTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: "",
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+            error: "Failed to start a new session.",
+          };
+          setPastTurns((prev) => [...prev, errorTurn]);
+        }
+        return;
+      }
+      if (trimmed === "/end") {
+        try {
+          if (sessionRef.current) {
+            await endSession(sessionRef.current, paths);
+            sessionRef.current = null;
+          }
+        } catch (err) {
+          console.error("[harness] /end failed:", err instanceof Error ? err.message : String(err));
+        }
+        clearIdleTimer();
+        historyRef.current = [];
+        setPastTurns([]);
+        setSessionUsage(undefined);
+        setLastCallTokens(undefined);
+        const infoTurn: CompletedTurn = {
+          id: randomUUID(),
+          userText: trimmed,
+          assistantText: "Session ended. Type a message to start a new session.",
+          assistantRendered: false,
+          tools: [],
+          toolOffsets: [],
+          aborted: false,
+        };
+        setPastTurns((prev) => [...prev, infoTurn]);
+        return;
+      }
       if (trimmed === "/quit") {
+        try {
+          if (sessionRef.current) {
+            await endSession(sessionRef.current, paths);
+          }
+        } catch (err) {
+          console.error("[harness] /quit failed to end session:", err instanceof Error ? err.message : String(err));
+        }
         exit();
         process.exit(0);
         return;
@@ -826,27 +1110,94 @@ export default function App({
         return;
       }
       if (isStatusCommand(trimmed)) {
-        void handleStatusCommand(trimmed, {
+        const statusText = await handleStatusCommand(trimmed, {
           model: activeModel.id,
           workspace: process.cwd(),
           sessionState: isRunningRef.current ? "active" : "ready",
-          sessionId,
+          sessionId: sessionRef.current?.id,
           sessionUsage,
           memoryReady: !memoryService?.degraded,
           toolCalls: pastTurns.reduce((sum, t) => sum + t.tools.length, 0),
           errors: pastTurns.filter((t) => t.error).length,
-        }).then((statusText) => {
-          const statusTurn: CompletedTurn = {
+        });
+        const statusTurn: CompletedTurn = {
+          id: randomUUID(),
+          userText: trimmed,
+          assistantText: statusText,
+          assistantRendered: false,
+          tools: [],
+          toolOffsets: [],
+          aborted: false,
+        };
+        setPastTurns((prev) => [...prev, statusTurn]);
+        return;
+      }
+      if (isSessionCommand(trimmed)) {
+        const cmd = parseSessionCommand(trimmed);
+        if (!cmd) {
+          const errorTurn: CompletedTurn = {
             id: randomUUID(),
             userText: trimmed,
-            assistantText: statusText,
+            assistantText: "",
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+            error: `Usage: /session [id] [--force]`,
+          };
+          setPastTurns((prev) => [...prev, errorTurn]);
+          return;
+        }
+
+        if (cmd.type === "list") {
+          const sessions = await listSessionsWithDetails(paths);
+          const listTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: formatSessionList(sessions),
             assistantRendered: false,
             tools: [],
             toolOffsets: [],
             aborted: false,
           };
-          setPastTurns((prev) => [...prev, statusTurn]);
-        });
+          setPastTurns((prev) => [...prev, listTurn]);
+          return;
+        }
+
+        const loaded = await loadSession(cmd.sessionId, paths);
+        if (!loaded) {
+          const errorTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: "",
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+            error: `Session not found: ${cmd.sessionId}`,
+          };
+          setPastTurns((prev) => [...prev, errorTurn]);
+          return;
+        }
+
+        if (cmd.force || loaded.tokenEstimate < SESSION_LOAD_WARN_THRESHOLD) {
+          void resumeSession(cmd.sessionId);
+        } else {
+          pendingResumeRef.current = {
+            sessionId: cmd.sessionId,
+            tokens: loaded.tokenEstimate,
+          };
+          const warnTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: formatSessionLoadWarning(cmd.sessionId, loaded.tokenEstimate),
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+          };
+          setPastTurns((prev) => [...prev, warnTurn]);
+        }
         return;
       }
       if (trimmed.startsWith("/")) {
@@ -888,7 +1239,32 @@ export default function App({
         return;
       }
 
+      // Ensure an active session exists (e.g. after /end or idle timeout).
+      if (!sessionRef.current) {
+        try {
+          const s = await createSession(paths, { model: activeModel.name, title: "CLI Session" });
+          sessionRef.current = s;
+          metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+        } catch (err) {
+          console.error("[harness] failed to create session:", err instanceof Error ? err.message : String(err));
+          const errorTurn: CompletedTurn = {
+            id: randomUUID(),
+            userText: trimmed,
+            assistantText: "",
+            assistantRendered: false,
+            tools: [],
+            toolOffsets: [],
+            aborted: false,
+            error: "Failed to start a new session.",
+          };
+          setPastTurns((prev) => [...prev, errorTurn]);
+          return;
+        }
+      }
+      resetIdleTimer();
+
       setInputHistory((prev) => [...prev, trimmed]);
+      const messagesBeforeTurn = historyRef.current.length;
       historyRef.current.push({ role: "user", content: trimmed, timestamp: Date.now() });
 
       activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking", steers: [] };
@@ -908,7 +1284,7 @@ export default function App({
           mailbox: mailboxRef.current,
           abortCommand: abortCommandRef,
           memoryBackend: memoryService?.getBackend(),
-          metricsRecorder,
+          metricsRecorder: metricsRecorderRef.current,
           onEvent: (event: AgentEvent) => {
             if (userAbortedRef.current) return;
 
@@ -993,8 +1369,63 @@ export default function App({
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
+
+            // Persist turn to session transcript.
+            if (sessionRef.current) {
+              const timestamp = new Date().toISOString();
+              const sessionTurn: SessionTurn = {
+                id: completedTurn.id,
+                role: "assistant",
+                content: completedTurn.assistantText,
+                userContent: completedTurn.userText,
+                tool_calls: completedTurn.tools.map((t) => ({
+                  id: t.id,
+                  name: t.name,
+                  arguments: t.args,
+                })),
+                tool_results: completedTurn.tools.map((t) => ({
+                  toolCallId: t.id,
+                  name: t.name,
+                  result: t.result ?? "",
+                  isError: t.status === "error",
+                })),
+                tokens: {
+                  input: result.usage.inputTokens,
+                  output: result.usage.outputTokens,
+                  total: result.usage.totalTokens,
+                  cacheRead: result.usage.cacheRead,
+                  cacheWrite: result.usage.cacheWrite,
+                },
+                cost: calculateTurnCost(
+                  {
+                    input: result.usage.inputTokens,
+                    output: result.usage.outputTokens,
+                    total: result.usage.totalTokens,
+                    cacheRead: result.usage.cacheRead,
+                    cacheWrite: result.usage.cacheWrite,
+                  },
+                  activeModel.cost,
+                ),
+                timing: {
+                  startedAt: new Date(runStartMs).toISOString(),
+                  latencyMs: Date.now() - runStartMs,
+                },
+                model: activeModel.name,
+                timestamp,
+                messages: historyRef.current.slice(messagesBeforeTurn),
+              };
+              void recordTurn(sessionRef.current, sessionTurn, paths)
+                .then((updated) => {
+                  sessionRef.current = updated;
+                  setSessionUsage(updated.tokenTotals);
+                })
+                .catch((err) => {
+                  console.error("[harness] failed to record turn:", err instanceof Error ? err.message : String(err));
+                });
+            }
           }
           if (result.usage) {
+            // Keep in-memory fallback up to date until async persistence resolves.
             setSessionUsage((prev) =>
               prev
                 ? {
@@ -1011,7 +1442,7 @@ export default function App({
               setLastCallTokens(result.usage.totalTokens);
             }
           }
-          metricsRecorder.recordTurn({
+          metricsRecorderRef.current.recordTurn({
             model: activeModel.name,
             inputTokens: result.usage.inputTokens,
             outputTokens: result.usage.outputTokens,
@@ -1042,10 +1473,54 @@ export default function App({
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
+
+            // Persist error turn without token usage.
+            if (sessionRef.current) {
+              const timestamp = new Date().toISOString();
+              const sessionTurn: SessionTurn = {
+                id: completedTurn.id,
+                role: "assistant",
+                content: completedTurn.assistantText,
+                userContent: completedTurn.userText,
+                tool_calls: completedTurn.tools.map((t) => ({
+                  id: t.id,
+                  name: t.name,
+                  arguments: t.args,
+                })),
+                tool_results: completedTurn.tools.map((t) => ({
+                  toolCallId: t.id,
+                  name: t.name,
+                  result: t.result ?? "",
+                  isError: t.status === "error",
+                })),
+                tokens: {
+                  input: 0,
+                  output: 0,
+                  total: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                },
+                timing: {
+                  startedAt: new Date(runStartMs).toISOString(),
+                  latencyMs: Date.now() - runStartMs,
+                },
+                model: activeModel.name,
+                timestamp,
+                messages: historyRef.current.slice(messagesBeforeTurn),
+              };
+              void recordTurn(sessionRef.current, sessionTurn, paths)
+                .then((updated) => {
+                  sessionRef.current = updated;
+                  setSessionUsage(updated.tokenTotals);
+                })
+                .catch((err) => {
+                  console.error("[harness] failed to record turn:", err instanceof Error ? err.message : String(err));
+                });
+            }
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
-          metricsRecorder.recordTurn({
+          metricsRecorderRef.current.recordTurn({
             model: activeModel.name,
             latencyMs: Date.now() - runStartMs,
             toolCallCount: 0,
@@ -1053,7 +1528,7 @@ export default function App({
           });
         });
     },
-    [agent, exit, forceUpdate, metricsRecorder, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService]
+    [agent, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -1133,7 +1608,13 @@ export default function App({
       const now = Date.now();
       if (now - lastSigintRef.current < 500) {
         if (!isRunningRef.current) {
-          process.exit(130);
+          void (async () => {
+            if (sessionRef.current) {
+              await endSession(sessionRef.current, paths);
+            }
+            process.exit(130);
+          })();
+          return;
         }
       }
       lastSigintRef.current = now;

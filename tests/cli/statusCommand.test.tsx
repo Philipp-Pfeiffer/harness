@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "ink-testing-library";
+import { mkdtempSync, rmdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import App from "../../src/cli/App.js";
 import { isStatusCommand, handleStatusCommand } from "../../src/cli/statusCommand.js";
+import type { HarnessPaths } from "../../src/config/paths.js";
 
 vi.mock("../../src/tools/registry.js", () => ({
   loadTools: vi.fn(() => []),
@@ -28,6 +32,26 @@ vi.mock("../../src/core/agent.js", () => ({
 
 const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {}) as any);
 
+let testBaseDir: string | undefined;
+
+function testPaths(): HarnessPaths {
+  testBaseDir = mkdtempSync(join(tmpdir(), "harness-status-test-"));
+  return {
+    home: join(testBaseDir, "home"),
+    state: join(testBaseDir, "state"),
+    core: join(testBaseDir, "home", "core.md"),
+    agents: join(testBaseDir, "home", "AGENTS.md"),
+    config: join(testBaseDir, "home", "config.json"),
+    memory: join(testBaseDir, "home", "memory"),
+    inbox: join(testBaseDir, "home", "memory", "_inbox.md"),
+    sources: join(testBaseDir, "home", "sources"),
+    skills: join(testBaseDir, "home", "skills"),
+    sessions: join(testBaseDir, "state", "sessions"),
+    metrics: join(testBaseDir, "state", "metrics"),
+    index: join(testBaseDir, "state", "index"),
+  };
+}
+
 beforeEach(() => {
   exitSpy.mockClear();
   vi.spyOn(process, "cwd").mockReturnValue("/tmp");
@@ -36,6 +60,14 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  if (testBaseDir) {
+    try {
+      rmdirSync(testBaseDir, { recursive: true });
+    } catch {
+      // ignore cleanup failures
+    }
+    testBaseDir = undefined;
+  }
 });
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -98,7 +130,7 @@ describe("handleStatusCommand", () => {
 
 describe("/status in TUI", () => {
   it("renders status output in the chat area without calling agent", async () => {
-    const { stdin, frames } = render(<App />);
+    const { stdin, frames } = render(<App paths={testPaths()} />);
 
     stdin.write("/status");
     await delay(50);
@@ -116,7 +148,7 @@ describe("/status in TUI", () => {
   });
 
   it("shows /status in autocomplete picker", async () => {
-    const { lastFrame, stdin } = render(<App />);
+    const { lastFrame, stdin } = render(<App paths={testPaths()} />);
 
     stdin.write("/");
     await delay(50);

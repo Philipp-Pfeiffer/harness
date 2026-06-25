@@ -9,6 +9,9 @@ export const slashCommands: SlashCommandInfo[] = [
   { name: "/model", description: "Switch model" },
   { name: "/quit", description: "Exit" },
   { name: "/status", description: "Show harness status" },
+  { name: "/end", description: "End current session" },
+  { name: "/new", description: "Start a new session" },
+  { name: "/session", description: "List or resume sessions" },
 ];
 
 export function getCommand(name: string): SlashCommandInfo | undefined {
