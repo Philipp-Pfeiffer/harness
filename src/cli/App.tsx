@@ -1,8 +1,8 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { Box, Text, useInput, useApp, useStdout, useStdin, Static } from "ink";
-import chalk from "chalk";
+import chalk, { Chalk } from "chalk";
 import { marked } from "marked";
-import { markedTerminal } from "marked-terminal";
+import MarkedTerminalRenderer from "marked-terminal";
 import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
@@ -37,30 +37,87 @@ import {
   formatSessionLoadWarning,
 } from "./sessionCommand.js";
 
-/* ─── marked config ─── */
+/* ─── marked config ───
+   Use a dedicated chalk instance with full ANSI level so that markdown
+   formatting (bold, italic, colors) is always emitted. The ambient chalk
+   instance may downgrade to level 0 (e.g. NO_COLOR), which strips the
+   formatting that Ink needs to render styled text.
 
-marked.use(
-  markedTerminal({
-    tab: 2,
-    showSectionPrefix: false,
-    firstHeading: chalk.cyan.bold.underline,
-    heading: chalk.cyan.bold,
-    strong: chalk.bold,
-    em: chalk.italic,
-    codespan: (text: string) => chalk.gray(`\`${text}\``),
-    code: chalk.gray,
-    blockquote: chalk.gray.italic,
-    hr: chalk.gray,
-    table: chalk.reset,
-    link: chalk.blue,
-    href: chalk.blue.underline,
-    width: process.stdout.columns || 80,
-  }) as any
-);
+   marked-terminal's default listitem renderer uses the block parser for
+   list item tokens, which drops nested inline formatting (e.g. **bold**
+   inside a bullet). We build the extension manually so we can override
+   listitem to parse inline tokens correctly. */
+
+const mdChalk = new Chalk({ level: 3 });
+
+const mdRenderer = new (MarkedTerminalRenderer as any)({
+  tab: 2,
+  showSectionPrefix: false,
+  firstHeading: mdChalk.cyan.bold.underline,
+  heading: mdChalk.cyan.bold,
+  strong: mdChalk.bold,
+  em: mdChalk.italic,
+  codespan: (text: string) => mdChalk.gray(`\`${text}\``),
+  code: mdChalk.gray,
+  blockquote: mdChalk.gray.italic,
+  hr: mdChalk.reset,
+  table: mdChalk.reset,
+  link: mdChalk.blue,
+  href: mdChalk.blue.underline,
+  width: process.stdout.columns || 80,
+});
+
+const rendererMethods = [
+  "text",
+  "code",
+  "blockquote",
+  "html",
+  "heading",
+  "hr",
+  "list",
+  "listitem",
+  "checkbox",
+  "paragraph",
+  "table",
+  "tablerow",
+  "tablecell",
+  "strong",
+  "em",
+  "codespan",
+  "br",
+  "del",
+  "link",
+  "image",
+] as const;
+
+const markedExtension: any = { renderer: {}, useNewRenderer: true };
+for (const method of rendererMethods) {
+  markedExtension.renderer[method] = function (...args: unknown[]) {
+    mdRenderer.options = (this as any).options;
+    mdRenderer.parser = (this as any).parser;
+    return (mdRenderer as any)[method](...args);
+  };
+}
+
+mdRenderer.listitem = function (item: any) {
+  const body = item.tokens
+    .map((token: any) => {
+      if (token.type === "text" && token.tokens) {
+        return this.parser.parseInline(token.tokens);
+      }
+      if (token.type === "list") {
+        return "\n" + this.parser.parse([token]);
+      }
+      return this.parser.parse([token]);
+    })
+    .join("");
+  return "\n  • " + body;
+};
+
+marked.use(markedExtension);
 
 function renderMarkdown(text: string): string {
-  const raw = marked.parse(text) as string;
-  return raw.replace(/^(\s*)\* /gm, "$1• ");
+  return marked.parse(text) as string;
 }
 
 /* ─── Types ─── */
