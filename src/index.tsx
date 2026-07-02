@@ -23,9 +23,70 @@ if (process.argv[2] === "migrate-home") {
   process.exit(result.dryRun || result.moved.length > 0 || result.indexNeedsRebuild ? 0 : 0);
 }
 
+// ─── Subcommand: daemon ────────────────────────────────────────
+if (process.argv[2] === "daemon") {
+  const subcommand = process.argv[3] ?? "status";
+  const { daemonStart, daemonStop, daemonRestart, daemonStatus, daemonInstall, daemonRun } =
+    await import("./daemon/commands.js");
+
+  let exitCode = 0;
+  let stdout: string;
+
+  switch (subcommand) {
+    case "start":
+      ({ stdout, exitCode } = await daemonStart());
+      break;
+    case "stop":
+      ({ stdout, exitCode } = await daemonStop());
+      break;
+    case "restart":
+      ({ stdout, exitCode } = await daemonRestart());
+      break;
+    case "status":
+      ({ stdout, exitCode } = await daemonStatus());
+      break;
+    case "install":
+      ({ stdout, exitCode } = await daemonInstall());
+      break;
+    case "run":
+      // Internal: the actual daemon process (spawned by `daemon start`)
+      ({ exitCode } = await daemonRun());
+      stdout = "";
+      break;
+    default:
+      stdout = `Unknown daemon subcommand: ${subcommand}\nUsage: harness daemon [start|stop|restart|status|install|run]`;
+      exitCode = 1;
+  }
+
+  if (stdout) console.log(stdout);
+  process.exit(exitCode);
+}
+
+// ─── Subcommand: reload-config ────────────────────────────────
+if (process.argv[2] === "reload-config") {
+  const { sendIpcRequest } = await import("./daemon/ipc.js");
+  const paths = resolveHarnessPaths();
+  try {
+    const resp = await sendIpcRequest(paths.socketFile, { type: "reload-config" });
+    if (resp.type === "config-reloaded") {
+      console.log(resp.ok ? "Config reloaded." : "Config reload failed.");
+      if (resp.message) console.log(resp.message);
+      process.exit(resp.ok ? 0 : 1);
+    }
+    console.error("Unexpected response from daemon:", resp.type);
+    process.exit(1);
+  } catch (err) {
+    console.error("Cannot reach daemon:", err instanceof Error ? err.message : String(err));
+    console.error("Is the daemon running? Start it with: harness daemon start");
+    process.exit(1);
+  }
+}
+
+// ─── Interactive TUI mode (default) ───────────────────────────
 if (!process.stdin.isTTY) {
   console.error("harness requires an interactive terminal (TTY).");
   console.error("Run without piping stdin, or use an interactive shell.");
+  console.error("For non-interactive use, start the daemon: harness daemon start");
   process.exit(1);
 }
 

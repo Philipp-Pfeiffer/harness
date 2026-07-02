@@ -39,7 +39,22 @@ export interface ErrorMetric {
   message: string;
 }
 
-export type MetricEvent = TurnMetric | ToolCallMetric | ErrorMetric;
+export type DaemonEventType =
+  | "daemon_start"
+  | "daemon_stop"
+  | "daemon_crash_restart"
+  | "config_reload";
+
+export interface DaemonMetric {
+  ts: string;
+  type: "daemon";
+  event: DaemonEventType;
+  pid?: number;
+  uptime?: number;
+  message?: string;
+}
+
+export type MetricEvent = TurnMetric | ToolCallMetric | ErrorMetric | DaemonMetric;
 
 // ─── Directory Resolution ──────────────────────────────────────
 
@@ -83,6 +98,7 @@ const FILE_PREFIX: Record<MetricEvent["type"], string> = {
   turn: "turns",
   tool_call: "tools",
   error: "system",
+  daemon: "system",
 };
 
 /** Returns YYYY-MM-DD in UTC for consistent daily rotation. */
@@ -116,6 +132,7 @@ export interface MetricsRecorder {
   recordTurn(metric: Omit<TurnMetric, "ts" | "type">): void;
   recordToolCall(metric: Omit<ToolCallMetric, "ts" | "type">): void;
   recordError(metric: Omit<ErrorMetric, "ts" | "type">): void;
+  recordDaemon(metric: Omit<DaemonMetric, "ts" | "type">): void;
 }
 
 /**
@@ -160,6 +177,9 @@ export function createMetricsRecorder(options?: {
     },
     recordError(metric) {
       void appendMetric(stamp(metric, "error"), dir);
+    },
+    recordDaemon(metric) {
+      void appendMetric(stamp(metric, "daemon"), dir);
     },
   };
 }

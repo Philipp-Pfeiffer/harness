@@ -275,7 +275,7 @@ describe("formatStatusSummary", () => {
     const summary = await buildStatusSummary(baseContext, null);
     const output = formatStatusSummary(summary);
     const lines = output.split("\n");
-    expect(lines.length).toBe(14);
+    expect(lines.length).toBe(17);
   });
 });
 

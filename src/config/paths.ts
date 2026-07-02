@@ -27,6 +27,12 @@ export interface HarnessPaths {
   metrics: string;
   /** $state/index/ */
   index: string;
+  /** $state/logs/ */
+  logs: string;
+  /** $state/daemon.pid */
+  pidFile: string;
+  /** $state/daemon.sock */
+  socketFile: string;
 }
 
 /**
@@ -62,6 +68,9 @@ export function resolveHarnessPaths(opts?: { home?: string }): HarnessPaths {
     sessions: path.join(state, "sessions"),
     metrics: path.join(state, "metrics"),
     index: path.join(state, "index"),
+    logs: path.join(state, "logs"),
+    pidFile: path.join(state, "daemon.pid"),
+    socketFile: path.join(state, "daemon.sock"),
   };
 }
 
@@ -76,4 +85,5 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.sessions, { recursive: true });
   await mkdir(paths.metrics, { recursive: true });
   await mkdir(paths.index, { recursive: true });
+  await mkdir(paths.logs, { recursive: true });
 }

@@ -92,7 +92,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 | Kategorie | Pfad | Inhalt | Git? |
 |-----------|------|--------|------|
 | **HOME** (durable) | `$HARNESS_HOME` (Default `~/harness`) | `core.md`, `AGENTS.md`, `config.json`, `memory/`, `sources/`, `skills/` | Eigenes Git |
-| **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/` | Nein |
+| **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/`, `logs/`, `daemon.pid`, `daemon.sock` | Nein |
 | **CODE** | Repo | `src/`, `prompts/`, `tests/`, `docs/` | Ja |
 
 - **HOME** ist portabel und wird von mehreren Agent-Prozessen geteilt.
@@ -205,3 +205,84 @@ Detaillierte Dokumentation für alle Tools liegt im `docs/tools/` Ordner:
 - `edit.md` — edit-Tool (Find-and-Replace, READ_REQUIRED)
 - `process.md` — process-Tool (Background-Lifecycle)
 - `file_state.md` — read-tracking für edit-Validation
+
+## Daemon / Persistent Runtime Mode
+
+**Files:** `src/daemon/` (types.ts, logger.ts, process.ts, ipc.ts, runtime.ts, commands.ts, systemd.ts)
+
+### CLI Commands
+
+```
+harness daemon start     — Start daemon as detached background process
+harness daemon stop      — Stop daemon (SIGTERM, then SIGKILL after 10s)
+harness daemon restart   — Stop + start
+harness daemon status     — Show PID, uptime, model, gateways, last errors
+harness daemon install   — Generate and install systemd user service unit
+harness daemon run       — Internal: run the daemon process (spawned by `start`)
+harness reload-config    — Hot-reload daemon config without restart
+```
+
+### Config
+
+Daemon config is an optional `"daemon"` key inside the existing `config.json`:
+
+```json
+{
+  "models": [...],
+  "providers": {...},
+  "defaultModel": {...},
+  "daemon": {
+    "gateways": [],
+    "skills": [],
+    "memory": { "ambientHints": true, "maxHints": 5 },
+    "logRetentionDays": 14,
+    "heartbeatIntervalSec": 0
+  }
+}
+```
+
+**Hot-reloadable (via `harness reload-config`):** `memory.ambientHints`, `memory.maxHints`, `logRetentionDays`, `heartbeatIntervalSec`.
+
+**Requires daemon restart:** `defaultModel`, `providers`, `models` (model list changes), adding/removing gateways.
+
+### Logging
+
+Structured JSON-lines logs go to `$HARNESS_STATE/logs/daemon-YYYY-MM-DD.log`. Daily rotation is implicit (new date → new file). Retention cleanup runs on init and on date-boundary crossings, deleting files older than `logRetentionDays`.
+
+### IPC
+
+CLI/TUI clients connect to the daemon via Unix socket at `$HARNESS_STATE/daemon.sock`. Wire protocol: newline-delimited JSON. Request types: `ping`, `status`, `submit-turn`, `reload-config`, `shutdown`.
+
+### GatewayAdapter Interface
+
+External transports (WhatsApp, etc.) implement:
+
+```typescript
+interface GatewayAdapter {
+  readonly name: string;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  healthCheck(): Promise<boolean>;
+  onInbound(handler: (message: InboundMessage) => void): void;
+}
+```
+
+Adapters register via `DaemonRuntime.registerGateway()`. The WhatsApp/Baileys adapter docks here in the next goal.
+
+### Heartbeat Hook
+
+`DaemonRuntime.registerHeartbeat(hook)` accepts periodic health checks. The scheduler implementation comes with the cron/scheduler feature — this is only the mounting point.
+
+### Metrics
+
+New events in `system-*.jsonl` (type: `"daemon"`): `daemon_start`, `daemon_stop`, `daemon_crash_restart`, `config_reload`. Stale PID file detection on startup triggers `daemon_crash_restart`.
+
+### systemd Deployment
+
+`harness daemon install` writes `~/.config/systemd/user/harness-daemon.service` with `Restart=on-failure`, `RestartSec=5`, and `WantedBy=default.target`. Enable with:
+
+```
+systemctl --user daemon-reload
+systemctl --user enable harness-daemon
+systemctl --user start harness-daemon
+```

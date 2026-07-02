@@ -33,6 +33,14 @@ export interface StatusContext {
   toolCalls: number;
   /** Errors in current session (from past turns) */
   errors: number;
+  /** Daemon info — present when running inside the daemon process */
+  daemon?: DaemonStatusContext;
+}
+
+export interface DaemonStatusContext {
+  pid: number;
+  uptimeSeconds: number;
+  gateways: string;
 }
 
 export interface StatusSummary {
@@ -49,6 +57,9 @@ export interface StatusSummary {
   errors: string;
   lastTurn: string;
   metricsPath: string;
+  daemonPid: string;
+  daemonUptime: string;
+  gateways: string;
 }
 
 /* ─── Metrics Reader ─── */
@@ -176,6 +187,15 @@ function formatCacheHitRate(inputTokens: number, cacheRead: number, cacheWrite: 
   return `${rate.toFixed(1)}%`;
 }
 
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 86400) {
+    return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  }
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
+}
+
 export async function buildStatusSummary(
   context: StatusContext,
   metricsOverride?: MetricsAggregate | null,
@@ -226,6 +246,9 @@ export async function buildStatusSummary(
     errors,
     lastTurn,
     metricsPath: resolveMetricsDir() + "/",
+    daemonPid: context.daemon ? String(context.daemon.pid) : "n/a",
+    daemonUptime: context.daemon ? formatUptime(context.daemon.uptimeSeconds) : "n/a",
+    gateways: context.daemon ? (context.daemon.gateways || "none configured") : "n/a",
   };
 }
 
@@ -246,6 +269,9 @@ export function formatStatusSummary(summary: StatusSummary): string {
     `Tool calls:   ${summary.toolCalls} today`,
     `Errors today: ${summary.errors}`,
     `Last turn:    ${summary.lastTurn}`,
+    `Daemon PID:   ${summary.daemonPid}`,
+    `Daemon up:    ${summary.daemonUptime}`,
+    `Gateways:     ${summary.gateways}`,
     `Metrics:      ${summary.metricsPath}`,
   ];
   return lines.join("\n");
