@@ -38,8 +38,8 @@ Provider werden in `config.json` unter `web_search.providers` als geordnete List
   "web_search": {
     "providers": [
       { "type": "searxng", "endpoint": "https://search.example.com" },
-      { "type": "brave", "apiKey": "${BRAVE_API_KEY}" },
-      { "type": "tavily", "apiKey": "${TAVILY_API_KEY}" }
+      { "type": "brave", "apiKey": "env:BRAVE_API_KEY" },
+      { "type": "tavily", "apiKey": "env:TAVILY_API_KEY" }
     ],
     "maxResults": 8,
     "snippetBudget": 400,

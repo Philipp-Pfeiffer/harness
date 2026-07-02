@@ -3,7 +3,7 @@
     "neuralwatt": {
       "type": "openai",
       "baseUrl": "https://api.neuralwatt.com/v1",
-      "apiKey": "${NEURALWATT_API_KEY}"
+      "apiKey": "env:NEURALWATT_API_KEY"
     }
   },
   "models": [

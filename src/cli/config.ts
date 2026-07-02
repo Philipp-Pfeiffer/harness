@@ -63,25 +63,41 @@ const DEFAULT_MODELS: ConfigModel[] = [
 
 const DEFAULT_PROVIDERS: Record<string, ConfigProvider> = {};
 
-function expandEnvVars(value: unknown): unknown {
+function resolveConfigString(value: string): string {
+  // Explicit env-reference: the entire value must be "env:VAR_NAME".
+  const envRef = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (envRef) {
+    const name = envRef[1];
+    const envValue = process.env[name];
+    if (envValue === undefined) {
+      throw new Error(`Missing environment variable referenced by config: ${name}`);
+    }
+    return envValue;
+  }
+
+  // Inline ${VAR} substitution (legacy support).
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+    const envValue = process.env[name];
+    if (envValue === undefined) {
+      throw new Error(`Missing environment variable: ${name}`);
+    }
+    return envValue;
+  });
+}
+
+function resolveConfigValues(value: unknown): unknown {
   if (typeof value === "string") {
-    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
-      const envValue = process.env[name];
-      if (envValue === undefined) {
-        throw new Error(`Missing environment variable: ${name}`);
-      }
-      return envValue;
-    });
+    return resolveConfigString(value);
   }
 
   if (Array.isArray(value)) {
-    return value.map(expandEnvVars);
+    return value.map(resolveConfigValues);
   }
 
   if (value !== null && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = expandEnvVars(val);
+      result[key] = resolveConfigValues(val);
     }
     return result;
   }
@@ -160,7 +176,7 @@ export async function loadConfig(options?: {
     try {
       const raw = await readFile(candidate.path, "utf-8");
       const parsed = JSON.parse(raw) as Config;
-      const config = expandEnvVars(parsed) as Config;
+      const config = resolveConfigValues(parsed) as Config;
 
       const providers = config.providers ?? DEFAULT_PROVIDERS;
       const models = config.models && Array.isArray(config.models)
@@ -187,7 +203,12 @@ export async function loadConfig(options?: {
         : undefined;
 
       return { models, providers, defaultModel, webConfig, source: candidate.source };
-    } catch {
+    } catch (err) {
+      // If the config file was found but its content is invalid (e.g. missing
+      // env reference), surface the error instead of silently falling back.
+      if (err instanceof Error && err.message.startsWith("Missing environment variable")) {
+        throw err;
+      }
       // try next candidate
     }
   }
