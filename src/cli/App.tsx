@@ -6,7 +6,8 @@ import MarkedTerminalRenderer from "marked-terminal";
 import { randomUUID } from "node:crypto";
 import { createAgent } from "../core/agent.js";
 import { createMailbox } from "../core/mailbox.js";
-import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
+import { loadCoreMemoryRaw } from "../core/coreMemory.js";
+import { buildSystemPrompt } from "../core/systemPrompt.js";
 import { resolveModel, resolveModelFromConfig } from "../core/resolveModel.js";
 import { loadTools } from "../tools/registry.js";
 import { prompt } from "../prompts.js";
@@ -14,7 +15,7 @@ import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { AgentEvent, RunResult } from "../core/agent.js";
 import type { Mailbox } from "../core/mailbox.js";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
-import { loadConfig, type ConfigModel } from "./config.js";
+import { loadConfig, type ConfigModel, type WebConfig } from "./config.js";
 import { createMetricsRecorder, type MetricsRecorder } from "../core/metrics.js";
 import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
 import { resolveHarnessPaths, type HarnessPaths } from "../config/paths.js";
@@ -841,9 +842,14 @@ export default function App({
     };
   }, [selectionMode, setRawMode]);
 
-  const tools = useMemo(() => loadTools(memoryService?.getBackend()), [memoryService]);
+  const [webConfig, setWebConfig] = useState<WebConfig | undefined>(undefined);
+
+  const tools = useMemo(
+    () => loadTools(memoryService?.getBackend(), webConfig),
+    [memoryService, webConfig]
+  );
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
-  const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools]);
+  const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools, activeModel]);
   useEffect(() => {
     agent.setModel(activeModel);
   }, [agent, activeModel]);
@@ -852,11 +858,15 @@ export default function App({
     (async () => {
       const coreMemory = await loadCoreMemoryRaw(paths.core);
       const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
-      const composed = composeSystemPrompt(basePrompt, coreMemory);
+      const composed = buildSystemPrompt({
+        basePrompt,
+        coreMemoryRaw: coreMemory,
+        activeToolNames: tools.map((t) => t.name),
+      });
       agent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
     })();
-  }, [agent]);
+  }, [agent, tools]);
 
   const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
   const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(undefined);
@@ -873,6 +883,7 @@ export default function App({
       const result = await loadConfig({ configPath, harnessHome: paths.home });
       setConfigModels(result.models);
       setConfigDefaultModel(result.defaultModel);
+      setWebConfig(result.webConfig);
       if (result.error) {
         setConfigError(result.error);
       }

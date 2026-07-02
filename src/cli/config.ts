@@ -30,11 +30,32 @@ export type ConfigModel = {
   };
 };
 
+export type WebSearchProviderConfig =
+  | { type: "searxng"; endpoint: string; name?: string; enabled?: boolean }
+  | { type: "brave"; apiKey: string; name?: string; enabled?: boolean }
+  | { type: "tavily"; apiKey: string; name?: string; enabled?: boolean };
+
+export type WebConfig = {
+  web_search?: {
+    providers?: WebSearchProviderConfig[];
+    maxResults?: number;
+    snippetBudget?: number;
+    totalBudget?: number;
+  };
+  web_fetch?: {
+    outputCap?: number;
+    timeout?: number;
+    maxResponseSize?: number;
+    redirectLimit?: number;
+    allowlist?: string[];
+  };
+};
+
 export type Config = {
   models?: ConfigModel[];
   providers?: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
-};
+} & WebConfig;
 
 const DEFAULT_MODELS: ConfigModel[] = [
   { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" },
@@ -107,6 +128,7 @@ export async function loadConfig(options?: {
   models: ConfigModel[];
   providers: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
+  webConfig: WebConfig;
   error?: string;
   source?: string;
 }> {
@@ -145,10 +167,16 @@ export async function loadConfig(options?: {
         ? mergeProviderDefaults(config.models, providers)
         : [];
 
+      const webConfig: WebConfig = {
+        web_search: config.web_search,
+        web_fetch: config.web_fetch,
+      };
+
       if (models.length === 0) {
         return {
           models: DEFAULT_MODELS,
           providers: DEFAULT_PROVIDERS,
+          webConfig,
           error: "Config has no models, using default",
           source: candidate.source,
         };
@@ -158,7 +186,7 @@ export async function loadConfig(options?: {
         ? mergeProviderDefaults([config.defaultModel], providers)[0]
         : undefined;
 
-      return { models, providers, defaultModel, source: candidate.source };
+      return { models, providers, defaultModel, webConfig, source: candidate.source };
     } catch {
       // try next candidate
     }
@@ -167,6 +195,7 @@ export async function loadConfig(options?: {
   return {
     models: DEFAULT_MODELS,
     providers: DEFAULT_PROVIDERS,
+    webConfig: {},
     error: "No config found, using default model",
   };
 }

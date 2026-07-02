@@ -18,3 +18,9 @@ Each `.md` file is a standalone prompt template. The code loads it by name and p
 2. Add an HTML comment on the first line listing all variables.
 3. Use `{{varName}}` for every runtime value.
 4. Load it via `prompt("file-name", { varName: "value" })` from `src/prompts.ts`.
+
+## Prompt & Injection Register
+
+| File | Trigger | Injection Site | Status |
+|------|---------|----------------|--------|
+| `web-content-safety.md` | `web_fetch` or `web_search` in active tool set | `buildSystemPrompt()` after `system-prompt` + `<core_memory>` | required when web tools active |
