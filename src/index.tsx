@@ -11,8 +11,8 @@ import { MemoryService } from "./core/memoryService.js";
 // Resolve paths early so we can load .env from $HARNESS_HOME.
 const _earlyPaths = resolveHarnessPaths();
 // Load .env from $HARNESS_HOME first (production), then cwd (dev override).
-dotenv.config({ path: resolve(_earlyPaths.home, ".env") });
-dotenv.config({ path: resolve(process.cwd(), ".env") });
+dotenv.config({ path: resolve(_earlyPaths.home, ".env"), quiet: true });
+dotenv.config({ path: resolve(process.cwd(), ".env"), quiet: true });
 
 // ─── Subcommand: migrate-home ─────────────────────────────────
 if (process.argv[2] === "migrate-home") {
