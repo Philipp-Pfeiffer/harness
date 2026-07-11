@@ -100,7 +100,7 @@ export interface SessionSummary {
   sessionId: string;
   title: string;
   origin: SessionOrigin;
-  status: "active" | "ended";
+  status: "active" | "idle" | "ended";
   createdAt: string;
   lastActiveAt: string;
   model: string;

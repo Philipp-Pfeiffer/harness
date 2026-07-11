@@ -21,6 +21,8 @@ import {
   loadSession,
   turnsToMessages,
   listSessions,
+  countTurnsInTranscript,
+  markActiveSessionsIdle,
   type Session,
 } from "../core/session.js";
 import { ensureInbox } from "../core/memoryFolders.js";
@@ -137,6 +139,13 @@ export class DaemonRuntime {
         pidFile: this.paths.pidFile,
       });
       await this.recordDaemonMetric("daemon_crash_restart");
+    }
+
+    // Mark orphaned "active" sessions as "idle" — only in-memory sessions
+    // are "active", and this daemon starts with an empty session map.
+    const idleCount = await markActiveSessionsIdle(this.paths);
+    if (idleCount > 0) {
+      log.info("marked orphaned active sessions as idle", { count: idleCount });
     }
 
     // Write PID file
@@ -397,6 +406,7 @@ export class DaemonRuntime {
           const inMemoryIds = new Set(this.sessions.keys());
           for (const idx of persisted) {
             if (inMemoryIds.has(idx.sessionId)) continue;
+            const turnCount = await countTurnsInTranscript(idx.sessionId, this.paths);
             summaries.push({
               sessionId: idx.sessionId,
               title: idx.title,
@@ -405,7 +415,7 @@ export class DaemonRuntime {
               createdAt: idx.created,
               lastActiveAt: idx.lastActivity,
               model: idx.model,
-              turnsCompleted: 0, // Not tracked in index
+              turnsCompleted: turnCount,
               inMemory: false,
             });
           }

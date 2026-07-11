@@ -354,7 +354,11 @@ describe("session", () => {
       expect(messages[0].role).toBe("user");
       expect((messages[0] as { content: string }).content).toBe("Hi");
       expect(messages[1].role).toBe("assistant");
-      expect((messages[1] as { content: string }).content).toBe("Hello");
+      // Assistant content is normalized to a content-block array (not a string),
+      // so pi-ai's transformMessages can call .flatMap on it.
+      expect((messages[1] as unknown as { content: Array<{ type: string; text: string }> }).content).toEqual([
+        { type: "text", text: "Hello" },
+      ]);
     });
   });
 

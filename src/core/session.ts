@@ -100,7 +100,7 @@ export interface Session {
   tokenTotals: SessionTokenTotals;
   parentSessionId?: string;
   transcriptPath: string;
-  status: "active" | "ended";
+  status: "active" | "idle" | "ended";
 }
 
 export interface SessionIndexEntry {
@@ -111,7 +111,7 @@ export interface SessionIndexEntry {
   tokenTotals: SessionTokenTotals;
   parentSessionId?: string;
   title: string;
-  status: "active" | "ended";
+  status: "active" | "idle" | "ended";
 }
 
 export interface CreateSessionOptions {
@@ -371,6 +371,27 @@ export async function endSession(
   return ended;
 }
 
+/**
+ * Marks all sessions currently in "active" status as "idle".
+ * Called on daemon start to clean up orphaned active markers from
+ * a crash or unclean shutdown. "active" = in-memory only; anything
+ * not loaded in the daemon is "idle" (resumable) or "ended" (explicitly stopped).
+ */
+export async function markActiveSessionsIdle(paths: HarnessPaths): Promise<number> {
+  const index = await loadIndex(paths);
+  let changed = 0;
+  for (const entry of index) {
+    if (entry.status === "active") {
+      entry.status = "idle";
+      changed++;
+    }
+  }
+  if (changed > 0) {
+    await saveIndex(paths, index);
+  }
+  return changed;
+}
+
 /* ─── Turn Recording ─── */
 
 export async function recordTurn(
@@ -442,6 +463,26 @@ export async function readSession(
   return { session: entry, turns };
 }
 
+/**
+ * Counts turns in a session's transcript by counting non-empty JSONL lines.
+ * Faster than readSession for listing, since no JSON parsing is needed.
+ */
+export async function countTurnsInTranscript(
+  sessionId: string,
+  paths: HarnessPaths
+): Promise<number> {
+  const tPath = await findTranscriptPath(paths, sessionId);
+  if (!tPath) return 0;
+  try {
+    const raw = await readFile(tPath, "utf-8");
+    return raw.split("\n").filter((line) => line.trim()).length;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return 0;
+    throw err;
+  }
+}
+
 export async function listSessions(
   paths: HarnessPaths,
   range?: ListSessionsRange
@@ -482,13 +523,34 @@ export async function listSessionsWithDetails(
 /* ─── Resume Helper ─── */
 
 /**
+ * Normalizes assistant message content to a content-block array.
+ * Older persisted turns may have string content — pi-ai's transformMessages
+ * expects an array and calls `.flatMap()` on it.
+ */
+function normalizeAssistantContent(content: unknown): Array<{ type: string; text: string }> {
+  if (typeof content === "string") {
+    return [{ type: "text", text: content }];
+  }
+  if (Array.isArray(content)) return content as Array<{ type: string; text: string }>;
+  return [{ type: "text", text: "" }];
+}
+
+/**
  * Reconstructs the LLM-visible message context from a list of persisted turns.
  * Falls back to synthesized user/assistant messages if `messages` was not stored.
+ * Normalizes string content on assistant messages to content-block arrays
+ * so pi-ai's transformMessages (which calls `.flatMap`) doesn't crash.
  */
 export function turnsToMessages(turns: SessionTurn[]): Message[] {
   const messages: Message[] = [];
   for (const turn of turns) {
     if (turn.messages && turn.messages.length > 0) {
+      // Normalize any assistant messages with string content from old data.
+      for (const msg of turn.messages) {
+        if (msg.role === "assistant" && typeof msg.content === "string") {
+          (msg as unknown as { content: unknown }).content = normalizeAssistantContent(msg.content);
+        }
+      }
       messages.push(...turn.messages);
       continue;
     }
@@ -502,7 +564,7 @@ export function turnsToMessages(turns: SessionTurn[]): Message[] {
     if (turn.content || (turn.tool_calls && turn.tool_calls.length > 0)) {
       messages.push({
         role: "assistant",
-        content: turn.content,
+        content: normalizeAssistantContent(turn.content),
         timestamp: new Date(turn.timestamp).getTime(),
       } as unknown as Message);
     }
