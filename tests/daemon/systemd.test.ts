@@ -55,4 +55,15 @@ describe("systemd unit generation", () => {
     expect(unit).toContain("Restart=on-failure");
     expect(unit).toContain("RestartSec=5");
   });
+
+  it("includes EnvironmentFile for .env loading", () => {
+    const unit = generateSystemdUnit({
+      nodePath: "/usr/bin/node",
+      entryPath: "/opt/harness/dist/index.js",
+    });
+
+    expect(unit).toContain("EnvironmentFile=");
+    // Default home is ~/harness, so %h/harness/.env should be used
+    expect(unit).toContain("EnvironmentFile=%h/harness/.env");
+  });
 });

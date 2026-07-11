@@ -23,6 +23,60 @@ if (process.argv[2] === "migrate-home") {
   process.exit(result.dryRun || result.moved.length > 0 || result.indexNeedsRebuild ? 0 : 0);
 }
 
+// ─── Subcommand: sessions ─────────────────────────────────────
+if (process.argv[2] === "sessions") {
+  const { harnessSessions } = await import("./daemon/commands.js");
+  const result = await harnessSessions();
+  if (result.stdout) console.log(result.stdout);
+  process.exit(result.exitCode);
+}
+
+// ─── Subcommand: send ──────────────────────────────────────────
+if (process.argv[2] === "send") {
+  const { harnessSend } = await import("./daemon/commands.js");
+  // Parse: harness send [--session <id>] "message"
+  const args = process.argv.slice(3);
+  let sessionId: string | undefined;
+  let message: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--session" && i + 1 < args.length) {
+      sessionId = args[i + 1];
+      i++;
+    } else if (!args[i].startsWith("-")) {
+      message = args[i];
+    }
+  }
+
+  if (!message) {
+    console.error('Usage: harness send [--session <id>] "message"');
+    process.exit(1);
+  }
+
+  const result = await harnessSend(message, sessionId);
+  if (result.stdout) console.log(result.stdout);
+  process.exit(result.exitCode);
+}
+
+// ─── Subcommand: chat ─────────────────────────────────────────
+if (process.argv[2] === "chat") {
+  const { harnessChat } = await import("./daemon/commands.js");
+  // Parse: harness chat [--session <id>]
+  const args = process.argv.slice(3);
+  let sessionId: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--session" && i + 1 < args.length) {
+      sessionId = args[i + 1];
+      i++;
+    }
+  }
+
+  const result = await harnessChat(sessionId);
+  if (result.stdout) console.log(result.stdout);
+  process.exit(result.exitCode);
+}
+
 // ─── Subcommand: daemon ────────────────────────────────────────
 if (process.argv[2] === "daemon") {
   const subcommand = process.argv[3] ?? "status";
@@ -89,10 +143,10 @@ if (process.argv[2] === "reload-config") {
 // ─── Interactive TUI mode (default) ───────────────────────────
 
 // Reject unknown subcommands before any heavy initialization.
-const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config"]);
+const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat"]);
 if (!knownCommands.has(process.argv[2])) {
   console.error(`Unknown command: ${process.argv[2] ?? ""}`);
-  console.error("Usage: harness [daemon|migrate-home|reload-config]");
+  console.error("Usage: harness [daemon|sessions|send|chat|migrate-home|reload-config]");
   process.exit(1);
 }
 

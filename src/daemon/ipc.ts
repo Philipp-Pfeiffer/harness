@@ -3,9 +3,25 @@ import { unlink, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { IpcRequest, IpcResponse } from "./types.js";
+import { isTerminalResponse } from "./types.js";
 
 const ENCODING = "utf-8";
 const DELIMITER = "\n";
+
+/**
+ * Handler signature for IPC requests.
+ *
+ * The optional `send` callback lets the handler stream intermediate
+ * `turn-event` frames before returning the terminal response. Non-streaming
+ * handlers simply ignore `send` and return a single response.
+ *
+ * The server writes each `send` call to the socket as a separate line,
+ * then writes the returned terminal response as the final line.
+ */
+export type IpcHandler = (
+  req: IpcRequest,
+  send?: (resp: IpcResponse) => void,
+) => Promise<IpcResponse>;
 
 /**
  * Creates and starts a Unix socket server.
@@ -14,11 +30,12 @@ const DELIMITER = "\n";
  * object followed by \n. Responses are similarly framed.
  *
  * @param socketPath  Path to the Unix socket file.
- * @param handler     Called for each incoming request. Must return a response.
+ * @param handler     Called for each incoming request. Must return a terminal response.
+ *                    May call `send` for intermediate streaming events.
  */
 export async function startIpcServer(
   socketPath: string,
-  handler: (req: IpcRequest) => Promise<IpcResponse>,
+  handler: IpcHandler,
 ): Promise<Server> {
   // Clean up any stale socket file from a previous crash
   await unlink(socketPath).catch(() => {});
@@ -59,12 +76,19 @@ export async function startIpcServer(
 async function handleRequest(
   socket: Socket,
   rawLine: string,
-  handler: (req: IpcRequest) => Promise<IpcResponse>,
+  handler: IpcHandler,
 ): Promise<void> {
+  // `send` writes intermediate streaming events to the socket.
+  const send = (resp: IpcResponse): void => {
+    if (!socket.destroyed) {
+      socket.write(JSON.stringify(resp) + DELIMITER, ENCODING);
+    }
+  };
+
   let response: IpcResponse;
   try {
     const req = JSON.parse(rawLine) as IpcRequest;
-    response = await handler(req);
+    response = await handler(req, send);
   } catch (err) {
     response = {
       type: "error",
@@ -79,14 +103,31 @@ async function handleRequest(
 
 /**
  * Sends a single request to the daemon via Unix socket and waits
- * for the response.
+ * for the terminal response. Intermediate `turn-event` frames are
+ * silently skipped — use `sendIpcStreaming` if you need them.
  *
  * @throws Error if the socket cannot be connected or the response is an error.
  */
 export async function sendIpcRequest(
   socketPath: string,
   req: IpcRequest,
-  timeoutMs = 10_000,
+  timeoutMs = 30_000,
+): Promise<IpcResponse> {
+  return sendIpcStreaming(socketPath, req, undefined, timeoutMs);
+}
+
+/**
+ * Sends a request and reads all response frames until the terminal
+ * response. Each intermediate frame is passed to `onEvent`. Returns
+ * the terminal response.
+ *
+ * @throws Error if the socket cannot be connected or the timeout fires.
+ */
+export async function sendIpcStreaming(
+  socketPath: string,
+  req: IpcRequest,
+  onEvent?: (resp: IpcResponse) => void,
+  timeoutMs = 120_000,
 ): Promise<IpcResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
@@ -113,14 +154,14 @@ export async function sendIpcRequest(
         const trimmed = line.trim();
         if (!trimmed) continue;
         if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        socket.destroy();
 
+        let resp: IpcResponse;
         try {
-          const resp = JSON.parse(trimmed) as IpcResponse;
-          resolve(resp);
+          resp = JSON.parse(trimmed) as IpcResponse;
         } catch (err) {
+          settled = true;
+          clearTimeout(timer);
+          socket.destroy();
           reject(
             new Error(
               `Failed to parse IPC response: ${
@@ -128,7 +169,22 @@ export async function sendIpcRequest(
               }`,
             ),
           );
+          return;
         }
+
+        // Terminal response — resolve.
+        // Anything that isn't `turn-event` is terminal, including
+        // unknown types from older daemon versions.
+        if (isTerminalResponse(resp)) {
+          settled = true;
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(resp);
+          return;
+        }
+
+        // Intermediate event — forward to callback.
+        onEvent?.(resp);
       }
     });
 

@@ -15,13 +15,23 @@ export interface SystemdUnitOptions {
 /**
  * Generates the systemd user service unit file for the harness daemon.
  *
- * Returns the file content and writes it to the specified path (or
- * ~/.config/systemd/user/harness-daemon.service by default).
+ * Returns the file content (also written to disk by installSystemdUnit).
  */
 export function generateSystemdUnit(opts?: SystemdUnitOptions): string {
   const nodePath = opts?.nodePath ?? process.execPath;
   const home = resolveHarnessPaths().home;
   const state = resolveHarnessPaths().state;
+
+  // EnvironmentFile: systemd loads .env from $HARNESS_HOME (belt) — the
+  // daemon also loads it itself via dotenv (suspenders). We use the %h
+  // specifier (systemd user-home) so the default ~/harness/.env works
+  // without relying on HARNESS_HOME being set yet.
+  // Literal %h in systemd means: do NOT shell-expand — systemd replaces
+  // it with the user's home directory natively.
+  // If HARNESS_HOME is non-default (via env), we use the absolute path
+  // since %h would point to the wrong location.
+  const isDefaultHome = home === join(os.homedir(), "harness");
+  const envFile = isDefaultHome ? "%h/harness/.env" : `${home}/.env`;
 
   const envLines: string[] = [
     `Environment="HARNESS_HOME=${home}"`,
@@ -45,6 +55,7 @@ export function generateSystemdUnit(opts?: SystemdUnitOptions): string {
     "RestartSec=5",
     "KillSignal=SIGTERM",
     "TimeoutStopSec=30",
+    `EnvironmentFile=${envFile}`,
     ...envLines,
     "",
     "[Install]",

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { resolve, join } from "node:path";
 import { readFile, readdir } from "node:fs/promises";
+import { createInterface } from "node:readline";
 
 import { resolveHarnessPaths } from "../config/paths.js";
-import { sendIpcRequest } from "./ipc.js";
+import { sendIpcRequest, sendIpcStreaming } from "./ipc.js";
 import {
   getRunningDaemonPid,
   cleanupStalePidFile,
@@ -217,22 +218,27 @@ export async function daemonLogs(): Promise<CliResult> {
 export async function daemonInstall(): Promise<CliResult> {
   try {
     const unitPath = await installSystemdUnit();
-    return {
-      stdout: [
-        "systemd user service installed.",
-        "",
-        `Unit file: ${unitPath}`,
-        "",
-        "To enable and start the daemon:",
-        "  systemctl --user daemon-reload",
-        "  systemctl --user enable harness-daemon",
-        "  systemctl --user start harness-daemon",
-        "",
-        "To check status:",
-        "  systemctl --user status harness-daemon",
-      ].join("\n"),
-      exitCode: 0,
-    };
+    const lines = [
+      "systemd user service installed.",
+      "",
+      `Unit file: ${unitPath}`,
+      "",
+      "To enable and start the daemon:",
+      "  systemctl --user daemon-reload",
+      "  systemctl --user enable harness-daemon",
+      "  systemctl --user start harness-daemon",
+      "",
+      "To check status:",
+      "  systemctl --user status harness-daemon",
+    ];
+
+    // Warn if the running daemon is older than the installed build.
+    const staleWarning = await checkStaleDaemon();
+    if (staleWarning) {
+      lines.push("", "⚠ " + staleWarning);
+    }
+
+    return { stdout: lines.join("\n"), exitCode: 0 };
   } catch (err) {
     return {
       stdout: `Failed to install systemd unit: ${
@@ -241,6 +247,50 @@ export async function daemonInstall(): Promise<CliResult> {
       exitCode: 1,
     };
   }
+}
+
+/**
+ * Checks whether the running daemon was started before the current
+ * dist/index.js was built. Returns a warning message if so, or null
+ * if the daemon is up-to-date or not running.
+ */
+async function checkStaleDaemon(): Promise<string | null> {
+  const paths = resolveHarnessPaths();
+  const { getRunningDaemonPid } = await import("./process.js");
+  const pid = await getRunningDaemonPid(paths.pidFile);
+  if (pid === null) return null;
+
+  // Get daemon start time from status
+  let daemonStartISO: string | null = null;
+  try {
+    const resp = await sendIpcRequest(paths.socketFile, { type: "ping" }, 3_000);
+    if (resp.type === "pong") {
+      daemonStartISO = new Date(Date.now() - resp.uptime * 1000).toISOString();
+    }
+  } catch {
+    return null; // Daemon unreachable
+  }
+  if (!daemonStartISO) return null;
+
+  // Get dist build time
+  const { stat } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  const distPath = resolve(process.cwd(), "dist/index.js");
+  try {
+    const stats = await stat(distPath);
+    const buildTime = stats.mtime;
+    const daemonStart = new Date(daemonStartISO);
+    if (daemonStart < buildTime) {
+      return (
+        `Running daemon (started ${daemonStart.toISOString()}) is older ` +
+        `than the installed build (built ${buildTime.toISOString()}). ` +
+        `Restart needed: harness daemon restart`
+      );
+    }
+  } catch {
+    // dist/index.js not found — can't compare
+  }
+  return null;
 }
 
 /* ─── daemon run (internal — the actual daemon process) ─── */
@@ -265,6 +315,222 @@ export async function daemonRun(): Promise<void> {
   // Block forever — the process exits via signal handlers calling
   // runtime.shutdown(), which calls process.exit(0).
   await new Promise<never>(() => {});
+}
+
+/* ─── harness sessions ─── */
+
+export async function harnessSessions(): Promise<CliResult> {
+  const paths = resolveHarnessPaths();
+  try {
+    const resp = await sendIpcRequest(paths.socketFile, { type: "list-sessions" });
+    if (resp.type === "sessions-listed") {
+      if (resp.sessions.length === 0) {
+        return { stdout: "No sessions found.", exitCode: 0 };
+      }
+      const lines = resp.sessions.map((s) => {
+        const date = s.createdAt.slice(0, 10);
+        const mem = s.inMemory ? " ●" : "  ";
+        return `${mem} ${s.sessionId} · ${date} · ${s.origin} · ${s.status} · ${s.turnsCompleted} turns`;
+      });
+      return { stdout: ["Sessions:", ...lines.map((l) => `  ${l}`)].join("\n"), exitCode: 0 };
+    }
+    if (resp.type === "error") {
+      return { stdout: `Error: ${resp.message}`, exitCode: 1 };
+    }
+    return { stdout: `Unexpected response: ${resp.type}`, exitCode: 1 };
+  } catch (err) {
+    return {
+      stdout: `Cannot reach daemon: ${err instanceof Error ? err.message : String(err)}\nIs the daemon running? Start it with: harness daemon start`,
+      exitCode: 1,
+    };
+  }
+}
+
+/* ─── harness send ─── */
+
+export async function harnessSend(
+  message: string,
+  sessionId?: string,
+): Promise<CliResult> {
+  const paths = resolveHarnessPaths();
+  try {
+    const resp = await sendIpcStreaming(
+      paths.socketFile,
+      { type: "submit-turn", text: message, sessionId },
+      (event) => {
+        if (event.type === "turn-event") {
+          const ev = event.event;
+          switch (ev.type) {
+            case "token":
+              process.stdout.write(ev.text);
+              break;
+            case "tool_call_start":
+              process.stdout.write(`\n[tool: ${ev.name}]\n`);
+              break;
+            case "tool_call_done":
+              // Truncate long results
+              const result = ev.result.length > 200
+                ? ev.result.substring(0, 200) + "..."
+                : ev.result;
+              process.stdout.write(`[tool result: ${result}]\n`);
+              break;
+            case "tool_call_error":
+              process.stdout.write(`[tool error: ${ev.error}]\n`);
+              break;
+          }
+        }
+      },
+    );
+
+    if (resp.type === "turn-complete") {
+      // If tokens were streamed, ensure a trailing newline
+      process.stdout.write("\n");
+      return { stdout: "", exitCode: 0 };
+    }
+    if (resp.type === "error") {
+      return { stdout: `Error: ${resp.message}`, exitCode: 1 };
+    }
+    // Old daemon version — e.g. "turn-accepted" from pre-streaming protocol.
+    return {
+      stdout:
+        `Received unexpected response from daemon: "${resp.type}".\n` +
+        `This usually means the running daemon is older than your CLI.\n` +
+        `Restart the daemon: harness daemon restart`,
+      exitCode: 1,
+    };
+  } catch (err) {
+    return {
+      stdout: `Cannot reach daemon: ${err instanceof Error ? err.message : String(err)}\nIs the daemon running? Start it with: harness daemon start`,
+      exitCode: 1,
+    };
+  }
+}
+
+/* ─── harness chat ─── */
+
+export async function harnessChat(sessionId?: string): Promise<CliResult> {
+  const paths = resolveHarnessPaths();
+
+  // Verify daemon is reachable
+  try {
+    await sendIpcRequest(paths.socketFile, { type: "ping" }, 5_000);
+  } catch (err) {
+    return {
+      stdout: `Cannot reach daemon: ${err instanceof Error ? err.message : String(err)}\nIs the daemon running? Start it with: harness daemon start`,
+      exitCode: 1,
+    };
+  }
+
+  // Create or resume session
+  let activeSessionId = sessionId;
+  if (!activeSessionId) {
+    try {
+      const resp = await sendIpcRequest(
+        paths.socketFile,
+        { type: "create-session", origin: "tui" },
+        10_000,
+      );
+      if (resp.type === "session-created") {
+        activeSessionId = resp.sessionId;
+        console.log(`Session: ${activeSessionId}`);
+      } else {
+        return { stdout: `Failed to create session: ${JSON.stringify(resp)}`, exitCode: 1 };
+      }
+    } catch (err) {
+      return {
+        stdout: `Failed to create session: ${err instanceof Error ? err.message : String(err)}`,
+        exitCode: 1,
+      };
+    }
+  } else {
+    // Resume existing session
+    try {
+      const resp = await sendIpcRequest(
+        paths.socketFile,
+        { type: "resume-session", sessionId: activeSessionId },
+        10_000,
+      );
+      if (resp.type === "session-resumed") {
+        console.log(`Resumed session: ${activeSessionId} (${resp.messageCount} messages)`);
+      } else if (resp.type === "error") {
+        return { stdout: `Failed to resume session: ${resp.message}`, exitCode: 1 };
+      }
+    } catch (err) {
+      return {
+        stdout: `Failed to resume session: ${err instanceof Error ? err.message : String(err)}`,
+        exitCode: 1,
+      };
+    }
+  }
+
+  console.log(`Type your message. Ctrl+C to exit.\n`);
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "> ",
+  });
+
+  return new Promise<CliResult>((resolve) => {
+    rl.prompt();
+
+    rl.on("line", async (line: string) => {
+      const text = line.trim();
+      if (!text) {
+        rl.prompt();
+        return;
+      }
+      if (text === "/quit" || text === "/exit") {
+        rl.close();
+        resolve({ stdout: "Session ended.", exitCode: 0 });
+        return;
+      }
+
+      try {
+        await sendIpcStreaming(
+          paths.socketFile,
+          { type: "submit-turn", text, sessionId: activeSessionId },
+          (event) => {
+            if (event.type === "turn-event") {
+              const ev = event.event;
+              switch (ev.type) {
+                case "token":
+                  process.stdout.write(ev.text);
+                  break;
+                case "tool_call_start":
+                  process.stdout.write(`\n[tool: ${ev.name}]\n`);
+                  break;
+                case "tool_call_done":
+                  const result = ev.result.length > 200
+                    ? ev.result.substring(0, 200) + "..."
+                    : ev.result;
+                  process.stdout.write(`[tool result: ${result}]\n`);
+                  break;
+                case "tool_call_error":
+                  process.stdout.write(`[tool error: ${ev.error}]\n`);
+                  break;
+              }
+            }
+          },
+        );
+
+        process.stdout.write("\n\n");
+        rl.prompt();
+      } catch (err) {
+        process.stderr.write(`\nError: ${err instanceof Error ? err.message : String(err)}\n`);
+        rl.prompt();
+      }
+    });
+
+    rl.on("SIGINT", () => {
+      rl.close();
+      resolve({ stdout: "Session ended.", exitCode: 0 });
+    });
+
+    rl.on("close", () => {
+      resolve({ stdout: "Session ended.", exitCode: 0 });
+    });
+  });
 }
 
 /* ─── helpers ─── */

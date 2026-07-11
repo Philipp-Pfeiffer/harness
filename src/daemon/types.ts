@@ -32,22 +32,81 @@ export interface InboundMessage {
   timestamp: string;
 }
 
+/* ─── Session Origin ─── */
+
+export type SessionOrigin = "tui" | "cron" | "whatsapp" | "api";
+
 /* ─── IPC Protocol (Unix socket) ─── */
 
+/**
+ * New-style submit-turn: `text` is the new user message.
+ * The daemon maintains the session's message context internally.
+ *
+ * Old-style submit-turn: `messages` carries the full conversation.
+ * Used by the TUI which manages its own context.
+ *
+ * If `sessionId` is omitted, the daemon creates a new session.
+ */
 export type IpcRequest =
   | { type: "ping" }
   | { type: "status" }
-  | { type: "submit-turn"; messages: SerializedMessage[]; model?: string; sessionId?: string }
+  | { type: "create-session"; origin?: SessionOrigin; title?: string; model?: string }
+  | { type: "list-sessions" }
+  | { type: "submit-turn"; messages?: SerializedMessage[]; text?: string; model?: string; sessionId?: string }
+  | { type: "resume-session"; sessionId: string }
   | { type: "reload-config" }
   | { type: "shutdown" };
 
+/**
+ * Streaming protocol: intermediate `turn-event` frames are sent first,
+ * followed by the terminal `turn-complete` (or `error`) frame.
+ * Non-streaming request types produce a single terminal response.
+ *
+ * `sessionId` is present on session-scoped responses.
+ */
 export type IpcResponse =
   | { type: "pong"; uptime: number; pid: number }
   | { type: "status"; daemon: DaemonStatusInfo }
-  | { type: "turn-accepted"; info: string }
+  | { type: "session-created"; sessionId: string; origin: SessionOrigin; createdAt: string }
+  | { type: "sessions-listed"; sessions: SessionSummary[] }
+  | { type: "session-resumed"; sessionId: string; messageCount: number }
+  | { type: "turn-event"; sessionId: string; event: TurnStreamEvent }
+  | { type: "turn-complete"; sessionId: string; finalResponse: string; info: string; turnsCompleted: number }
   | { type: "config-reloaded"; ok: boolean; message?: string }
   | { type: "shutting-down" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string; sessionId?: string };
+
+/**
+ * Events streamed during a turn. Mirrors AgentEvent but simplified for
+ * IPC transport.
+ */
+export type TurnStreamEvent =
+  | { type: "token"; text: string }
+  | { type: "tool_call_start"; name: string; args: unknown }
+  | { type: "tool_call_done"; name: string; result: string }
+  | { type: "tool_call_error"; name: string; error: string };
+
+/**
+ * Whether a response frame is terminal (i.e. the last frame for a request).
+ * Only `turn-event` is intermediate — everything else terminates the
+ * exchange, including unknown response types from older daemon versions
+ * (e.g. legacy `turn-accepted`).
+ */
+export function isTerminalResponse(resp: IpcResponse): boolean {
+  return resp.type !== "turn-event";
+}
+
+export interface SessionSummary {
+  sessionId: string;
+  title: string;
+  origin: SessionOrigin;
+  status: "active" | "ended";
+  createdAt: string;
+  lastActiveAt: string;
+  model: string;
+  turnsCompleted: number;
+  inMemory: boolean;
+}
 
 export interface DaemonStatusInfo {
   pid: number;

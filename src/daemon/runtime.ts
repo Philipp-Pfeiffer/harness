@@ -17,6 +17,10 @@ import { prompt } from "../prompts.js";
 import {
   createSession,
   recordTurn,
+  endSession,
+  loadSession,
+  turnsToMessages,
+  listSessions,
   type Session,
 } from "../core/session.js";
 import { ensureInbox } from "../core/memoryFolders.js";
@@ -34,6 +38,9 @@ import type {
   DaemonStatusInfo,
   DaemonConfig,
   GatewayAdapter,
+  SessionOrigin,
+  SessionSummary,
+  TurnStreamEvent,
 } from "./types.js";
 import { DEFAULT_DAEMON_CONFIG } from "./types.js";
 
@@ -74,6 +81,21 @@ class ErrorRingBuffer {
   }
 }
 
+/**
+ * In-memory session entry. Created on-demand, holds the live message
+ * context so the agent can continue the conversation.
+ */
+interface SessionEntry {
+  session: Session;
+  messages: Message[];
+  turnsCompleted: number;
+  metricsRecorder: MetricsRecorder;
+  origin: SessionOrigin;
+  title: string;
+  createdAt: string;
+  lastActiveAt: string;
+}
+
 export class DaemonRuntime {
   private readonly paths: HarnessPaths;
   private readonly logger: DaemonLogger;
@@ -82,12 +104,10 @@ export class DaemonRuntime {
   private model: Model<Api> | null = null;
   private configDefaultModel: ConfigModel | undefined;
   private memoryService: MemoryService | null = null;
-  private metricsRecorder: MetricsRecorder;
-  private session: Session | null = null;
+  private readonly sessions = new Map<string, SessionEntry>();
   private ipcServer: Server | null = null;
   private readonly startTime: string;
   private readonly startMs: number;
-  private turnsCompleted = 0;
   private readonly errorBuffer = new ErrorRingBuffer();
   private readonly gateways = new Map<string, GatewayAdapter>();
   private readonly heartbeatHooks: HeartbeatHook[] = [];
@@ -101,7 +121,6 @@ export class DaemonRuntime {
       logDir: this.paths.logs,
       retentionDays: this.config.logRetentionDays,
     });
-    this.metricsRecorder = createMetricsRecorder({});
     this.startTime = new Date().toISOString();
     this.startMs = Date.now();
   }
@@ -143,12 +162,11 @@ export class DaemonRuntime {
     // Init agent
     await this.initAgent();
 
-    // Create session
-    await this.initSession();
+    // Sessions are created on-demand — no initSession() here.
 
     // Start IPC server
-    this.ipcServer = await startIpcServer(this.paths.socketFile, (req) =>
-      this.handleIpcRequest(req),
+    this.ipcServer = await startIpcServer(this.paths.socketFile, (req, send) =>
+      this.handleIpcRequest(req, send),
     );
     log.info("IPC server listening", { socket: this.paths.socketFile });
 
@@ -197,17 +215,19 @@ export class DaemonRuntime {
       this.ipcServer = null;
     }
 
-    // End session
-    if (this.session) {
+    // End all active sessions
+    for (const [id, entry] of this.sessions) {
       try {
-        const { endSession } = await import("../core/session.js");
-        this.session = await endSession(this.session, this.paths);
+        entry.session = await endSession(entry.session, this.paths);
+        log.info("session ended", { id });
       } catch (err) {
         log.error("failed to end session", {
+          id,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
+    this.sessions.clear();
 
     // Shutdown memory service
     if (this.memoryService) {
@@ -289,6 +309,10 @@ export class DaemonRuntime {
    * Returns the current daemon status for /status and daemon status commands.
    */
   getStatus(): DaemonStatusInfo {
+    let totalTurns = 0;
+    for (const entry of this.sessions.values()) {
+      totalTurns += entry.turnsCompleted;
+    }
     return {
       pid: process.pid,
       uptime: Math.floor((Date.now() - this.startMs) / 1000),
@@ -299,8 +323,8 @@ export class DaemonRuntime {
           ? [...this.gateways.keys()].join(", ")
           : "none configured",
       lastErrors: this.errorBuffer.snapshot(),
-      sessionsActive: this.session ? 1 : 0,
-      turnsCompleted: this.turnsCompleted,
+      sessionsActive: this.sessions.size,
+      turnsCompleted: totalTurns,
     };
   }
 
@@ -315,7 +339,10 @@ export class DaemonRuntime {
 
   // ─── IPC Handler ───
 
-  private async handleIpcRequest(req: IpcRequest): Promise<IpcResponse> {
+  private async handleIpcRequest(
+    req: IpcRequest,
+    send?: (resp: IpcResponse) => void,
+  ): Promise<IpcResponse> {
     switch (req.type) {
       case "ping":
         return { type: "pong", uptime: this.getUptimeSeconds(), pid: process.pid };
@@ -323,22 +350,223 @@ export class DaemonRuntime {
       case "status":
         return { type: "status", daemon: this.getStatus() };
 
-      case "submit-turn": {
-        const messages = req.messages as Message[];
-        if (!this.agent || !this.session) {
+      case "create-session": {
+        const origin: SessionOrigin = req.origin ?? "api";
+        const title = req.title ?? `${origin} session`;
+        const model = req.model ?? this.model?.name ?? "unknown";
+        try {
+          const session = await createSession(this.paths, { model, title });
+          const entry = this.createSessionEntry(session, origin, title);
+          this.sessions.set(session.id, entry);
+          const log = this.logger.child("session");
+          log.info("session created", { id: session.id, origin });
           return {
-            type: "error",
-            message: "Daemon not fully initialized (agent or session missing)",
+            type: "session-created",
+            sessionId: session.id,
+            origin,
+            createdAt: entry.createdAt,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.errorBuffer.push(msg);
+          return { type: "error", message: msg };
+        }
+      }
+
+      case "list-sessions": {
+        try {
+          const persisted = await listSessions(this.paths);
+          const summaries: SessionSummary[] = [];
+
+          // In-memory sessions first
+          for (const [id, entry] of this.sessions) {
+            summaries.push({
+              sessionId: id,
+              title: entry.title,
+              origin: entry.origin,
+              status: "active",
+              createdAt: entry.createdAt,
+              lastActiveAt: entry.lastActiveAt,
+              model: entry.session.model,
+              turnsCompleted: entry.turnsCompleted,
+              inMemory: true,
+            });
+          }
+
+          // Persisted sessions not in memory
+          const inMemoryIds = new Set(this.sessions.keys());
+          for (const idx of persisted) {
+            if (inMemoryIds.has(idx.sessionId)) continue;
+            summaries.push({
+              sessionId: idx.sessionId,
+              title: idx.title,
+              origin: "api", // Origin not persisted yet — default
+              status: idx.status,
+              createdAt: idx.created,
+              lastActiveAt: idx.lastActivity,
+              model: idx.model,
+              turnsCompleted: 0, // Not tracked in index
+              inMemory: false,
+            });
+          }
+
+          // Sort by lastActiveAt descending
+          summaries.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+
+          return { type: "sessions-listed", sessions: summaries };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return { type: "error", message: msg };
+        }
+      }
+
+      case "resume-session": {
+        const sessionId = req.sessionId;
+        if (this.sessions.has(sessionId)) {
+          const entry = this.sessions.get(sessionId)!;
+          return {
+            type: "session-resumed",
+            sessionId,
+            messageCount: entry.messages.length,
           };
         }
         try {
-          const controller = new AbortController();
+          const loaded = await loadSession(sessionId, this.paths);
+          if (!loaded) {
+            return { type: "error", message: `Session not found: ${sessionId}` };
+          }
+          const entry = this.createSessionEntry(
+            loaded.session,
+            "api",
+            loaded.session.title,
+          );
+          entry.messages = loaded.turns.length > 0
+            ? turnsToMessages(loaded.turns)
+            : [];
+          this.sessions.set(sessionId, entry);
+          const log = this.logger.child("session");
+          log.info("session resumed", { id: sessionId, messages: entry.messages.length });
+          return {
+            type: "session-resumed",
+            sessionId,
+            messageCount: entry.messages.length,
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.errorBuffer.push(msg);
+          return { type: "error", message: msg };
+        }
+      }
+
+      case "submit-turn": {
+        if (!this.agent) {
+          return {
+            type: "error",
+            message: "Daemon not fully initialized (agent missing)",
+          };
+        }
+
+        try {
+          // Resolve or create session
+          let entry: SessionEntry;
+          let sessionId: string;
+
+          if (req.sessionId) {
+            // Explicit session ID — resolve from memory or resume from disk
+            if (this.sessions.has(req.sessionId)) {
+              entry = this.sessions.get(req.sessionId)!;
+            } else {
+              const loaded = await loadSession(req.sessionId, this.paths);
+              if (!loaded) {
+                return {
+                  type: "error",
+                  message: `Session not found: ${req.sessionId}`,
+                  sessionId: req.sessionId,
+                };
+              }
+              entry = this.createSessionEntry(
+                loaded.session,
+                "api",
+                loaded.session.title,
+              );
+              entry.messages = loaded.turns.length > 0
+                ? turnsToMessages(loaded.turns)
+                : [];
+              this.sessions.set(req.sessionId, entry);
+            }
+            sessionId = req.sessionId;
+          } else {
+            // No session ID — create a new session on-demand
+            const session = await createSession(this.paths, {
+              model: this.model?.name ?? "unknown",
+              title: "IPC Session",
+            });
+            entry = this.createSessionEntry(session, "api", "IPC Session");
+            this.sessions.set(session.id, entry);
+            sessionId = session.id;
+          }
+
+          // Build message array
+          let messages: Message[];
+          if (req.text) {
+            // New-style: daemon manages context
+            messages = entry.messages;
+            messages.push({
+              role: "user",
+              content: req.text,
+              timestamp: Date.now(),
+            } as Message);
+          } else if (req.messages) {
+            // Old-style: caller provides full message array
+            messages = req.messages as Message[];
+          } else {
+            return {
+              type: "error",
+              message: "submit-turn requires either 'text' or 'messages'",
+              sessionId,
+            };
+          }
+
+          // Run agent with event streaming
           const result = await this.agent.run(messages, {
-            signal: controller.signal,
-            metricsRecorder: this.metricsRecorder,
+            metricsRecorder: entry.metricsRecorder,
             memoryBackend: this.memoryService?.getBackend(),
+            onEvent: (event) => {
+              if (!send) return;
+              let streamEvent: TurnStreamEvent | null = null;
+              switch (event.type) {
+                case "token":
+                  streamEvent = { type: "token", text: event.text };
+                  break;
+                case "tool_call_start":
+                  streamEvent = { type: "tool_call_start", name: event.name, args: event.args };
+                  break;
+                case "tool_call_done":
+                  streamEvent = { type: "tool_call_done", name: event.name, result: event.result };
+                  break;
+                case "tool_call_error":
+                  streamEvent = { type: "tool_call_error", name: event.name, error: event.error };
+                  break;
+                default:
+                  // Other event types (turn_end, usage) — not streamed to client
+                  break;
+              }
+              if (streamEvent) {
+                send({ type: "turn-event", sessionId, event: streamEvent });
+              }
+            },
           });
-          this.turnsCompleted++;
+
+          entry.turnsCompleted++;
+          entry.lastActiveAt = new Date().toISOString();
+
+          // If daemon managed context (new-style), the agent has mutated
+          // `messages` in place — which is `entry.messages`. Nothing to do.
+          // If old-style, we need to sync messages back to the entry
+          // in case the caller will send `text` on a later turn.
+          if (req.messages && !req.text) {
+            entry.messages = messages;
+          }
 
           // Record the turn in the session transcript
           const finalMessage = result.aborted
@@ -349,8 +577,9 @@ export class DaemonRuntime {
             role: "assistant" as const,
             content: finalMessage,
             userContent:
-              messages.find((m) => m.role === "user")?.content?.toString() ??
-              "",
+              req.text ??
+              (messages.find((m) => m.role === "user")?.content?.toString() ??
+                ""),
             tokens: {
               input: result.usage.inputTokens,
               output: result.usage.outputTokens,
@@ -364,18 +593,26 @@ export class DaemonRuntime {
             },
             model: this.model?.name ?? "unknown",
             timestamp: new Date().toISOString(),
-            messages,
+            messages: req.messages ? messages : undefined,
           };
-          this.session = await recordTurn(this.session, turn, this.paths);
+          entry.session = await recordTurn(entry.session, turn, this.paths);
 
           return {
-            type: "turn-accepted",
+            type: "turn-complete",
+            sessionId,
+            finalResponse: finalMessage,
             info: `Turn completed: ${result.aborted ? "aborted" : "ok"}, ${result.aborted ? result.completedTurns : result.turns} turns, ${result.usage.totalTokens} tokens`,
+            turnsCompleted: entry.turnsCompleted,
           };
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const msg = this.enhanceAuthError(rawMsg);
           this.errorBuffer.push(msg);
-          return { type: "error", message: msg };
+          return {
+            type: "error",
+            message: msg,
+            sessionId: req.sessionId,
+          };
         }
       }
 
@@ -450,22 +687,44 @@ export class DaemonRuntime {
     log.info("agent initialized", { model: this.model.name });
   }
 
-  private async initSession(): Promise<void> {
-    const log = this.logger.child("session");
-    try {
-      this.session = await createSession(this.paths, {
-        model: this.model?.name ?? "unknown",
-        title: "Daemon Session",
-      });
-      this.metricsRecorder = createMetricsRecorder({
-        sessionId: this.session.id,
-      });
-      log.info("session created", { id: this.session.id });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error("failed to create session", { error: msg });
-      this.errorBuffer.push(msg);
-    }
+  /**
+   * Detects 401/403 auth errors and appends a hint about the .env file
+   * location so the user knows where to put API keys.
+   */
+  private enhanceAuthError(msg: string): string {
+    const isAuthError =
+      /\b401\b/.test(msg) ||
+      /\b403\b/.test(msg) ||
+      /unauthorized/i.test(msg) ||
+      /forbidden/i.test(msg) ||
+      /invalid.*api.*key/i.test(msg);
+
+    if (!isAuthError) return msg;
+
+    return (
+      `${msg}\n\n` +
+      `This usually means API keys are missing or invalid.\n` +
+      `Expected .env location: ${this.paths.home}/.env\n` +
+      `Add your provider keys there, then restart the daemon: harness daemon restart`
+    );
+  }
+
+  private createSessionEntry(
+    session: Session,
+    origin: SessionOrigin,
+    title: string,
+  ): SessionEntry {
+    const now = new Date().toISOString();
+    return {
+      session,
+      messages: [],
+      turnsCompleted: 0,
+      metricsRecorder: createMetricsRecorder({ sessionId: session.id }),
+      origin,
+      title,
+      createdAt: session.createdAt ?? now,
+      lastActiveAt: session.lastActivityAt ?? now,
+    };
   }
 
   private startHeartbeat(): void {
