@@ -1,4 +1,4 @@
-# Cliffford V2 – Documentation
+# Harness – Documentation
 
 Living docs. Wird bei jeder relevanten Änderung oder Design-Entscheidung aktualisiert.
 

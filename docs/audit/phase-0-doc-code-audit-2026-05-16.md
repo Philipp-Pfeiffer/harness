@@ -58,8 +58,8 @@
 | Pfad | Erste Überschrift | Kategorie |
 |------|-------------------|-----------|
 | `AGENTS.md` | `# AGENTS.md` | Sonstiges (Projekt-Konventionen) |
-| `README.md` | `# Cliffford V2` | README |
-| `docs/README.md` | `# Cliffford V2 – Documentation` | README |
+| `README.md` | `# Harness` | README |
+| `docs/README.md` | `# Harness – Documentation` | README |
 | `docs/agent/loop.md` | `# Agent Loop` | Architektur |
 | `docs/architecture/exec-tool-architecture.md` | `# exec-Tool — Technical Architecture` | Architektur |
 | `docs/tools/edit.md` | `# Tool: edit (edit_file)` | Tool-Docs |

@@ -1,4 +1,4 @@
-# Cliffford V2
+# Harness
 
 Custom agent loop built on top of `@mariozechner/pi-ai`.
 

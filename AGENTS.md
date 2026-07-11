@@ -1,7 +1,7 @@
 # AGENTS.md
 
 **Projekt:** Harness — selbstgebautes Agent-Harness in TypeScript.
-Endprodukt: Cliffford V2 (Nachfolger des aktuellen OpenClaw-basierten Cliffford).
+Endprodukt: Harness (Nachfolger des aktuellen OpenClaw-basierten Harness).
 
 ## Behavioral Guidelines
 

@@ -7,7 +7,7 @@
 
 ## Gesamtarchitektur
 
-Harness / Cliffford V2 ist ein Terminal-basierter AI-Agent in TypeScript (strict, ESM). Die Architektur besteht aus drei Hauptebenen:
+Harness ist ein Terminal-basierter AI-Agent in TypeScript (strict, ESM). Die Architektur besteht aus drei Hauptebenen:
 
 ```
 ┌─────────────────────────────────────────┐

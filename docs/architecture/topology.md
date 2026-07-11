@@ -115,7 +115,7 @@ kann aber dasselbe `memory/` und `sources/` nutzen.
 ### Beispiel: Sub-Agent mit eigener Persönlichkeit
 
 ```bash
-# Haupt-Agent (Cliffford) — Default-Home
+# Haupt-Agent (Harness) — Default-Home
 harness
 # HARNESS_HOME=~/harness → eigene core.md, eigene config
 

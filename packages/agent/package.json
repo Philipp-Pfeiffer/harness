@@ -1,0 +1,43 @@
+{
+  "name": "@harness/agent",
+  "version": "0.0.1",
+  "description": "Harness — personal agent (daemon, TUI, CLI, memory)",
+  "type": "module",
+  "bin": {
+    "harness": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.tsx",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@harness/core": "workspace:*",
+    "@mariozechner/pi-ai": "^0.70.2",
+    "@sinclair/typebox": "^0.34.49",
+    "@tobilu/qmd": "^2.5.3",
+    "@types/turndown": "^5.0.6",
+    "dotenv": "^17.4.2",
+    "ink": "^6.0.0",
+    "ink-text-input": "^6.0.0",
+    "marked": "14.1.4",
+    "marked-terminal": "^7.3.0",
+    "node-pty": "^1.0.0",
+    "pdfjs-dist": "^5.6.205",
+    "react": "^19.0.0",
+    "turndown": "^7.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
