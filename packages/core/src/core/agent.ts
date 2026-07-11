@@ -1,6 +1,8 @@
 import { stream } from "@mariozechner/pi-ai";
 import { resolveModel, getApiKey } from "./resolveModel.js";
 import { prompt } from "../prompts.js";
+import { shouldCompact, compactSession } from "./compaction.js";
+import type { HarnessPaths } from "../config/paths.js";
 import { Value } from "typebox/value";
 import type {
   Context as PiContext,
@@ -241,6 +243,22 @@ export interface AgentConfig {
   maxIterations?: number;
   model?: Model<Api>;
   logger?: Logger;
+  /** Optional compaction config. When set, auto-compaction triggers before LLM calls. */
+  compaction?: CompactionOptions;
+}
+
+/**
+ * Configuration for auto-compaction within the agent loop.
+ */
+export interface CompactionOptions {
+  /** HarnessPaths — required to write alt-context files to $HARNESS_STATE. */
+  paths: HarnessPaths;
+  /** Session ID — used for the alt-context file name. */
+  sessionId: string;
+  /** Override the trigger threshold (default: 0.8 = 80% of contextWindow). */
+  threshold?: number;
+  /** Override the fraction of recent turns to preserve verbatim (default: 0.2). */
+  preserveFraction?: number;
 }
 
 export interface Agent {
@@ -311,6 +329,27 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         drainMailbox(mailbox, context.messages);
+
+        // Auto-compaction: if messages exceed threshold, compact before LLM call.
+        if (config.compaction) {
+          if (shouldCompact(context.messages, resolvedModel, config.compaction.threshold)) {
+            const compactionResult = await compactSession(context.messages, {
+              model: resolvedModel,
+              paths: config.compaction.paths,
+              sessionId: config.compaction.sessionId,
+              preserveFraction: config.compaction.preserveFraction,
+              signal,
+            });
+            if (compactionResult.performed) {
+              context.messages = compactionResult.messages;
+              // Also update the caller's array reference so the compacted
+              // messages persist after run() returns.
+              messages.length = 0;
+              messages.push(...compactionResult.messages);
+              logger?.(`[COMPACTION] Compacted ${compactionResult.compactedTurnCount} messages. Alt-context: ${compactionResult.altContextPath}`);
+            }
+          }
+        }
 
         const apiKey = getApiKey(resolvedModel);
         const eventStream = stream(resolvedModel, context, { signal, apiKey });

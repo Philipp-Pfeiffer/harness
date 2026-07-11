@@ -16,6 +16,7 @@ export {
   type RunOptions,
   type RunResult,
   type TokenUsage,
+  type CompactionOptions,
 } from "./core/agent.js";
 
 // Tool types and individual tools
@@ -87,6 +88,18 @@ export {
   type TokenTraceSnapshot,
   type TokenTraceUsage,
 } from "./core/tokenTrace.js";
+
+// Compaction (context window management)
+export {
+  compactSession,
+  shouldCompact,
+  estimateTokens,
+  findSplitPoint,
+  DEFAULT_COMPACTION_THRESHOLD,
+  type CompactSessionOptions,
+  type CompactSessionResult,
+  type CompactionConfig,
+} from "./core/compaction.js";
 
 // Note on toolChoice (pi-ai 0.70.2):
 // The typed `StreamOptions` interface does not expose a `toolChoice` field.
