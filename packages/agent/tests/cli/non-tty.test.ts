@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const AGENT_DIST = join(__dirname, "..", "..", "dist", "index.js");
 
 function runWithNullStdin(): Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolvePromise) => {
-    const proc = spawn("node", [resolve("dist/index.js")], {
+    const proc = spawn("node", [AGENT_DIST], {
       stdio: ["ignore", "pipe", "pipe"],
     });
 

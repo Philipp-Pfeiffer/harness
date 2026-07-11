@@ -383,7 +383,13 @@ export async function harnessSend(
     );
 
     if (resp.type === "turn-complete") {
-      // If tokens were streamed, ensure a trailing newline
+      // If no tokens were streamed (e.g. slash command responses),
+      // finalResponse contains the full text to display.
+      // If tokens were streamed, we already wrote them; just add newline.
+      if (resp.info?.startsWith("/")) {
+        // Slash command response — display finalResponse directly
+        return { stdout: resp.finalResponse, exitCode: 0 };
+      }
       process.stdout.write("\n");
       return { stdout: "", exitCode: 0 };
     }

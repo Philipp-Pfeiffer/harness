@@ -137,4 +137,59 @@ describe("IPC server + client", () => {
     const { stat } = await import("node:fs/promises");
     await expect(stat(socketPath)).rejects.toThrow();
   });
+
+  it("handles end-session request", async () => {
+    const socketPath = join(TEST_DIR, "daemon.sock");
+
+    const server = await startIpcServer(socketPath, async (req: IpcRequest): Promise<IpcResponse> => {
+      if (req.type === "end-session") {
+        return { type: "session-ended", sessionId: req.sessionId };
+      }
+      return { type: "error", message: "unknown" };
+    });
+
+    try {
+      const resp = await sendIpcRequest(socketPath, { type: "end-session", sessionId: "test-123" });
+      expect(resp.type).toBe("session-ended");
+      expect(resp).toMatchObject({ type: "session-ended", sessionId: "test-123" });
+    } finally {
+      await stopIpcServer(server, socketPath);
+    }
+  });
+
+  it("turn-complete response includes usage when provided", async () => {
+    const socketPath = join(TEST_DIR, "daemon.sock");
+
+    const server = await startIpcServer(socketPath, async (req: IpcRequest): Promise<IpcResponse> => {
+      if (req.type === "submit-turn") {
+        return {
+          type: "turn-complete",
+          sessionId: "s1",
+          finalResponse: "hello",
+          info: "1 turn",
+          turnsCompleted: 1,
+          usage: {
+            inputTokens: 100,
+            outputTokens: 50,
+            totalTokens: 150,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        };
+      }
+      return { type: "error", message: "unknown" };
+    });
+
+    try {
+      const resp = await sendIpcRequest(socketPath, { type: "submit-turn", text: "hi", sessionId: "s1" });
+      expect(resp.type).toBe("turn-complete");
+      if (resp.type === "turn-complete") {
+        expect(resp.usage).toBeDefined();
+        expect(resp.usage!.totalTokens).toBe(150);
+        expect(resp.sessionId).toBe("s1");
+      }
+    } finally {
+      await stopIpcServer(server, socketPath);
+    }
+  });
 });

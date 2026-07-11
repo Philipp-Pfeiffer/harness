@@ -486,6 +486,21 @@ export class DaemonRuntime {
         }
 
         try {
+          // Daemon-side slash command interpretation.
+          // These commands are handled here (not in the client) so they work
+          // identically across all gateways (TUI, WhatsApp, etc.).
+          // /sessions and /resume <id> work without an active session.
+          // /new and /end require a session (resolved or created below).
+          if (req.text) {
+            // Handle session-listing and resume commands that don't need
+            // an existing session first.
+            const trimmed = req.text.trim();
+            if (trimmed === "/sessions" || trimmed.match(/^\/resume\s+\S+/)) {
+              const cmdResult = await this.tryHandleSlashCommand(req.text, req.sessionId ?? "", send);
+              if (cmdResult) return cmdResult;
+            }
+          }
+
           // Resolve or create session
           let entry: SessionEntry;
           let sessionId: string;
@@ -523,6 +538,13 @@ export class DaemonRuntime {
             entry = this.createSessionEntry(session, "api", "IPC Session");
             this.sessions.set(session.id, entry);
             sessionId = session.id;
+          }
+
+          // Handle session-scoped slash commands (/new, /end) now that we
+          // have a resolved session.
+          if (req.text) {
+            const cmdResult = await this.tryHandleSlashCommand(req.text, sessionId, send);
+            if (cmdResult) return cmdResult;
           }
 
           // Build message array
@@ -622,6 +644,13 @@ export class DaemonRuntime {
             finalResponse: finalMessage,
             info: `Turn completed: ${result.aborted ? "aborted" : "ok"}, ${result.aborted ? result.completedTurns : result.turns} turns, ${result.usage.totalTokens} tokens`,
             turnsCompleted: entry.turnsCompleted,
+            usage: {
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              totalTokens: result.usage.totalTokens,
+              cacheRead: result.usage.cacheRead,
+              cacheWrite: result.usage.cacheWrite,
+            },
           };
         } catch (err) {
           const rawMsg = err instanceof Error ? err.message : String(err);
@@ -632,6 +661,35 @@ export class DaemonRuntime {
             message: msg,
             sessionId: req.sessionId,
           };
+        }
+      }
+
+      case "end-session": {
+        const sessionId = req.sessionId;
+        try {
+          // If session is in memory, end it and remove from active map
+          const entry = this.sessions.get(sessionId);
+          if (entry) {
+            entry.session = await endSession(entry.session, this.paths);
+            this.sessions.delete(sessionId);
+            const log = this.logger.child("session");
+            log.info("session ended via IPC", { id: sessionId });
+          } else {
+            // Session not in memory — end it on disk directly
+            const loaded = await loadSession(sessionId, this.paths);
+            if (loaded) {
+              await endSession(loaded.session, this.paths);
+              const log = this.logger.child("session");
+              log.info("session ended via IPC (disk-only)", { id: sessionId });
+            } else {
+              return { type: "error", message: `Session not found: ${sessionId}`, sessionId };
+            }
+          }
+          return { type: "session-ended", sessionId };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.errorBuffer.push(msg);
+          return { type: "error", message: msg, sessionId };
         }
       }
 
@@ -707,8 +765,9 @@ export class DaemonRuntime {
   }
 
   /**
-   * Detects 401/403 auth errors and appends a hint about the .env file
-   * location so the user knows where to put API keys.
+   * Detects 401/403 auth errors and appends a hint about the specific
+   * API key variable that is likely missing, including whether it is
+   * currently set in the environment.
    */
   private enhanceAuthError(msg: string): string {
     const isAuthError =
@@ -720,11 +779,41 @@ export class DaemonRuntime {
 
     if (!isAuthError) return msg;
 
+    // Determine the likely env var from the configured model/provider.
+    const provider = this.model?.provider ?? "unknown";
+    const providerEnvMap: Record<string, string> = {
+      minimax: "MINIMAX_API_KEY",
+      openai: "OPENAI_API_KEY",
+      anthropic: "ANTHROPIC_API_KEY",
+      azure: "AZURE_OPENAI_API_KEY",
+      google: "GEMINI_API_KEY",
+      gemini: "GEMINI_API_KEY",
+      groq: "GROQ_API_KEY",
+      mistral: "MISTRAL_API_KEY",
+      deepseek: "DEEPSEEK_API_KEY",
+      perplexity: "PERPLEXITY_API_KEY",
+    };
+    const envVar = providerEnvMap[provider] ?? `${provider.toUpperCase()}_API_KEY`;
+    const isSet = !!process.env[envVar];
+
+    // Also check for custom env: references in config
+    const configApiKey = this.configDefaultModel
+      ? (this.configDefaultModel as unknown as { apiKey?: string }).apiKey
+      : undefined;
+    let customEnvHint = "";
+    if (configApiKey?.startsWith("env:")) {
+      const customVar = configApiKey.slice(4);
+      const customSet = !!process.env[customVar];
+      customEnvHint = `\nConfig references env var: ${customVar} (currently ${customSet ? "set ✓" : "NOT SET ✗"})`;
+    }
+
     return (
       `${msg}\n\n` +
-      `This usually means API keys are missing or invalid.\n` +
-      `Expected .env location: ${this.paths.home}/.env\n` +
-      `Add your provider keys there, then restart the daemon: harness daemon restart`
+      `Authentication failed for provider '${provider}'.\n` +
+      `Expected API key env var: ${envVar} (currently ${isSet ? "set ✓" : "NOT SET ✗"})` +
+      customEnvHint +
+      `\n.env location: ${this.paths.home}/.env\n` +
+      `Add your provider key there, then restart: harness daemon restart`
     );
   }
 
@@ -744,6 +833,184 @@ export class DaemonRuntime {
       createdAt: session.createdAt ?? now,
       lastActiveAt: session.lastActivityAt ?? now,
     };
+  }
+
+  /**
+   * Daemon-side slash command handling for submit-turn.
+   *
+   * These commands are interpreted in the daemon (not the client) so they
+   * work identically across all gateways (TUI, WhatsApp, etc.).
+   *
+   * Supported commands:
+   *   /new      — End current session, create a new one.
+   *   /sessions — List all sessions.
+   *   /resume <id> — Resume a specific session.
+   *   /end      — End the current session explicitly.
+   *
+   * Returns an IpcResponse if the command was handled, or null if the
+   * text is not a recognized slash command (caller continues with normal
+   * turn processing).
+   */
+  private async tryHandleSlashCommand(
+    text: string,
+    sessionId: string,
+    send?: (resp: IpcResponse) => void,
+  ): Promise<IpcResponse | null> {
+    const trimmed = text.trim();
+
+    // /new — end current session, start a new one
+    if (trimmed === "/new") {
+      // End the current session
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        entry.session = await endSession(entry.session, this.paths);
+        this.sessions.delete(sessionId);
+      } else {
+        const loaded = await loadSession(sessionId, this.paths);
+        if (loaded) await endSession(loaded.session, this.paths);
+      }
+      // Create new session
+      const session = await createSession(this.paths, {
+        model: this.model?.name ?? "unknown",
+        title: "IPC Session",
+      });
+      const newEntry = this.createSessionEntry(session, this.sessions.get(sessionId)?.origin ?? "api", "IPC Session");
+      this.sessions.set(session.id, newEntry);
+      const log = this.logger.child("session");
+      log.info("session created via /new", { oldId: sessionId, newId: session.id });
+      return {
+        type: "turn-complete",
+        sessionId: session.id,
+        finalResponse: `Started new session: ${session.id}`,
+        info: "/new",
+        turnsCompleted: 0,
+      };
+    }
+
+    // /end — end the current session explicitly
+    if (trimmed === "/end") {
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        entry.session = await endSession(entry.session, this.paths);
+        this.sessions.delete(sessionId);
+      } else {
+        const loaded = await loadSession(sessionId, this.paths);
+        if (loaded) await endSession(loaded.session, this.paths);
+      }
+      const log = this.logger.child("session");
+      log.info("session ended via /end", { id: sessionId });
+      return {
+        type: "turn-complete",
+        sessionId,
+        finalResponse: "Session ended. Type a message to start a new session.",
+        info: "/end",
+        turnsCompleted: 0,
+      };
+    }
+
+    // /sessions — list all sessions
+    if (trimmed === "/sessions") {
+      const persisted = await listSessions(this.paths);
+      const summaries: SessionSummary[] = [];
+
+      const inMemoryIds = new Set(this.sessions.keys());
+      for (const [id, e] of this.sessions) {
+        summaries.push({
+          sessionId: id,
+          title: e.title,
+          origin: e.origin,
+          status: "active",
+          createdAt: e.createdAt,
+          lastActiveAt: e.lastActiveAt,
+          model: e.session.model,
+          turnsCompleted: e.turnsCompleted,
+          inMemory: true,
+        });
+      }
+      for (const idx of persisted) {
+        if (inMemoryIds.has(idx.sessionId)) continue;
+        const turnCount = await countTurnsInTranscript(idx.sessionId, this.paths);
+        summaries.push({
+          sessionId: idx.sessionId,
+          title: idx.title,
+          origin: "api",
+          status: idx.status,
+          createdAt: idx.created,
+          lastActiveAt: idx.lastActivity,
+          model: idx.model,
+          turnsCompleted: turnCount,
+          inMemory: false,
+        });
+      }
+      summaries.sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+
+      const lines = summaries.map((s) => {
+        const date = s.createdAt.slice(0, 10);
+        const mem = s.inMemory ? " ●" : "  ";
+        return `${mem} ${s.sessionId} · ${date} · ${s.origin} · ${s.status} · ${s.turnsCompleted} turns`;
+      });
+      const text = lines.length > 0
+        ? `Sessions:\n${lines.map((l) => `  ${l}`).join("\n")}`
+        : "No sessions found.";
+
+      return {
+        type: "turn-complete",
+        sessionId,
+        finalResponse: text,
+        info: "/sessions",
+        turnsCompleted: this.sessions.get(sessionId)?.turnsCompleted ?? 0,
+      };
+    }
+
+    // /resume <id> — resume a specific session
+    const resumeMatch = trimmed.match(/^\/resume\s+(\S+)/);
+    if (resumeMatch) {
+      const targetId = resumeMatch[1]!;
+
+      // End the current session
+      const currentEntry = this.sessions.get(sessionId);
+      if (currentEntry) {
+        currentEntry.session = await endSession(currentEntry.session, this.paths);
+        this.sessions.delete(sessionId);
+      }
+
+      // Resume the target session
+      if (this.sessions.has(targetId)) {
+        const entry = this.sessions.get(targetId)!;
+        return {
+          type: "turn-complete",
+          sessionId: targetId,
+          finalResponse: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
+          info: "/resume",
+          turnsCompleted: entry.turnsCompleted,
+        };
+      }
+
+      const loaded = await loadSession(targetId, this.paths);
+      if (!loaded) {
+        return {
+          type: "error",
+          message: `Session not found: ${targetId}`,
+          sessionId,
+        };
+      }
+      const entry = this.createSessionEntry(loaded.session, "api", loaded.session.title);
+      entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
+      this.sessions.set(targetId, entry);
+      const log = this.logger.child("session");
+      log.info("session resumed via /resume", { id: targetId });
+
+      return {
+        type: "turn-complete",
+        sessionId: targetId,
+        finalResponse: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
+        info: "/resume",
+        turnsCompleted: entry.turnsCompleted,
+      };
+    }
+
+    void send; // send is used for streaming, not needed for slash commands
+    return null;
   }
 
   private startHeartbeat(): void {

@@ -58,10 +58,17 @@ if (process.argv[2] === "send") {
   process.exit(result.exitCode);
 }
 
-// ─── Subcommand: chat ─────────────────────────────────────────
+// ─── Subcommand: help ─────────────────────────────────────────
+if (process.argv[2] === "help" || process.argv[2] === "--help" || process.argv[2] === "-h") {
+  const { printHelp } = await import("./cli/help.js");
+  printHelp();
+  process.exit(0);
+}
+
+// ─── Subcommand: chat (TUI via daemon) ─────────────────────────
+// harness chat connects to the daemon via IPC and launches the full
+// Ink TUI with a session picker. Cwd-independent — only needs the socket.
 if (process.argv[2] === "chat") {
-  const { harnessChat } = await import("./daemon/commands.js");
-  // Parse: harness chat [--session <id>]
   const args = process.argv.slice(3);
   let sessionId: string | undefined;
 
@@ -72,9 +79,43 @@ if (process.argv[2] === "chat") {
     }
   }
 
-  const result = await harnessChat(sessionId);
-  if (result.stdout) console.log(result.stdout);
-  process.exit(result.exitCode);
+  if (!process.stdin.isTTY) {
+    // Non-TTY: fall back to the readline-based chat client
+    const { harnessChat } = await import("./daemon/commands.js");
+    const result = await harnessChat(sessionId);
+    if (result.stdout) console.log(result.stdout);
+    process.exit(result.exitCode);
+  }
+
+  // TTY: launch Ink TUI with DaemonClientBackend
+  const { resolveHarnessPaths: resolvePaths } = await import("@harness/core");
+  const chatPaths = resolvePaths();
+
+  // Verify daemon is reachable before launching TUI
+  const { sendIpcRequest } = await import("./daemon/ipc.js");
+  try {
+    await sendIpcRequest(chatPaths.socketFile, { type: "ping" }, 5_000);
+  } catch (err) {
+    console.error(`Cannot reach daemon: ${err instanceof Error ? err.message : String(err)}`);
+    console.error("Is the daemon running? Start it with: harness daemon start");
+    process.exit(1);
+  }
+
+  const { DaemonClientBackend } = await import("./backends/daemonClientBackend.js");
+  const backend = new DaemonClientBackend({ paths: chatPaths });
+
+  const { render: renderChat } = await import("ink");
+  const { default: App } = await import("./cli/App.js");
+
+  if (sessionId) {
+    // --session <id>: resume directly
+    renderChat(<App backend={backend} paths={chatPaths} initialSessionId={sessionId} />);
+  } else {
+    renderChat(<App backend={backend} paths={chatPaths} />);
+  }
+  // TUI handles its own lifecycle — do not process.exit()
+  // Block forever (like the default TUI mode below)
+  await new Promise<never>(() => {});
 }
 
 // ─── Subcommand: daemon ────────────────────────────────────────
@@ -143,10 +184,11 @@ if (process.argv[2] === "reload-config") {
 // ─── Interactive TUI mode (default) ───────────────────────────
 
 // Reject unknown subcommands before any heavy initialization.
-const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat"]);
+const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat", "help"]);
 if (!knownCommands.has(process.argv[2])) {
   console.error(`Unknown command: ${process.argv[2] ?? ""}`);
-  console.error("Usage: harness [daemon|sessions|send|chat|migrate-home|reload-config]");
+  console.error("Usage: harness [help|daemon|sessions|send|chat|migrate-home|reload-config]");
+  console.error("Run 'harness help' for a full overview.");
   process.exit(1);
 }
 
@@ -177,8 +219,51 @@ const memoryService = new MemoryService({
 await memoryService.init();
 
 // Workspace = cwd (where the user started harness). No subdir creation.
+const { createAgent, loadTools, resolveModel, prompt, loadConfig } = await import("@harness/core");
+const { loadCoreMemoryRaw } = await import("./core/coreMemory.js");
+const { buildSystemPrompt } = await import("./core/systemPrompt.js");
+const { InProcessBackend } = await import("./backends/inProcessBackend.js");
 const { default: App } = await import("./cli/App.js");
-render(<App memoryService={memoryService} paths={paths} />);
+
+// Load config for model resolution
+const configResult = await loadConfig({ harnessHome: paths.home });
+
+// Resolve model — from config or default
+let initModel;
+try {
+  if (configResult.defaultModel) {
+    initModel = (await import("@harness/core")).resolveModelFromConfig(configResult.defaultModel);
+  }
+} catch {
+  // fall through to default
+}
+if (!initModel) {
+  initModel = resolveModel("minimax", "MiniMax-M2.7");
+}
+
+// Create agent + tools for in-process mode
+const initTools = loadTools(memoryService?.getBackend(), configResult.webConfig);
+const initAgent = createAgent({ tools: initTools, model: initModel });
+
+// Load system prompt
+const coreMemory = await loadCoreMemoryRaw(paths.core);
+const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
+const composed = buildSystemPrompt({
+  basePrompt,
+  coreMemoryRaw: coreMemory,
+  activeToolNames: initTools.map((t: { name: string }) => t.name),
+});
+initAgent.setSystemPrompt(composed);
+console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
+
+const backend = new InProcessBackend({
+  paths,
+  agent: initAgent,
+  model: initModel,
+  memoryBackend: () => memoryService?.getBackend(),
+});
+
+render(<App memoryService={memoryService} paths={paths} backend={backend} webConfig={configResult.webConfig} configModels={configResult.models} configDefaultModel={configResult.defaultModel} configError={configResult.error} />);
 
 // Graceful shutdown on exit signals
 async function shutdown() {

@@ -54,6 +54,7 @@ export type IpcRequest =
   | { type: "list-sessions" }
   | { type: "submit-turn"; messages?: SerializedMessage[]; text?: string; model?: string; sessionId?: string }
   | { type: "resume-session"; sessionId: string }
+  | { type: "end-session"; sessionId: string }
   | { type: "reload-config" }
   | { type: "shutdown" };
 
@@ -70,8 +71,9 @@ export type IpcResponse =
   | { type: "session-created"; sessionId: string; origin: SessionOrigin; createdAt: string }
   | { type: "sessions-listed"; sessions: SessionSummary[] }
   | { type: "session-resumed"; sessionId: string; messageCount: number }
+  | { type: "session-ended"; sessionId: string }
   | { type: "turn-event"; sessionId: string; event: TurnStreamEvent }
-  | { type: "turn-complete"; sessionId: string; finalResponse: string; info: string; turnsCompleted: number }
+  | { type: "turn-complete"; sessionId: string; finalResponse: string; info: string; turnsCompleted: number; usage?: TurnUsage }
   | { type: "config-reloaded"; ok: boolean; message?: string }
   | { type: "shutting-down" }
   | { type: "error"; message: string; sessionId?: string };
@@ -85,6 +87,15 @@ export type TurnStreamEvent =
   | { type: "tool_call_start"; name: string; args: unknown }
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string };
+
+/** Token usage included in turn-complete responses. */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
 
 /**
  * Whether a response frame is terminal (i.e. the last frame for a request).

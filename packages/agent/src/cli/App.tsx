@@ -6,37 +6,25 @@ import MarkedTerminalRenderer from "marked-terminal";
 import { randomUUID } from "node:crypto";
 import {
   createAgent,
-  createMailbox,
   resolveModel,
   resolveModelFromConfig,
   loadTools,
   prompt,
   loadConfig,
-  createMetricsRecorder,
   resolveHarnessPaths,
-  type AgentEvent,
-  type RunResult,
-  type Mailbox,
   type ConfigModel,
   type WebConfig,
-  type MetricsRecorder,
   type HarnessPaths,
 } from "@harness/core";
 import { loadCoreMemoryRaw } from "../core/coreMemory.js";
 import { buildSystemPrompt } from "../core/systemPrompt.js";
-import type { Message, Model, Api } from "@mariozechner/pi-ai";
+import type { Model, Api } from "@mariozechner/pi-ai";
 import { slashCommands, filterCommands, type SlashCommandInfo } from "./commands.js";
 import { isStatusCommand, handleStatusCommand } from "./statusCommand.js";
 import {
-  createSession,
-  endSession,
-  recordTurn,
-  calculateTurnCost,
   loadSession,
   listSessionsWithDetails,
-  turnsToMessages,
   SESSION_LOAD_WARN_THRESHOLD,
-  type Session,
   type SessionTurn,
   type SessionListDetail,
 } from "../core/session.js";
@@ -45,6 +33,7 @@ import {
   parseSessionCommand,
   formatSessionLoadWarning,
 } from "./sessionCommand.js";
+import type { AgentBackend, BackendEvent, TurnResult } from "../backends/types.js";
 
 /* ─── marked config ───
    Use a dedicated chalk instance with full ANSI level so that markdown
@@ -793,11 +782,23 @@ export default function App({
   configPath,
   memoryService,
   paths: pathsProp,
+  backend,
+  webConfig: webConfigProp,
+  configModels: configModelsProp,
+  configDefaultModel: configDefaultModelProp,
+  configError: configErrorProp,
+  initialSessionId,
 }: {
   configPath?: string;
   memoryService?: import("../core/memoryService.js").MemoryService;
   paths?: HarnessPaths;
-} = {}) {
+  backend: AgentBackend;
+  webConfig?: WebConfig;
+  configModels?: ConfigModel[];
+  configDefaultModel?: ConfigModel;
+  configError?: string;
+  initialSessionId?: string;
+}) {
   const paths = pathsProp ?? resolveHarnessPaths();
   // memoryService is injected for future phases (ambient retrieval, explicit search)
   const _memoryServiceRef = useRef(memoryService);
@@ -815,16 +816,13 @@ export default function App({
   const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number } | undefined>(undefined);
   const [lastCallTokens, setLastCallTokens] = useState<number | undefined>(undefined);
 
-  const historyRef = useRef<Message[]>([]);
+  const historyRef = useRef<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
   const userAbortedRef = useRef(false);
-  const abortCommandRef = useRef<string | undefined>(undefined);
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
-  const mailboxRef = useRef<Mailbox>(createMailbox());
-  const sessionRef = useRef<Session | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
   const pendingResumeRef = useRef<{ sessionId: string; tokens: number } | null>(null);
-  const metricsRecorderRef = useRef<MetricsRecorder>(createMetricsRecorder({}));
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionInitializedRef = useRef(false);
 
@@ -850,19 +848,29 @@ export default function App({
     };
   }, [selectionMode, setRawMode]);
 
-  const [webConfig, setWebConfig] = useState<WebConfig | undefined>(undefined);
+  const [webConfig, setWebConfig] = useState<WebConfig | undefined>(webConfigProp);
 
+  // Model/tool setup is only relevant for InProcessBackend.
+  // DaemonClientBackend delegates to the daemon which has its own model.
   const tools = useMemo(
     () => loadTools(memoryService?.getBackend(), webConfig),
     [memoryService, webConfig]
   );
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
-  const agent = useMemo(() => createAgent({ tools, model: activeModel }), [tools, activeModel]);
+  const inProcessAgent = useMemo(() => createAgent({ tools, model: activeModel }), [tools, activeModel]);
   useEffect(() => {
-    agent.setModel(activeModel);
-  }, [agent, activeModel]);
+    inProcessAgent.setModel(activeModel);
+  }, [inProcessAgent, activeModel]);
+
+  // Keep InProcessBackend's model in sync when the user switches models.
+  useEffect(() => {
+    if (backend.name === "in-process" && "setModel" in backend) {
+      (backend as { setModel: (m: Model<Api>) => void }).setModel(activeModel);
+    }
+  }, [backend, activeModel]);
 
   useEffect(() => {
+    if (backend.name !== "in-process") return;
     (async () => {
       const coreMemory = await loadCoreMemoryRaw(paths.core);
       const basePrompt = prompt("system-prompt", { inboxPath: paths.inbox });
@@ -871,14 +879,14 @@ export default function App({
         coreMemoryRaw: coreMemory,
         activeToolNames: tools.map((t) => t.name),
       });
-      agent.setSystemPrompt(composed);
+      inProcessAgent.setSystemPrompt(composed);
       console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
     })();
-  }, [agent, tools]);
+  }, [inProcessAgent, tools, backend, paths]);
 
-  const [configModels, setConfigModels] = useState<ConfigModel[]>([]);
-  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(undefined);
-  const [configError, setConfigError] = useState<string | undefined>(undefined);
+  const [configModels, setConfigModels] = useState<ConfigModel[]>(configModelsProp ?? []);
+  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(configDefaultModelProp);
+  const [configError, setConfigError] = useState<string | undefined>(configErrorProp);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
   const [showSessionPicker, setShowSessionPicker] = useState(false);
@@ -886,7 +894,15 @@ export default function App({
   const [sessionPickerOptions, setSessionPickerOptions] = useState<SessionListDetail[]>([]);
   const [sessionPickerFilter, setSessionPickerFilter] = useState("");
 
+  // Load config only if not already provided via props.
   useEffect(() => {
+    if (configModelsProp || configDefaultModelProp || webConfigProp || configErrorProp) {
+      setConfigModels(configModelsProp ?? []);
+      setConfigDefaultModel(configDefaultModelProp);
+      setWebConfig(webConfigProp);
+      if (configErrorProp) setConfigError(configErrorProp);
+      return;
+    }
     (async () => {
       const result = await loadConfig({ configPath, harnessHome: paths.home });
       setConfigModels(result.models);
@@ -896,7 +912,7 @@ export default function App({
         setConfigError(result.error);
       }
     })();
-  }, [configPath, paths.home]);
+  }, [configPath, paths.home, configModelsProp, configDefaultModelProp, webConfigProp, configErrorProp]);
 
   useEffect(() => {
     if (!configDefaultModel) return;
@@ -915,18 +931,55 @@ export default function App({
     sessionInitializedRef.current = true;
 
     void (async () => {
+      // If initialSessionId provided (e.g. `harness chat --session <id>`), resume it.
+      if (initialSessionId) {
+        try {
+          await resumeSession(initialSessionId);
+          return;
+        } catch (err) {
+          console.error("[harness] failed to resume session:", err instanceof Error ? err.message : String(err));
+          // fall through to create a new session
+        }
+      }
+      // For daemon backend with no initialSessionId, show session picker.
+      if (backend.name === "daemon" && !initialSessionId) {
+        try {
+          const sessions = await backend.listSessions();
+          // Only show picker if there are sessions to pick from
+          if (sessions.length > 0) {
+            // Populate the session picker with backend sessions
+            const details: SessionListDetail[] = sessions.map((s) => ({
+              sessionId: s.sessionId,
+              created: s.createdAt,
+              lastActivity: s.lastActiveAt,
+              model: s.model,
+              tokenTotals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+              title: s.title,
+              status: s.status,
+              turnCount: s.turnsCompleted,
+              tokenEstimate: 0,
+            }));
+            setSessionPickerOptions(details);
+            setSessionPickerIndex(0);
+            setSessionPickerFilter("");
+            setShowSessionPicker(true);
+            return;
+          }
+        } catch (err) {
+          console.error("[harness] failed to list sessions:", err instanceof Error ? err.message : String(err));
+        }
+      }
       try {
-        const s = await createSession(paths, {
+        const { sessionId } = await backend.createSession({
           model: activeModel.name,
           title: "CLI Session",
         });
-        sessionRef.current = s;
-        metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+        sessionIdRef.current = sessionId;
       } catch (err) {
         console.error("[harness] failed to create session:", err instanceof Error ? err.message : String(err));
       }
     })();
-  }, []);
+  }, [backend, initialSessionId]);
 
   const status = activeTurnRef.current
     ? activeTurnRef.current.status === "tool"
@@ -946,10 +999,11 @@ export default function App({
   const resetIdleTimer = useCallback(() => {
     clearIdleTimer();
     idleTimerRef.current = setTimeout(() => {
-      if (sessionRef.current) {
-        void endSession(sessionRef.current, paths)
+      if (sessionIdRef.current) {
+        const sid = sessionIdRef.current;
+        void backend.endSession(sid)
           .then(() => {
-            sessionRef.current = null;
+            sessionIdRef.current = null;
             historyRef.current = [];
             setPastTurns([]);
             setSessionUsage(undefined);
@@ -970,19 +1024,19 @@ export default function App({
           });
       }
     }, IDLE_TIMEOUT_MS);
-  }, [clearIdleTimer, paths]);
+  }, [clearIdleTimer, backend]);
 
   // Cleanup idle timer and end active session on unmount.
   useEffect(() => {
     return () => {
       clearIdleTimer();
-      if (sessionRef.current) {
-        void endSession(sessionRef.current, paths).catch((err) => {
+      if (sessionIdRef.current) {
+        void backend.endSession(sessionIdRef.current).catch((err) => {
           console.error("[harness] failed to end session:", err instanceof Error ? err.message : String(err));
         });
       }
     };
-  }, [clearIdleTimer, paths]);
+  }, [clearIdleTimer, backend]);
 
   function resolveModelByName(name: string): Model<Api> | undefined {
     const match = configModels.find(
@@ -998,51 +1052,32 @@ export default function App({
 
   async function resumeSession(sessionId: string) {
     try {
-      if (sessionRef.current) {
-        await endSession(sessionRef.current, paths);
-        sessionRef.current = null;
+      if (sessionIdRef.current) {
+        await backend.endSession(sessionIdRef.current);
+        sessionIdRef.current = null;
       }
 
-      const loaded = await loadSession(sessionId, paths);
-      if (!loaded) {
-        const errorTurn: CompletedTurn = {
-          id: randomUUID(),
-          userText: `/session ${sessionId}`,
-          assistantText: "",
-          assistantRendered: false,
-          tools: [],
-          toolOffsets: [],
-          aborted: false,
-          error: `Session not found: ${sessionId}`,
-        };
-        setPastTurns((prev) => [...prev, errorTurn]);
-        return;
-      }
+      const data = await backend.resumeSession(sessionId);
 
-      const targetModel = resolveModelByName(loaded.session.model) ?? activeModel;
+      const targetModel = resolveModelByName(data.model ?? "") ?? activeModel;
       if (targetModel.id !== activeModel.id) {
         setActiveModel(targetModel);
       }
 
-      sessionRef.current = loaded.session;
-      metricsRecorderRef.current = createMetricsRecorder({
-        sessionId: loaded.session.id,
-      });
-      historyRef.current = turnsToMessages(loaded.turns);
+      sessionIdRef.current = sessionId;
 
-      const replayTurns = loaded.turns.map(turnToCompletedTurn);
+      const replayTurns = data.turns.map(turnToCompletedTurn);
       const infoTurn: CompletedTurn = {
         id: randomUUID(),
         userText: "",
-        assistantText: `Resumed session ${loaded.session.id} (${replayTurns.length} turns, ~${formatTokens(loaded.tokenEstimate)} tokens)`,
+        assistantText: `Resumed session ${sessionId} (${replayTurns.length} turns, ~${formatTokens(data.tokenEstimate)} tokens)`,
         assistantRendered: false,
         tools: [],
         toolOffsets: [],
         aborted: false,
       };
       setPastTurns([...replayTurns, infoTurn]);
-      setSessionUsage(loaded.session.tokenTotals);
-      setLastCallTokens(loaded.tokenEstimate);
+      setLastCallTokens(data.tokenEstimate);
     } catch (err) {
       console.error(
         "[harness] /session resume failed:",
@@ -1145,14 +1180,17 @@ export default function App({
         setLastCallTokens(undefined);
         return;
       }
-      if (trimmed === "/new") {
+      // The following slash commands are daemon-side when using DaemonClientBackend.
+      // They fall through to backend.runTurn() for daemon mode.
+      const isDaemon = backend.name === "daemon";
+
+      if (trimmed === "/new" && !isDaemon) {
         try {
-          if (sessionRef.current) {
-            await endSession(sessionRef.current, paths);
+          if (sessionIdRef.current) {
+            await backend.endSession(sessionIdRef.current);
           }
-          const s = await createSession(paths, { model: activeModel.name, title: "CLI Session" });
-          sessionRef.current = s;
-          metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+          const { sessionId } = await backend.createSession({ model: activeModel.name, title: "CLI Session" });
+          sessionIdRef.current = sessionId;
           historyRef.current = [];
           setPastTurns([]);
           setSessionUsage(undefined);
@@ -1160,7 +1198,7 @@ export default function App({
           const infoTurn: CompletedTurn = {
             id: randomUUID(),
             userText: trimmed,
-            assistantText: `Started new session: ${s.id}`,
+            assistantText: `Started new session: ${sessionId}`,
             assistantRendered: false,
             tools: [],
             toolOffsets: [],
@@ -1183,11 +1221,11 @@ export default function App({
         }
         return;
       }
-      if (trimmed === "/end") {
+      if (trimmed === "/end" && !isDaemon) {
         try {
-          if (sessionRef.current) {
-            await endSession(sessionRef.current, paths);
-            sessionRef.current = null;
+          if (sessionIdRef.current) {
+            await backend.endSession(sessionIdRef.current);
+            sessionIdRef.current = null;
           }
         } catch (err) {
           console.error("[harness] /end failed:", err instanceof Error ? err.message : String(err));
@@ -1211,8 +1249,8 @@ export default function App({
       }
       if (trimmed === "/quit") {
         try {
-          if (sessionRef.current) {
-            await endSession(sessionRef.current, paths);
+          if (sessionIdRef.current) {
+            await backend.endSession(sessionIdRef.current);
           }
         } catch (err) {
           console.error("[harness] /quit failed to end session:", err instanceof Error ? err.message : String(err));
@@ -1245,7 +1283,7 @@ export default function App({
           model: activeModel.id,
           workspace: process.cwd(),
           sessionState: isRunningRef.current ? "active" : "ready",
-          sessionId: sessionRef.current?.id,
+          sessionId: sessionIdRef.current ?? undefined,
           sessionUsage,
           memoryReady: !memoryService?.degraded,
           toolCalls: pastTurns.reduce((sum, t) => sum + t.tools.length, 0),
@@ -1263,7 +1301,7 @@ export default function App({
         setPastTurns((prev) => [...prev, statusTurn]);
         return;
       }
-      if (isSessionCommand(trimmed)) {
+      if (isSessionCommand(trimmed) && !isDaemon) {
         const cmd = parseSessionCommand(trimmed);
         if (!cmd) {
           const errorTurn: CompletedTurn = {
@@ -1328,7 +1366,6 @@ export default function App({
       }
 
       if (isRunningRef.current) {
-        mailboxRef.current.push(trimmed);
         if (activeTurnRef.current) {
           activeTurnRef.current = {
             ...activeTurnRef.current,
@@ -1341,7 +1378,6 @@ export default function App({
         const stopWords = ["stopp", "stop", "abort"];
         if (stopWords.includes(trimmed.toLowerCase()) && abortControllerRef.current) {
           userAbortedRef.current = true;
-          abortCommandRef.current = trimmed.toLowerCase();
           abortControllerRef.current.abort();
           if (activeTurnRef.current) {
             activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
@@ -1352,11 +1388,10 @@ export default function App({
       }
 
       // Ensure an active session exists (e.g. after /end or idle timeout).
-      if (!sessionRef.current) {
+      if (!sessionIdRef.current) {
         try {
-          const s = await createSession(paths, { model: activeModel.name, title: "CLI Session" });
-          sessionRef.current = s;
-          metricsRecorderRef.current = createMetricsRecorder({ sessionId: s.id });
+          const { sessionId } = await backend.createSession({ model: activeModel.name, title: "CLI Session" });
+          sessionIdRef.current = sessionId;
         } catch (err) {
           console.error("[harness] failed to create session:", err instanceof Error ? err.message : String(err));
           const errorTurn: CompletedTurn = {
@@ -1376,8 +1411,6 @@ export default function App({
       resetIdleTimer();
 
       setInputHistory((prev) => [...prev, trimmed]);
-      const messagesBeforeTurn = historyRef.current.length;
-      historyRef.current.push({ role: "user", content: trimmed, timestamp: Date.now() });
 
       activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking", steers: [] };
       isRunningRef.current = true;
@@ -1386,18 +1419,12 @@ export default function App({
       const controller = new AbortController();
       abortControllerRef.current = controller;
       userAbortedRef.current = false;
-      abortCommandRef.current = undefined;
 
-      const runStartMs = Date.now();
-
-      agent
-        .run(historyRef.current, {
-          signal: controller.signal,
-          mailbox: mailboxRef.current,
-          abortCommand: abortCommandRef,
-          memoryBackend: memoryService?.getBackend(),
-          metricsRecorder: metricsRecorderRef.current,
-          onEvent: (event: AgentEvent) => {
+      backend
+        .runTurn(
+          trimmed,
+          sessionIdRef.current!,
+          (event: BackendEvent) => {
             if (userAbortedRef.current) return;
 
             if (event.type === "token") {
@@ -1460,17 +1487,22 @@ export default function App({
                 forceUpdate();
               }
             } else if (event.type === "usage") {
-              setLastCallTokens(event.callTotalTokens ?? event.totalTokens);
+              setLastCallTokens(event.totalTokens);
             }
           },
-        })
-        .then((result: RunResult) => {
+          controller.signal,
+        )
+        .then((result: TurnResult) => {
+          // Daemon-side slash commands (e.g. /new) may return a new session ID
+          if (result.sessionId && result.sessionId !== sessionIdRef.current) {
+            sessionIdRef.current = result.sessionId;
+          }
           if (activeTurnRef.current) {
             const turn = activeTurnRef.current;
             const completedTurn: CompletedTurn = {
               id: randomUUID(),
               userText: turn.userText,
-              assistantText: turn.assistantText || (!result.aborted ? result.finalMessage : ""),
+              assistantText: turn.assistantText || (!result.aborted ? result.finalResponse : ""),
               assistantRendered: !result.aborted && !userAbortedRef.current && turn.status !== "error",
               tools: turn.tools,
               toolOffsets: turn.toolOffsets,
@@ -1481,90 +1513,23 @@ export default function App({
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
-
-            // Persist turn to session transcript.
-            if (sessionRef.current) {
-              const timestamp = new Date().toISOString();
-              const sessionTurn: SessionTurn = {
-                id: completedTurn.id,
-                role: "assistant",
-                content: completedTurn.assistantText,
-                userContent: completedTurn.userText,
-                tool_calls: completedTurn.tools.map((t) => ({
-                  id: t.id,
-                  name: t.name,
-                  arguments: t.args,
-                })),
-                tool_results: completedTurn.tools.map((t) => ({
-                  toolCallId: t.id,
-                  name: t.name,
-                  result: t.result ?? "",
-                  isError: t.status === "error",
-                })),
-                tokens: {
-                  input: result.usage.inputTokens,
-                  output: result.usage.outputTokens,
-                  total: result.usage.totalTokens,
-                  cacheRead: result.usage.cacheRead,
-                  cacheWrite: result.usage.cacheWrite,
-                },
-                cost: calculateTurnCost(
-                  {
-                    input: result.usage.inputTokens,
-                    output: result.usage.outputTokens,
-                    total: result.usage.totalTokens,
-                    cacheRead: result.usage.cacheRead,
-                    cacheWrite: result.usage.cacheWrite,
-                  },
-                  activeModel.cost,
-                ),
-                timing: {
-                  startedAt: new Date(runStartMs).toISOString(),
-                  latencyMs: Date.now() - runStartMs,
-                },
-                model: activeModel.name,
-                timestamp,
-                messages: historyRef.current.slice(messagesBeforeTurn),
-              };
-              void recordTurn(sessionRef.current, sessionTurn, paths)
-                .then((updated) => {
-                  sessionRef.current = updated;
-                  setSessionUsage(updated.tokenTotals);
-                })
-                .catch((err) => {
-                  console.error("[harness] failed to record turn:", err instanceof Error ? err.message : String(err));
-                });
-            }
           }
           if (result.usage) {
-            // Keep in-memory fallback up to date until async persistence resolves.
             setSessionUsage((prev) =>
               prev
                 ? {
-                    inputTokens: prev.inputTokens + result.usage.inputTokens,
-                    outputTokens: prev.outputTokens + result.usage.outputTokens,
-                    totalTokens: prev.totalTokens + result.usage.totalTokens,
-                    cacheRead: prev.cacheRead + result.usage.cacheRead,
-                    cacheWrite: prev.cacheWrite + result.usage.cacheWrite,
+                    inputTokens: prev.inputTokens + result.usage!.inputTokens,
+                    outputTokens: prev.outputTokens + result.usage!.outputTokens,
+                    totalTokens: prev.totalTokens + result.usage!.totalTokens,
+                    cacheRead: prev.cacheRead + result.usage!.cacheRead,
+                    cacheWrite: prev.cacheWrite + result.usage!.cacheWrite,
                   }
-                : result.usage
+                : result.usage,
             );
-            // For single-turn runs the usage event may not fire, so set lastCallTokens here.
-            if (!result.aborted && result.turns <= 1) {
+            if (!result.aborted && result.turnsCompleted <= 1) {
               setLastCallTokens(result.usage.totalTokens);
             }
           }
-          metricsRecorderRef.current.recordTurn({
-            model: activeModel.name,
-            inputTokens: result.usage.inputTokens,
-            outputTokens: result.usage.outputTokens,
-            totalTokens: result.usage.totalTokens,
-            cacheRead: result.usage.cacheRead,
-            cacheWrite: result.usage.cacheWrite,
-            latencyMs: Date.now() - runStartMs,
-            toolCallCount: result.toolCallCount,
-            status: result.aborted ? "aborted" : "ok",
-          });
           abortControllerRef.current = null;
           userAbortedRef.current = false;
         })
@@ -1585,62 +1550,12 @@ export default function App({
             activeTurnRef.current = null;
             isRunningRef.current = false;
             forceUpdate();
-
-            // Persist error turn without token usage.
-            if (sessionRef.current) {
-              const timestamp = new Date().toISOString();
-              const sessionTurn: SessionTurn = {
-                id: completedTurn.id,
-                role: "assistant",
-                content: completedTurn.assistantText,
-                userContent: completedTurn.userText,
-                tool_calls: completedTurn.tools.map((t) => ({
-                  id: t.id,
-                  name: t.name,
-                  arguments: t.args,
-                })),
-                tool_results: completedTurn.tools.map((t) => ({
-                  toolCallId: t.id,
-                  name: t.name,
-                  result: t.result ?? "",
-                  isError: t.status === "error",
-                })),
-                tokens: {
-                  input: 0,
-                  output: 0,
-                  total: 0,
-                  cacheRead: 0,
-                  cacheWrite: 0,
-                },
-                timing: {
-                  startedAt: new Date(runStartMs).toISOString(),
-                  latencyMs: Date.now() - runStartMs,
-                },
-                model: activeModel.name,
-                timestamp,
-                messages: historyRef.current.slice(messagesBeforeTurn),
-              };
-              void recordTurn(sessionRef.current, sessionTurn, paths)
-                .then((updated) => {
-                  sessionRef.current = updated;
-                  setSessionUsage(updated.tokenTotals);
-                })
-                .catch((err) => {
-                  console.error("[harness] failed to record turn:", err instanceof Error ? err.message : String(err));
-                });
-            }
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
-          metricsRecorderRef.current.recordTurn({
-            model: activeModel.name,
-            latencyMs: Date.now() - runStartMs,
-            toolCallCount: 0,
-            status: "error",
-          });
         });
     },
-    [agent, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession, initiateSessionResume]
+    [backend, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession, initiateSessionResume]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -1757,8 +1672,8 @@ export default function App({
       if (now - lastSigintRef.current < 500) {
         if (!isRunningRef.current) {
           void (async () => {
-            if (sessionRef.current) {
-              await endSession(sessionRef.current, paths);
+            if (sessionIdRef.current) {
+              await backend.endSession(sessionIdRef.current);
             }
             process.exit(130);
           })();
@@ -1769,7 +1684,6 @@ export default function App({
 
       if (isRunningRef.current && abortControllerRef.current) {
         userAbortedRef.current = true;
-        abortCommandRef.current = "ctrl+c";
         abortControllerRef.current.abort();
         if (activeTurnRef.current) {
           activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
@@ -1826,7 +1740,7 @@ export default function App({
               <Text color="gray">No sessions match.</Text>
             )}
             {filteredSessionPickerOptions.map((s, idx) => {
-              const isCurrent = s.sessionId === sessionRef.current?.id;
+              const isCurrent = s.sessionId === sessionIdRef.current;
               const marker = isCurrent ? "● " : "  ";
               return (
                 <Text
@@ -1834,7 +1748,7 @@ export default function App({
                   color={idx === sessionPickerIndex ? "cyan" : "gray"}
                   bold={idx === sessionPickerIndex || isCurrent}
                 >
-                  {marker}{s.sessionId} · {s.created.slice(0, 10)} · {s.model} · {s.turnCount} turns · {formatTokens(s.tokenTotals.totalTokens)} tokens
+                  {marker}{s.sessionId} · {s.created.slice(0, 10)} · {s.model} · {s.turnCount}t · {s.status}
                 </Text>
               );
             })}
