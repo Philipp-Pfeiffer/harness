@@ -308,6 +308,11 @@ export class DaemonRuntime {
     return Math.floor((Date.now() - this.startMs) / 1000);
   }
 
+  /** Returns the IPC socket path (for startup logging). */
+  getSocketPath(): string {
+    return this.paths.socketFile;
+  }
+
   // ─── IPC Handler ───
 
   private async handleIpcRequest(req: IpcRequest): Promise<IpcResponse> {

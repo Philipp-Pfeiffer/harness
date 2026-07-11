@@ -205,7 +205,10 @@ export interface Agent {
 
 export function createAgent(config: AgentConfig): Agent {
   const { tools, maxIterations = 10, model, logger } = config;
-  let systemPrompt = config.systemPrompt ?? prompt("system-prompt");
+  // Caller must set a system prompt via setSystemPrompt(). Empty default
+  // is intentional — the prompt template requires `inboxPath`; calling
+  // prompt("system-prompt") without vars triggers a missing-variable warning.
+  let systemPrompt = config.systemPrompt ?? "";
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
 
   return {

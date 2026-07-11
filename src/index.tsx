@@ -26,7 +26,7 @@ if (process.argv[2] === "migrate-home") {
 // ─── Subcommand: daemon ────────────────────────────────────────
 if (process.argv[2] === "daemon") {
   const subcommand = process.argv[3] ?? "status";
-  const { daemonStart, daemonStop, daemonRestart, daemonStatus, daemonInstall, daemonRun } =
+  const { daemonStart, daemonStop, daemonRestart, daemonStatus, daemonInstall, daemonRun, daemonLogs } =
     await import("./daemon/commands.js");
 
   let exitCode = 0;
@@ -48,9 +48,13 @@ if (process.argv[2] === "daemon") {
     case "install":
       ({ stdout, exitCode } = await daemonInstall());
       break;
+    case "logs":
+      ({ stdout, exitCode } = await daemonLogs());
+      break;
     case "run":
       // Internal: the actual daemon process (spawned by `daemon start`)
-      ({ exitCode } = await daemonRun());
+      await daemonRun();
+      // daemonRun blocks forever — we never reach here
       stdout = "";
       break;
     default:
@@ -83,6 +87,15 @@ if (process.argv[2] === "reload-config") {
 }
 
 // ─── Interactive TUI mode (default) ───────────────────────────
+
+// Reject unknown subcommands before any heavy initialization.
+const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config"]);
+if (!knownCommands.has(process.argv[2])) {
+  console.error(`Unknown command: ${process.argv[2] ?? ""}`);
+  console.error("Usage: harness [daemon|migrate-home|reload-config]");
+  process.exit(1);
+}
+
 if (!process.stdin.isTTY) {
   console.error("harness requires an interactive terminal (TTY).");
   console.error("Run without piping stdin, or use an interactive shell.");

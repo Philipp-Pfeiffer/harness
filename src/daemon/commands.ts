@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
 
 import { resolveHarnessPaths } from "../config/paths.js";
 import { sendIpcRequest } from "./ipc.js";
@@ -44,13 +45,20 @@ export async function daemonStart(): Promise<CliResult> {
   });
   daemonProc.unref();
 
-  // Wait briefly for the daemon to write its PID file
-  await sleep(500);
+  // Poll for the daemon to write its PID file (up to 10 seconds).
+  // The daemon's startup includes Memory/QMD bootstrap which can take
+  // several seconds on first run.
+  let pid: number | null = null;
+  for (let i = 0; i < 50; i++) {
+    await sleep(200);
+    pid = await getRunningDaemonPid(paths.pidFile);
+    if (pid !== null) break;
+  }
 
-  const pid = await getRunningDaemonPid(paths.pidFile);
   if (pid === null) {
+    const logFile = join(paths.logs, `daemon-${new Date().toISOString().slice(0, 10)}.log`);
     return {
-      stdout: "Daemon failed to start — check logs with `harness daemon logs`.",
+      stdout: `Daemon failed to start — check logs at ${logFile}`,
       exitCode: 1,
     };
   }
@@ -166,6 +174,44 @@ export async function daemonStatus(): Promise<CliResult> {
   };
 }
 
+/* ─── daemon logs ─── */
+
+export async function daemonLogs(): Promise<CliResult> {
+  const paths = resolveHarnessPaths();
+  try {
+    const files = await readdir(paths.logs);
+    const logFiles = files
+      .filter((f) => f.startsWith("daemon-") && f.endsWith(".log"))
+      .sort();
+    if (logFiles.length === 0) {
+      return {
+        stdout: `No daemon log files found in ${paths.logs}`,
+        exitCode: 0,
+      };
+    }
+    const latest = logFiles[logFiles.length - 1];
+    const logPath = join(paths.logs, latest);
+    const content = await readFile(logPath, "utf-8");
+    const lines = content.split("\n").filter(Boolean);
+    const tail = lines.slice(-100);
+    return {
+      stdout: `--- ${logPath} (last ${tail.length} of ${lines.length} lines) ---\n${tail.join("\n")}`,
+      exitCode: 0,
+    };
+  } catch (err) {
+    if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        stdout: `No daemon log directory found at ${paths.logs}`,
+        exitCode: 0,
+      };
+    }
+    return {
+      stdout: `Failed to read logs: ${err instanceof Error ? err.message : String(err)}`,
+      exitCode: 1,
+    };
+  }
+}
+
 /* ─── daemon install ─── */
 
 export async function daemonInstall(): Promise<CliResult> {
@@ -199,12 +245,26 @@ export async function daemonInstall(): Promise<CliResult> {
 
 /* ─── daemon run (internal — the actual daemon process) ─── */
 
-export async function daemonRun(): Promise<CliResult> {
+export async function daemonRun(): Promise<void> {
   const runtime = new DaemonRuntime();
-  await runtime.start();
-  // The process keeps running — the runtime handles IPC and signals
-  // We never return here during normal operation
-  return { stdout: "", exitCode: 0 };
+  try {
+    await runtime.start();
+    // Log startup info to stderr (visible in foreground `daemon run`,
+    // suppressed by stdio:"ignore" when spawned via `daemon start`).
+    process.stderr.write(
+      `[harness-daemon] PID ${process.pid} listening on ${runtime.getSocketPath()}\n`,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[harness-daemon] Startup failed: ${msg}\n`);
+    if (err instanceof Error && err.stack) {
+      process.stderr.write(err.stack + "\n");
+    }
+    process.exit(1);
+  }
+  // Block forever — the process exits via signal handlers calling
+  // runtime.shutdown(), which calls process.exit(0).
+  await new Promise<never>(() => {});
 }
 
 /* ─── helpers ─── */

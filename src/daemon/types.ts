@@ -37,7 +37,7 @@ export interface InboundMessage {
 export type IpcRequest =
   | { type: "ping" }
   | { type: "status" }
-  | { type: "submit-turn"; messages: SerializedMessage[]; model?: string }
+  | { type: "submit-turn"; messages: SerializedMessage[]; model?: string; sessionId?: string }
   | { type: "reload-config" }
   | { type: "shutdown" };
 
