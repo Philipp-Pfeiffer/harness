@@ -1,0 +1,18 @@
+{
+  "attachmentCounts": [
+    0,
+  ],
+  "channel": "discord",
+  "hasAttachments": false,
+  "messageCount": 1,
+  "textLengths": [
+    243,
+  ],
+  "tiers": [
+    {
+      "block": 2,
+      "tier": "monospace",
+      "type": "table",
+    },
+  ],
+}
