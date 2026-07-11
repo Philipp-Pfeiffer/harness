@@ -30,11 +30,32 @@ export type ConfigModel = {
   };
 };
 
+export type WebSearchProviderConfig =
+  | { type: "searxng"; endpoint: string; name?: string; enabled?: boolean }
+  | { type: "brave"; apiKey: string; name?: string; enabled?: boolean }
+  | { type: "tavily"; apiKey: string; name?: string; enabled?: boolean };
+
+export type WebConfig = {
+  web_search?: {
+    providers?: WebSearchProviderConfig[];
+    maxResults?: number;
+    snippetBudget?: number;
+    totalBudget?: number;
+  };
+  web_fetch?: {
+    outputCap?: number;
+    timeout?: number;
+    maxResponseSize?: number;
+    redirectLimit?: number;
+    allowlist?: string[];
+  };
+};
+
 export type Config = {
   models?: ConfigModel[];
   providers?: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
-};
+} & WebConfig;
 
 const DEFAULT_MODELS: ConfigModel[] = [
   { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" },
@@ -42,25 +63,41 @@ const DEFAULT_MODELS: ConfigModel[] = [
 
 const DEFAULT_PROVIDERS: Record<string, ConfigProvider> = {};
 
-function expandEnvVars(value: unknown): unknown {
+function resolveConfigString(value: string): string {
+  // Explicit env-reference: the entire value must be "env:VAR_NAME".
+  const envRef = value.match(/^env:([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (envRef) {
+    const name = envRef[1];
+    const envValue = process.env[name];
+    if (envValue === undefined) {
+      throw new Error(`Missing environment variable referenced by config: ${name}`);
+    }
+    return envValue;
+  }
+
+  // Inline ${VAR} substitution (legacy support).
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
+    const envValue = process.env[name];
+    if (envValue === undefined) {
+      throw new Error(`Missing environment variable: ${name}`);
+    }
+    return envValue;
+  });
+}
+
+function resolveConfigValues(value: unknown): unknown {
   if (typeof value === "string") {
-    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => {
-      const envValue = process.env[name];
-      if (envValue === undefined) {
-        throw new Error(`Missing environment variable: ${name}`);
-      }
-      return envValue;
-    });
+    return resolveConfigString(value);
   }
 
   if (Array.isArray(value)) {
-    return value.map(expandEnvVars);
+    return value.map(resolveConfigValues);
   }
 
   if (value !== null && typeof value === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value)) {
-      result[key] = expandEnvVars(val);
+      result[key] = resolveConfigValues(val);
     }
     return result;
   }
@@ -107,6 +144,7 @@ export async function loadConfig(options?: {
   models: ConfigModel[];
   providers: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
+  webConfig: WebConfig;
   error?: string;
   source?: string;
 }> {
@@ -138,17 +176,23 @@ export async function loadConfig(options?: {
     try {
       const raw = await readFile(candidate.path, "utf-8");
       const parsed = JSON.parse(raw) as Config;
-      const config = expandEnvVars(parsed) as Config;
+      const config = resolveConfigValues(parsed) as Config;
 
       const providers = config.providers ?? DEFAULT_PROVIDERS;
       const models = config.models && Array.isArray(config.models)
         ? mergeProviderDefaults(config.models, providers)
         : [];
 
+      const webConfig: WebConfig = {
+        web_search: config.web_search,
+        web_fetch: config.web_fetch,
+      };
+
       if (models.length === 0) {
         return {
           models: DEFAULT_MODELS,
           providers: DEFAULT_PROVIDERS,
+          webConfig,
           error: "Config has no models, using default",
           source: candidate.source,
         };
@@ -158,8 +202,13 @@ export async function loadConfig(options?: {
         ? mergeProviderDefaults([config.defaultModel], providers)[0]
         : undefined;
 
-      return { models, providers, defaultModel, source: candidate.source };
-    } catch {
+      return { models, providers, defaultModel, webConfig, source: candidate.source };
+    } catch (err) {
+      // If the config file was found but its content is invalid (e.g. missing
+      // env reference), surface the error instead of silently falling back.
+      if (err instanceof Error && err.message.startsWith("Missing environment variable")) {
+        throw err;
+      }
       // try next candidate
     }
   }
@@ -167,6 +216,7 @@ export async function loadConfig(options?: {
   return {
     models: DEFAULT_MODELS,
     providers: DEFAULT_PROVIDERS,
+    webConfig: {},
     error: "No config found, using default model",
   };
 }

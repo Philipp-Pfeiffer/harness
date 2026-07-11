@@ -157,7 +157,7 @@ describe("Agent", () => {
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
-  it("returns error when tool arguments are invalid", async () => {
+  it("returns precise validation errors when tool arguments are invalid", async () => {
     const mockToolCall = makeAssistantMessage(
       [{ type: "toolCall", id: "tc_bad", name: "echo", arguments: { notText: 123 } }],
       "toolUse"
@@ -176,10 +176,19 @@ describe("Agent", () => {
     };
     const agent = createAgent({ tools: [echoTool], model });
 
-    const result = await agent.run([makeUserMessage("Call echo with bad args")]);
+    const history: Message[] = [makeUserMessage("Call echo with bad args")];
+    const result = await agent.run(history);
 
     expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Weiter nach Validation", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
     expect(stream).toHaveBeenCalledTimes(2);
+
+    const toolResult = history.find((m) => m.role === "toolResult");
+    expect(toolResult).toBeDefined();
+    const resultText = (toolResult as any).content[0].text as string;
+    expect(resultText).toContain('Argumente für Tool "echo" ungültig:');
+    expect(resultText).toContain("must have required properties text");
+    expect(resultText).toContain("got");
+    expect(resultText).not.toBe('Argumente für Tool "echo" sind ungültig.');
   });
 
   it("returns max turns message when limit is reached", async () => {

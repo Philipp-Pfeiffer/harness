@@ -3,6 +3,14 @@
   "version": "0.0.1",
   "description": "Tarnis – Custom Agent Loop built on @mariozechner/pi-ai",
   "type": "module",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    }
+  },
   "bin": {
     "harness": "dist/index.js"
   },
@@ -17,6 +25,7 @@
     "@mariozechner/pi-ai": "^0.70.2",
     "@sinclair/typebox": "^0.34.49",
     "@tobilu/qmd": "^2.5.3",
+    "@types/turndown": "^5.0.6",
     "dotenv": "^17.4.2",
     "ink": "^6.0.0",
     "ink-text-input": "^6.0.0",
@@ -25,7 +34,8 @@
     "node-pty": "^1.0.0",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^5.6.205",
-    "react": "^19.0.0"
+    "react": "^19.0.0",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

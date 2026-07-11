@@ -1,0 +1,19 @@
+[Unit]
+Description=Harness Agent Daemon
+After=network.target
+
+[Service]
+Type=simple
+# Adjust to the actual install location of the Harness repository.
+ExecStart=/usr/bin/node /home/p-pfeiffer/dev/harness/dist/index.js
+WorkingDirectory=/home/p-pfeiffer/dev/harness
+
+# Load all API keys and secrets from $HARNESS_HOME/.env.
+# %h expands to the user's home directory.
+EnvironmentFile=%h/harness/.env
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

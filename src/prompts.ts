@@ -8,10 +8,15 @@ const FALLBACK_PROMPT =
   "Du bist ein hilfreicher Assistent in einer Terminal-UI. " +
   "Antworte in knapper Prosa, verzichte auf Markdown-Überschriften.";
 
-export function prompt(name: string, vars: Record<string, string> = {}): string {
+export function prompt(
+  name: string,
+  vars: Record<string, string> = {},
+  opts?: { dir?: string },
+): string {
+  const baseDir = opts?.dir ?? PROMPTS_DIR;
   let raw: string;
   try {
-    raw = readFileSync(join(PROMPTS_DIR, `${name}.md`), "utf8");
+    raw = readFileSync(join(baseDir, `${name}.md`), "utf8");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[prompts] Failed to load "${name}.md": ${message}. Using fallback.`);

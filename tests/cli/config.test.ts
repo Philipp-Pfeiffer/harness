@@ -136,6 +136,47 @@ describe("loadConfig", () => {
     delete process.env.HARNESS_TEST_API_KEY;
   });
 
+  it("resolves env:VAR_NAME references", async () => {
+    process.env.HARNESS_TEST_BRAVE_KEY = "sk-brave-env";
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const config = {
+      web_search: {
+        providers: [
+          { type: "brave", apiKey: "env:HARNESS_TEST_BRAVE_KEY" },
+        ],
+      },
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    const provider = result.webConfig.web_search?.providers?.[0];
+    expect(provider && "apiKey" in provider ? provider.apiKey : undefined).toBe("sk-brave-env");
+
+    delete process.env.HARNESS_TEST_BRAVE_KEY;
+  });
+
+  it("throws when env:VAR_NAME references a missing variable", async () => {
+    delete process.env.HARNESS_TEST_MISSING_KEY;
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const config = {
+      web_search: {
+        providers: [
+          { type: "tavily", apiKey: "env:HARNESS_TEST_MISSING_KEY" },
+        ],
+      },
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    await expect(loadConfig({ cwd, harnessHome: tmpBase })).rejects.toThrow(
+      "Missing environment variable referenced by config: HARNESS_TEST_MISSING_KEY"
+    );
+  });
+
   it("returns defaultModel with merged provider defaults", async () => {
     const cwd = path.join(tmpBase, "project");
     mkdirSync(cwd, { recursive: true });

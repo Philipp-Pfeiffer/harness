@@ -1,0 +1,128 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
+export class WebSecurityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WebSecurityError";
+  }
+}
+
+export interface WebFetchSecurityConfig {
+  allowlist?: string[];
+}
+
+function isPrivateIp(ip: string): boolean {
+  const v4 = isIPv4(ip);
+  const v6 = isIPv6(ip);
+
+  if (!v4 && !v6) return false;
+
+  if (v4) {
+    const parts = ip.split(".").map(Number);
+    if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+      return true; // treat malformed as blocked
+    }
+    const [a, b] = parts;
+    // localhost
+    if (a === 127) return true;
+    // link-local
+    if (a === 169 && b === 254) return true;
+    // private ranges
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    // broadcast / reserved
+    if (a === 255 || a === 0) return true;
+    return false;
+  }
+
+  if (v6) {
+    const lower = ip.toLowerCase();
+    if (lower === "::1") return true;
+    // fc00::/7 unique local
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
+    // fe80::/10 link-local
+    if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") || lower.startsWith("feb")) {
+      return true;
+    }
+    return false;
+  }
+
+  return false;
+}
+
+function isIPv4(ip: string): boolean {
+  return isIP(ip) === 4;
+}
+
+function isIPv6(ip: string): boolean {
+  return isIP(ip) === 6;
+}
+
+function isAllowedHost(hostname: string, allowlist: string[] | undefined): boolean {
+  if (!allowlist || allowlist.length === 0) return false;
+  return allowlist.some((allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`));
+}
+
+/**
+ * Validates a URL for SSRF safety.
+ *
+ * - Allows http/https only.
+ * - Blocks localhost, private, and link-local IPs.
+ * - Blocks hostnames resolving to private IPs (DNS rebinding protection).
+ * - Allowlist can override IP checks for specific hosts.
+ *
+ * Returns the validated hostname and resolved IP addresses.
+ */
+export async function validateUrl(
+  rawUrl: string,
+  config?: WebFetchSecurityConfig,
+): Promise<{ hostname: string; ips: string[] }> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new WebSecurityError(`Invalid URL: ${rawUrl}`);
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new WebSecurityError(`Unsupported URL scheme: ${url.protocol}`);
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+    throw new WebSecurityError("localhost is blocked");
+  }
+
+  // Direct IP in URL
+  const directIp = isIP(hostname);
+  if (directIp) {
+    if (!isAllowedHost(hostname, config?.allowlist) && isPrivateIp(hostname)) {
+      throw new WebSecurityError(`Private IP address is blocked: ${hostname}`);
+    }
+    return { hostname, ips: [hostname] };
+  }
+
+  let ips: string[];
+  try {
+    ips = (await lookup(hostname, { all: true })).map((r) => r.address);
+  } catch (err) {
+    throw new WebSecurityError(`DNS lookup failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (ips.length === 0) {
+    throw new WebSecurityError(`DNS lookup returned no addresses for ${hostname}`);
+  }
+
+  if (!isAllowedHost(hostname, config?.allowlist)) {
+    for (const ip of ips) {
+      if (isPrivateIp(ip)) {
+        throw new WebSecurityError(`Hostname ${hostname} resolves to private IP ${ip}`);
+      }
+    }
+  }
+
+  return { hostname, ips };
+}

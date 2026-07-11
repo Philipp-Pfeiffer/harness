@@ -20,6 +20,52 @@ import type { MemoryBackend } from "./memoryBackend.js";
 import type { MetricsRecorder } from "./metrics.js";
 import { traceTokenUsage } from "./tokenTrace.js";
 
+interface ValidationErrorLike {
+  instancePath: string;
+  message: string;
+}
+
+function unescapeJsonPointer(key: string): string {
+  return key.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+function getValueAtPath(value: unknown, path: string): unknown {
+  if (!path || path === "/") return value;
+  const segments = path.split("/").slice(1).map(unescapeJsonPointer);
+  let current = value;
+  for (const segment of segments) {
+    if (current === null || current === undefined) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function formatValidationErrorValue(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "string") {
+    const truncated = value.length > 200 ? `${value.slice(0, 200)}…` : value;
+    return `"${truncated}"`;
+  }
+  const json = JSON.stringify(value);
+  if (json === undefined) return String(value);
+  return json.length > 200 ? `${json.slice(0, 200)}…` : json;
+}
+
+function formatToolValidationErrors(
+  toolName: string,
+  errors: Iterable<ValidationErrorLike>,
+  args: Record<string, unknown>,
+): string {
+  const parts: string[] = [];
+  for (const err of errors) {
+    const path = err.instancePath || "/";
+    const valueText = formatValidationErrorValue(getValueAtPath(args, err.instancePath));
+    parts.push(`${path}: ${err.message}, got ${valueText}`);
+  }
+  return `Argumente für Tool "${toolName}" ungültig: ${parts.join("; ")}`;
+}
+
 export interface ToolCallLog {
   name: string;
   arguments: Record<string, unknown>;
@@ -400,7 +446,8 @@ export function createAgent(config: AgentConfig): Agent {
                 metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
               } else {
                 if (!Value.Check(tool.parameters, toolCall.arguments)) {
-                  result = `Argumente für Tool "${toolCall.name}" sind ungültig.`;
+                  const validationErrors = Value.Errors(tool.parameters, toolCall.arguments) as Iterable<ValidationErrorLike>;
+                  result = formatToolValidationErrors(toolCall.name, validationErrors, toolCall.arguments as Record<string, unknown>);
                   isError = true;
                   logger?.(`[TOOL VALIDATION FAILED] ${toolCall.name}: ${JSON.stringify(toolCall.arguments)}`);
                   metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
