@@ -91,17 +91,39 @@ export function estimateTokens(messages: Message[]): number {
 }
 
 /**
+ * Estimates tokens for a system prompt + tool definitions.
+ * Tool definitions are serialized to JSON for estimation, approximating
+ * the schema payload that providers send to the model.
+ */
+export function estimateContextOverhead(
+  systemPrompt: string,
+  tools: { name: string; description: string; parameters: unknown }[],
+): number {
+  let chars = systemPrompt.length;
+  for (const tool of tools) {
+    chars += tool.name.length + tool.description.length;
+    chars += JSON.stringify(tool.parameters).length;
+    chars += 10; // overhead per tool definition
+  }
+  return Math.ceil(chars / 4);
+}
+
+/**
  * Checks whether compaction should be triggered.
- * Returns true if estimated tokens exceed threshold * contextWindow.
+ * Returns true if estimated tokens (messages + system prompt + tool defs)
+ * exceed threshold * contextWindow.
  */
 export function shouldCompact(
   messages: Message[],
   model: Model<Api>,
   threshold: number = DEFAULT_COMPACTION_THRESHOLD,
+  systemPrompt: string = "",
+  tools: { name: string; description: string; parameters: unknown }[] = [],
 ): boolean {
   const contextWindow = (model as ResolvedModel).contextWindow ?? 128_000;
-  const tokens = estimateTokens(messages);
-  return tokens >= threshold * contextWindow;
+  const messageTokens = estimateTokens(messages);
+  const overheadTokens = estimateContextOverhead(systemPrompt, tools);
+  return (messageTokens + overheadTokens) >= threshold * contextWindow;
 }
 
 /**

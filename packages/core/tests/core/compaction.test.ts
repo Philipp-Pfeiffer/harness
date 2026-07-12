@@ -3,6 +3,7 @@ import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Message, AssistantMessage } from "@mariozechner/pi-ai";
 import {
   estimateTokens,
+  estimateContextOverhead,
   findSplitPoint,
   shouldCompact,
   compactSession,
@@ -132,6 +133,24 @@ describe("compaction", () => {
 
     it("uses default threshold of 0.8", () => {
       expect(DEFAULT_COMPACTION_THRESHOLD).toBe(0.8);
+    });
+
+    it("F5: includes system prompt and tool definitions in token estimate", () => {
+      // Small messages that alone wouldn't trigger compaction
+      const msgs = [makeUserMessage("short message")];
+      // But a huge system prompt pushes it over threshold
+      const hugeSystemPrompt = "x".repeat(2_000_000);
+      const tools = [
+        { name: "bigTool", description: "x".repeat(500_000), parameters: { type: "object" } },
+      ];
+      expect(shouldCompact(msgs, model, 0.8, hugeSystemPrompt, tools)).toBe(true);
+    });
+
+    it("F5: returns false when system prompt + tools are small", () => {
+      const msgs = [makeUserMessage("short message")];
+      const systemPrompt = "You are a helpful assistant.";
+      const tools = [{ name: "readFile", description: "Read a file", parameters: { type: "object" } }];
+      expect(shouldCompact(msgs, model, 0.8, systemPrompt, tools)).toBe(false);
     });
   });
 
@@ -418,14 +437,15 @@ describe("compaction", () => {
       const agent = createAgent({
         tools: [],
         model,
+      });
+
+      const result = await agent.run(msgs, {
         compaction: {
           paths,
           sessionId: "agent-integration-1",
           threshold: 0.01, // very low so it triggers with our test messages
         },
       });
-
-      const result = await agent.run(msgs);
 
       // 1. Compaction happened: complete() was called (for the summary)
       expect(complete).toHaveBeenCalledTimes(1);
@@ -460,14 +480,15 @@ describe("compaction", () => {
       const agent = createAgent({
         tools: [],
         model,
+      });
+
+      await agent.run(msgs, {
         compaction: {
           paths,
           sessionId: "agent-integration-2",
           threshold: 0.8, // default — "hello" is way under
         },
       });
-
-      await agent.run(msgs);
 
       // complete() should NOT have been called — no compaction
       expect(complete).not.toHaveBeenCalled();
@@ -476,6 +497,152 @@ describe("compaction", () => {
       // Messages unchanged (no compaction), but agent appended its response
       expect(msgs.length).toBe(2); // original user msg + agent response
       expect(msgs[0]!.role).toBe("user");
+    });
+
+    // ─── F1 Regression: compaction options are per-run ───
+
+    it("F1: uses compaction sessionId from RunOptions, not from shared agent state", async () => {
+      const paths = makePaths();
+
+      // Mock complete() for compaction summary
+      const summaryText = "## Summary\nCompacted.";
+      vi.mocked(complete).mockResolvedValueOnce(mockCompleteResponse(summaryText));
+
+      // Mock stream() for the agent turn
+      const agentResponse = makeAssistantMsg([{ type: "text", text: "ok" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStreamResponse(agentResponse));
+
+      const msgs: Message[] = [];
+      msgs.push(makeUserMsg("Store this: KEY=secret-1"));
+      msgs.push(makeAssistantMsg([{ type: "text", text: "Stored." }]));
+      for (let i = 0; i < 20; i++) {
+        msgs.push(makeUserMsg(`Turn ${i}: ${"x".repeat(200)}`));
+        msgs.push(makeAssistantMsg([{ type: "text", text: `Reply ${i}: ${"y".repeat(200)}` }]));
+      }
+
+      const agent = createAgent({ tools: [], model });
+
+      // Pass compaction via RunOptions with a specific sessionId
+      await agent.run(msgs, {
+        compaction: {
+          paths,
+          sessionId: "per-run-session-id",
+          threshold: 0.01,
+        },
+      });
+
+      // Alt-context file should be written with the per-run sessionId
+      const altPath = join(paths.state, "compaction", "per-run-session-id.md");
+      const altContent = readFileSync(altPath, "utf8");
+      expect(altContent).toContain("KEY=secret-1");
+    });
+
+    it("F1: two run() calls with different sessionIds write to different alt-context files", async () => {
+      // Use a state dir that's test-specific so we don't interfere with real state
+      const tmpState = mkdtempSync(join(tmpdir(), "harness-f1-state-"));
+      const paths = { ...makePaths(), state: tmpState };
+
+      // First run
+      vi.mocked(complete).mockResolvedValueOnce(mockCompleteResponse("Summary A"));
+      vi.mocked(stream).mockReturnValueOnce(mockStreamResponse(
+        makeAssistantMsg([{ type: "text", text: "ok A" }], "stop"),
+      ));
+
+      const msgsA: Message[] = [];
+      msgsA.push(makeUserMsg("FACT_A=value-a"));
+      msgsA.push(makeAssistantMsg([{ type: "text", text: "ok" }]));
+      for (let i = 0; i < 20; i++) {
+        msgsA.push(makeUserMsg(`A${i}: ${"x".repeat(200)}`));
+        msgsA.push(makeAssistantMsg([{ type: "text", text: `R${i}: ${"y".repeat(200)}` }]));
+      }
+
+      const agent = createAgent({ tools: [], model });
+      await agent.run(msgsA, {
+        compaction: { paths, sessionId: "session-alpha", threshold: 0.01 },
+      });
+
+      // Second run — same agent, different sessionId
+      vi.mocked(complete).mockResolvedValueOnce(mockCompleteResponse("Summary B"));
+      vi.mocked(stream).mockReturnValueOnce(mockStreamResponse(
+        makeAssistantMsg([{ type: "text", text: "ok B" }], "stop"),
+      ));
+
+      const msgsB: Message[] = [];
+      msgsB.push(makeUserMsg("FACT_B=value-b"));
+      msgsB.push(makeAssistantMsg([{ type: "text", text: "ok" }]));
+      for (let i = 0; i < 20; i++) {
+        msgsB.push(makeUserMsg(`B${i}: ${"x".repeat(200)}`));
+        msgsB.push(makeAssistantMsg([{ type: "text", text: `R${i}: ${"y".repeat(200)}` }]));
+      }
+
+      await agent.run(msgsB, {
+        compaction: { paths, sessionId: "session-beta", threshold: 0.01 },
+      });
+
+      // Both alt-context files exist with correct content
+      const altA = readFileSync(join(paths.state, "compaction", "session-alpha.md"), "utf8");
+      const altB = readFileSync(join(paths.state, "compaction", "session-beta.md"), "utf8");
+      expect(altA).toContain("FACT_A");
+      expect(altB).toContain("FACT_B");
+      expect(altA).not.toContain("FACT_B");
+      expect(altB).not.toContain("FACT_A");
+    });
+
+    // ─── F4 Regression: compaction cooldown after failure ───
+
+    it("F4: does NOT retry compaction every iteration after a failure", async () => {
+      const paths = makePaths();
+
+      // Mock stream: first returns toolUse (so loop iterates), then stop.
+      const toolCallResponse = makeAssistantMsg(
+        [{ type: "toolCall", id: "tc1", name: "noop", arguments: {} }],
+        "toolUse",
+      );
+      const finalResponse = makeAssistantMsg([{ type: "text", text: "done" }], "stop");
+
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStreamResponse(toolCallResponse))
+        .mockReturnValueOnce(mockStreamResponse(finalResponse));
+
+      // complete() always fails — simulates LLM unavailability
+      vi.mocked(complete).mockRejectedValue(new Error("LLM unavailable"));
+
+      // Build messages large enough to trigger compaction at low threshold
+      const msgs: Message[] = [];
+      for (let i = 0; i < 20; i++) {
+        msgs.push(makeUserMsg(`user ${i} ${"x".repeat(200)}`));
+        msgs.push(makeAssistantMsg([{ type: "text", text: `reply ${i} ${"y".repeat(200)}` }]));
+      }
+      // Add a tool result to satisfy the toolUse response
+      msgs.push({
+        role: "toolResult",
+        toolCallId: "tc1",
+        toolName: "noop",
+        content: [{ type: "text", text: "noop result" }],
+        isError: false,
+        timestamp: Date.now(),
+      } as Message);
+
+      const noopTool = {
+        name: "noop",
+        description: "no-op",
+        parameters: {
+          type: "object" as const,
+          properties: {},
+          additionalProperties: false,
+        },
+        async execute() { return "ok"; },
+      };
+
+      const agent = createAgent({ tools: [noopTool as any], model });
+
+      await agent.run(msgs, {
+        compaction: { paths, sessionId: "cooldown-test", threshold: 0.01 },
+      });
+
+      // complete() should have been called at most once — the cooldown
+      // prevents retry on subsequent iterations
+      expect(complete).toHaveBeenCalledTimes(1);
     });
   });
 });
