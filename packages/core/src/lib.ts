@@ -94,6 +94,7 @@ export {
   compactSession,
   shouldCompact,
   estimateTokens,
+  estimateContextOverhead,
   findSplitPoint,
   DEFAULT_COMPACTION_THRESHOLD,
   type CompactSessionOptions,

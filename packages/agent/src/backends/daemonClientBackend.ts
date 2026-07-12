@@ -119,32 +119,16 @@ export class DaemonClientBackend implements AgentBackend {
     onEvent: (event: BackendEvent) => void,
     signal?: AbortSignal,
   ): Promise<TurnResult> {
-    // Wire abort: destroy the IPC connection. The daemon continues
-    // processing, but no more events reach the client.
-    const abortPromise = signal
-      ? new Promise<TurnResult>((_, reject) => {
-          if (signal.aborted) {
-            reject(new Error("Aborted"));
-            return;
-          }
-          signal.addEventListener("abort", () => {
-            reject(new Error("Aborted"));
-          }, { once: true });
-        })
-      : null;
-
-    const turnPromise = this.doRunTurn(text, sessionId, onEvent);
-
-    if (abortPromise) {
-      return Promise.race([turnPromise, abortPromise]) as Promise<TurnResult>;
-    }
-    return turnPromise;
+    // The abort signal is forwarded to sendIpcStreaming, which destroys
+    // the socket + timer on abort. doRunTurn will reject with "Aborted".
+    return this.doRunTurn(text, sessionId, onEvent, signal);
   }
 
   private async doRunTurn(
     text: string,
     sessionId: string,
     onEvent: (event: BackendEvent) => void,
+    signal?: AbortSignal,
   ): Promise<TurnResult> {
     const resp = await sendIpcStreaming(
       this.socketPath,
@@ -157,6 +141,8 @@ export class DaemonClientBackend implements AgentBackend {
           onEvent(backendEvent);
         }
       },
+      120_000,
+      signal,
     );
 
     if (resp.type === "turn-complete") {

@@ -95,6 +95,12 @@ export interface RunOptions {
   memoryBackend?: MemoryBackend;
   /** Optional metrics recorder for turn/tool/error events. */
   metricsRecorder?: MetricsRecorder;
+  /**
+   * Optional compaction config. When set, auto-compaction triggers before
+   * LLM calls. Bound to a single run() invocation — sessionId is specific
+   * to this turn, preventing race conditions on shared agents.
+   */
+  compaction?: CompactionOptions;
 }
 
 /**
@@ -243,8 +249,6 @@ export interface AgentConfig {
   maxIterations?: number;
   model?: Model<Api>;
   logger?: Logger;
-  /** Optional compaction config. When set, auto-compaction triggers before LLM calls. */
-  compaction?: CompactionOptions;
 }
 
 /**
@@ -283,7 +287,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent, mailbox, memoryBackend, metricsRecorder } = options;
+      const { signal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction } = options;
       let effectiveSystemPrompt = systemPrompt;
 
       if (memoryBackend) {
@@ -320,6 +324,11 @@ export function createAgent(config: AgentConfig): Agent {
       let totalCacheWrite = 0;
       let toolCallCount = 0;
 
+      // Compaction cooldown: if a compaction attempt fails, skip retries
+      // for 60s to avoid an error loop (shouldCompact stays true after
+      // a failed compactSession, which would retry every iteration).
+      let compactionCooldownUntil = 0;
+
       for (let i = 0; i < maxIterations; i++) {
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
@@ -331,13 +340,13 @@ export function createAgent(config: AgentConfig): Agent {
         drainMailbox(mailbox, context.messages);
 
         // Auto-compaction: if messages exceed threshold, compact before LLM call.
-        if (config.compaction) {
-          if (shouldCompact(context.messages, resolvedModel, config.compaction.threshold)) {
+        if (compaction && Date.now() >= compactionCooldownUntil) {
+          if (shouldCompact(context.messages, resolvedModel, compaction.threshold, effectiveSystemPrompt, tools.map(toPiTool))) {
             const compactionResult = await compactSession(context.messages, {
               model: resolvedModel,
-              paths: config.compaction.paths,
-              sessionId: config.compaction.sessionId,
-              preserveFraction: config.compaction.preserveFraction,
+              paths: compaction.paths,
+              sessionId: compaction.sessionId,
+              preserveFraction: compaction.preserveFraction,
               signal,
             });
             if (compactionResult.performed) {
@@ -347,6 +356,11 @@ export function createAgent(config: AgentConfig): Agent {
               messages.length = 0;
               messages.push(...compactionResult.messages);
               logger?.(`[COMPACTION] Compacted ${compactionResult.compactedTurnCount} messages. Alt-context: ${compactionResult.altContextPath}`);
+            } else if (compactionResult.compactedTurnCount > 0) {
+              // Compaction was attempted but failed (summary error or inflation).
+              // Set cooldown to prevent retry loop on next iteration.
+              compactionCooldownUntil = Date.now() + 60_000;
+              logger?.(`[COMPACTION] Attempt failed, 60s cooldown active. Alt-context: ${compactionResult.altContextPath}`);
             }
           }
         }
@@ -522,9 +536,24 @@ export function createAgent(config: AgentConfig): Agent {
 
           const settled = await Promise.allSettled(bucketPromises);
           const allResults: { index: number; message: ToolResultMessage }[] = [];
-          for (const s of settled) {
+          for (let bIdx = 0; bIdx < settled.length; bIdx++) {
+            const s = settled[bIdx]!;
             if (s.status === "fulfilled") {
               allResults.push(...s.value);
+            } else {
+              // Rejected bucket — log and synthesize error tool results
+              // for each tool call in this bucket to avoid dangling tool calls.
+              const bucket = buckets[bIdx]!;
+              const errMsg = s.reason instanceof Error ? s.reason.message : String(s.reason);
+              logger?.(`[BUCKET ERROR] Bucket ${bIdx} rejected: ${errMsg}`);
+              for (const { toolCall, index } of bucket) {
+                const errorResult = `Tool bucket failed unexpectedly: ${errMsg}`;
+                allResults.push({
+                  index,
+                  message: createToolResultMessage(toolCall, errorResult, true),
+                });
+                onEvent?.({ type: "tool_call_error", name: toolCall.name, error: errorResult });
+              }
             }
           }
 

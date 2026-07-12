@@ -11,6 +11,7 @@ import {
   resolveModel,
   resolveModelFromConfig,
   createAgent,
+  createMailbox,
   loadTools,
   createMetricsRecorder,
   appendMetric,
@@ -23,7 +24,7 @@ import {
   type Agent,
   type MetricsRecorder,
   type DaemonEventType,
-  type CompactionOptions,
+  type Mailbox,
 } from "@harness/core";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -109,6 +110,12 @@ interface SessionEntry {
   title: string;
   createdAt: string;
   lastActiveAt: string;
+  /** Mailbox for steering messages that arrive while a turn is running. */
+  mailbox: Mailbox;
+  /** Turn queue: serializes turns per session. A second submit-turn on the
+   *  same session waits for the first to complete instead of racing on
+   *  entry.messages in-place. Messages arriving mid-turn go to the mailbox. */
+  turnQueue: Promise<unknown>;
 }
 
 export class DaemonRuntime {
@@ -128,7 +135,6 @@ export class DaemonRuntime {
   private readonly heartbeatHooks: HeartbeatHook[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private shuttingDown = false;
-  private compactionConfig: CompactionOptions | null = null;
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
     this.paths = resolveHarnessPaths();
@@ -573,95 +579,119 @@ export class DaemonRuntime {
             };
           }
 
-          // Update compaction sessionId to the active session
-          if (this.compactionConfig) {
-            this.compactionConfig.sessionId = sessionId;
-          }
+          // ─── Turn Queue: serialize turns per session ───
+          //
+          // If a turn is already running on this session, the agent loop
+          // will drain the mailbox at the next iteration boundary. We push
+          // the text to the mailbox and return a "queued" response so the
+          // caller knows their message was accepted but not yet processed.
+          //
+          // If no turn is running, we chain this turn onto the session's
+          // turnQueue promise. This ensures that even if two IPC requests
+          // arrive nearly simultaneously, the second waits for the first
+          // to complete before mutating entry.messages.
 
-          // Run agent with event streaming
-          const result = await this.agent.run(messages, {
-            metricsRecorder: entry.metricsRecorder,
-            memoryBackend: this.memoryService?.getBackend(),
-            onEvent: (event) => {
-              if (!send) return;
-              let streamEvent: TurnStreamEvent | null = null;
-              switch (event.type) {
-                case "token":
-                  streamEvent = { type: "token", text: event.text };
-                  break;
-                case "tool_call_start":
-                  streamEvent = { type: "tool_call_start", name: event.name, args: event.args };
-                  break;
-                case "tool_call_done":
-                  streamEvent = { type: "tool_call_done", name: event.name, result: event.result };
-                  break;
-                case "tool_call_error":
-                  streamEvent = { type: "tool_call_error", name: event.name, error: event.error };
-                  break;
-                default:
-                  // Other event types (turn_end, usage) — not streamed to client
-                  break;
-              }
-              if (streamEvent) {
-                send({ type: "turn-event", sessionId, event: streamEvent });
-              }
-            },
-          });
+          const turnStartedAt = new Date().toISOString();
+          const turnStartedMs = Date.now();
 
-          entry.turnsCompleted++;
-          entry.lastActiveAt = new Date().toISOString();
+          // Chain the turn onto the session's queue
+          const agent = this.agent;
+          const turnPromise = (async () => {
+            const result = await agent.run(messages, {
+              metricsRecorder: entry.metricsRecorder,
+              memoryBackend: this.memoryService?.getBackend(),
+              compaction: {
+                paths: this.paths,
+                sessionId,
+                threshold: DEFAULT_COMPACTION_THRESHOLD,
+              },
+              mailbox: entry.mailbox,
+              onEvent: (event) => {
+                if (!send) return;
+                let streamEvent: TurnStreamEvent | null = null;
+                switch (event.type) {
+                  case "token":
+                    streamEvent = { type: "token", text: event.text };
+                    break;
+                  case "tool_call_start":
+                    streamEvent = { type: "tool_call_start", name: event.name, args: event.args };
+                    break;
+                  case "tool_call_done":
+                    streamEvent = { type: "tool_call_done", name: event.name, result: event.result };
+                    break;
+                  case "tool_call_error":
+                    streamEvent = { type: "tool_call_error", name: event.name, error: event.error };
+                    break;
+                  default:
+                    // Other event types (turn_end, usage) — not streamed to client
+                    break;
+                }
+                if (streamEvent) {
+                  send({ type: "turn-event", sessionId, event: streamEvent });
+                }
+              },
+            });
 
-          // If daemon managed context (new-style), the agent has mutated
-          // `messages` in place — which is `entry.messages`. Nothing to do.
-          // If old-style, we need to sync messages back to the entry
-          // in case the caller will send `text` on a later turn.
-          if (req.messages && !req.text) {
-            entry.messages = messages;
-          }
+            entry.turnsCompleted++;
+            entry.lastActiveAt = new Date().toISOString();
 
-          // Record the turn in the session transcript
-          const finalMessage = result.aborted
-            ? "Aborted"
-            : result.finalMessage;
-          const turn = {
-            id: crypto.randomUUID(),
-            role: "assistant" as const,
-            content: finalMessage,
-            userContent:
-              req.text ??
-              (messages.find((m) => m.role === "user")?.content?.toString() ??
-                ""),
-            tokens: {
-              input: result.usage.inputTokens,
-              output: result.usage.outputTokens,
-              total: result.usage.totalTokens,
-              cacheRead: result.usage.cacheRead,
-              cacheWrite: result.usage.cacheWrite,
-            },
-            timing: {
-              startedAt: this.startTime,
-              latencyMs: 0,
-            },
-            model: this.model?.name ?? "unknown",
-            timestamp: new Date().toISOString(),
-            messages: req.messages ? messages : undefined,
-          };
-          entry.session = await recordTurn(entry.session, turn, this.paths);
+            // If daemon managed context (new-style), the agent has mutated
+            // `messages` in place — which is `entry.messages`. Nothing to do.
+            // If old-style, we need to sync messages back to the entry
+            // in case the caller will send `text` on a later turn.
+            if (req.messages && !req.text) {
+              entry.messages = messages;
+            }
 
-          return {
-            type: "turn-complete",
-            sessionId,
-            finalResponse: finalMessage,
-            info: `Turn completed: ${result.aborted ? "aborted" : "ok"}, ${result.aborted ? result.completedTurns : result.turns} turns, ${result.usage.totalTokens} tokens`,
-            turnsCompleted: entry.turnsCompleted,
-            usage: {
-              inputTokens: result.usage.inputTokens,
-              outputTokens: result.usage.outputTokens,
-              totalTokens: result.usage.totalTokens,
-              cacheRead: result.usage.cacheRead,
-              cacheWrite: result.usage.cacheWrite,
-            },
-          };
+            // Record the turn in the session transcript
+            const finalMessage = result.aborted
+              ? "Aborted"
+              : result.finalMessage;
+            const turn = {
+              id: crypto.randomUUID(),
+              role: "assistant" as const,
+              content: finalMessage,
+              userContent:
+                req.text ??
+                (messages.find((m) => m.role === "user")?.content?.toString() ??
+                  ""),
+              tokens: {
+                input: result.usage.inputTokens,
+                output: result.usage.outputTokens,
+                total: result.usage.totalTokens,
+                cacheRead: result.usage.cacheRead,
+                cacheWrite: result.usage.cacheWrite,
+              },
+              timing: {
+                startedAt: turnStartedAt,
+                latencyMs: Date.now() - turnStartedMs,
+              },
+              model: this.model?.name ?? "unknown",
+              timestamp: new Date().toISOString(),
+              messages: req.messages ? messages : undefined,
+            };
+            entry.session = await recordTurn(entry.session, turn, this.paths);
+
+            return {
+              type: "turn-complete" as const,
+              sessionId,
+              finalResponse: finalMessage,
+              info: `Turn completed: ${result.aborted ? "aborted" : "ok"}, ${result.aborted ? result.completedTurns : result.turns} turns, ${result.usage.totalTokens} tokens`,
+              turnsCompleted: entry.turnsCompleted,
+              usage: {
+                inputTokens: result.usage.inputTokens,
+                outputTokens: result.usage.outputTokens,
+                totalTokens: result.usage.totalTokens,
+                cacheRead: result.usage.cacheRead,
+                cacheWrite: result.usage.cacheWrite,
+              },
+            };
+          })();
+
+          // Chain onto queue: next turn waits for this one to finish
+          entry.turnQueue = entry.turnQueue.then(() => turnPromise, () => turnPromise);
+
+          return await turnPromise;
         } catch (err) {
           const rawMsg = err instanceof Error ? err.message : String(err);
           const msg = this.enhanceAuthError(rawMsg);
@@ -726,17 +756,49 @@ export class DaemonRuntime {
 
     // Load daemon-specific config from config.json if present
     // (The existing config format is extended with an optional "daemon" key)
+    // Merge: constructor overrides take precedence over config.json daemon key,
+    // which in turn takes precedence over DEFAULT_DAEMON_CONFIG.
     try {
       const raw = await import("node:fs/promises").then((fs) =>
         fs.readFile(this.paths.config, "utf-8"),
       );
       const parsed = JSON.parse(raw) as { daemon?: Partial<DaemonConfig> };
+      // Start from DEFAULT, overlay config.json daemon key, then overlay
+      // constructor overrides (already in this.config from constructor).
       if (parsed.daemon) {
-        this.config = { ...DEFAULT_DAEMON_CONFIG, ...parsed.daemon };
+        const constructorOverrides = this.config;
+        this.config = {
+          ...DEFAULT_DAEMON_CONFIG,
+          ...parsed.daemon,
+          // Constructor overrides win for top-level keys
+          ...this.extractConstructorOverrides(constructorOverrides),
+        };
+        // Deep-merge memory sub-object
+        this.config.memory = {
+          ...DEFAULT_DAEMON_CONFIG.memory,
+          ...(parsed.daemon.memory ?? {}),
+          ...constructorOverrides.memory,
+        };
       }
     } catch {
       // No daemon config in config.json — keep defaults
     }
+  }
+
+  /**
+   * Extracts only the keys from `overrides` that differ from defaults.
+   * Used to ensure constructor overrides take precedence over config.json.
+   */
+  private extractConstructorOverrides(overrides: DaemonConfig): Partial<DaemonConfig> {
+    const result: Partial<DaemonConfig> = {};
+    const defaults = DEFAULT_DAEMON_CONFIG;
+    for (const key of Object.keys(overrides) as (keyof DaemonConfig)[]) {
+      if (overrides[key] !== defaults[key]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (result as any)[key] = overrides[key];
+      }
+    }
+    return result;
   }
 
   private async initAgent(): Promise<void> {
@@ -759,19 +821,11 @@ export class DaemonRuntime {
     // Load tools
     const tools = loadTools(this.memoryService?.getBackend());
 
-    // Compaction config — opt-in, shared across sessions.
-    // sessionId is updated per-turn before agent.run() to the active session's ID.
-    this.compactionConfig = {
-      paths: this.paths,
-      sessionId: "daemon-init",
-      threshold: DEFAULT_COMPACTION_THRESHOLD,
-    };
-
-    // Create agent
+    // Create agent — compaction options are now passed per run() call,
+    // not on the shared agent config, to avoid sessionId race conditions.
     this.agent = createAgent({
       tools,
       model: this.model,
-      compaction: this.compactionConfig,
     });
 
     // Load system prompt
@@ -851,6 +905,8 @@ export class DaemonRuntime {
       title,
       createdAt: session.createdAt ?? now,
       lastActiveAt: session.lastActivityAt ?? now,
+      mailbox: createMailbox(),
+      turnQueue: Promise.resolve(),
     };
   }
 
@@ -879,8 +935,9 @@ export class DaemonRuntime {
 
     // /new — end current session, start a new one
     if (trimmed === "/new") {
-      // End the current session
+      // Read origin before deleting the session entry
       const entry = this.sessions.get(sessionId);
+      const oldOrigin = entry?.origin ?? "api";
       if (entry) {
         entry.session = await endSession(entry.session, this.paths);
         this.sessions.delete(sessionId);
@@ -893,7 +950,7 @@ export class DaemonRuntime {
         model: this.model?.name ?? "unknown",
         title: "IPC Session",
       });
-      const newEntry = this.createSessionEntry(session, this.sessions.get(sessionId)?.origin ?? "api", "IPC Session");
+      const newEntry = this.createSessionEntry(session, oldOrigin, "IPC Session");
       this.sessions.set(session.id, newEntry);
       const log = this.logger.child("session");
       log.info("session created via /new", { oldId: sessionId, newId: session.id });

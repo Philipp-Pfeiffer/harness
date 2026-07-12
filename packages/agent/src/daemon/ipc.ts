@@ -112,8 +112,9 @@ export async function sendIpcRequest(
   socketPath: string,
   req: IpcRequest,
   timeoutMs = 30_000,
+  signal?: AbortSignal,
 ): Promise<IpcResponse> {
-  return sendIpcStreaming(socketPath, req, undefined, timeoutMs);
+  return sendIpcStreaming(socketPath, req, undefined, timeoutMs, signal);
 }
 
 /**
@@ -128,6 +129,7 @@ export async function sendIpcStreaming(
   req: IpcRequest,
   onEvent?: (resp: IpcResponse) => void,
   timeoutMs = 120_000,
+  signal?: AbortSignal,
 ): Promise<IpcResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
@@ -140,6 +142,24 @@ export async function sendIpcStreaming(
       socket.destroy();
       reject(new Error(`IPC request timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+
+    // If an abort signal is provided, wire it to destroy the socket
+    // and reject immediately. This prevents socket + timer leaks when
+    // the caller aborts (e.g. user types "abort").
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(new Error("Aborted"));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
 
     socket.on("connect", () => {
       socket.write(JSON.stringify(req) + DELIMITER, ENCODING);
@@ -161,6 +181,7 @@ export async function sendIpcStreaming(
         } catch (err) {
           settled = true;
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
           socket.destroy();
           reject(
             new Error(
@@ -178,6 +199,7 @@ export async function sendIpcStreaming(
         if (isTerminalResponse(resp)) {
           settled = true;
           clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
           socket.destroy();
           resolve(resp);
           return;
@@ -192,6 +214,7 @@ export async function sendIpcStreaming(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       reject(
         new Error(
           `Cannot connect to daemon at ${socketPath}. Is it running?\n${err.message}`,
