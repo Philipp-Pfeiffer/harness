@@ -12,6 +12,7 @@ export type BackendEvent =
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
   | { type: "turn_end" }
+  | { type: "status"; status: string }
   | {
       type: "usage";
       inputTokens: number;

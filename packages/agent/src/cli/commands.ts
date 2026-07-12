@@ -11,7 +11,8 @@ export const slashCommands: SlashCommandInfo[] = [
   { name: "/status", description: "Show harness status" },
   { name: "/end", description: "End current session" },
   { name: "/new", description: "Start a new session" },
-  { name: "/session", description: "List or resume sessions" },
+  { name: "/sessions", description: "List sessions" },
+  { name: "/compact", description: "Manually compact context" },
 ];
 
 export function getCommand(name: string): SlashCommandInfo | undefined {

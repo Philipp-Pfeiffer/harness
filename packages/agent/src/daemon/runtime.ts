@@ -1103,6 +1103,7 @@ export class DaemonRuntime {
         };
       }
 
+      send?.({ type: "turn-event", sessionId, event: { type: "status", status: "compacting" } });
       const tokensBefore = estimateTokens(entry.messages);
       const compactResult = await compactSession(entry.messages, {
         model: this.model,

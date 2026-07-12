@@ -244,9 +244,11 @@ function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow }: { 
       ? "green"
       : status === "thinking"
         ? "yellow"
-        : status === "aborted"
-          ? "gray"
-          : "cyan";
+        : status === "compacting"
+          ? "magenta"
+          : status === "aborted"
+            ? "gray"
+            : "cyan";
 
   const cwd = process.cwd();
   const used = lastCallTokens ?? usage?.totalTokens ?? 0;
@@ -1350,7 +1352,7 @@ export default function App({
         }
         return;
       }
-      if (trimmed.startsWith("/")) {
+      if (trimmed.startsWith("/") && !isDaemon) {
         const errorTurn: CompletedTurn = {
           id: randomUUID(),
           userText: trimmed,
@@ -1484,6 +1486,11 @@ export default function App({
             } else if (event.type === "turn_end") {
               if (activeTurnRef.current) {
                 activeTurnRef.current = { ...activeTurnRef.current, status: "complete" };
+                forceUpdate();
+              }
+            } else if (event.type === "status") {
+              if (activeTurnRef.current) {
+                activeTurnRef.current = { ...activeTurnRef.current, status: event.status as ActiveTurn["status"] };
                 forceUpdate();
               }
             } else if (event.type === "usage") {

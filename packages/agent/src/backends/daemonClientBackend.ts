@@ -183,6 +183,8 @@ function translateStreamEvent(ev: TurnStreamEvent): BackendEvent | null {
       return { type: "tool_call_done", name: ev.name, result: ev.result };
     case "tool_call_error":
       return { type: "tool_call_error", name: ev.name, error: ev.error };
+    case "status":
+      return { type: "status", status: ev.status };
     default:
       return null;
   }
