@@ -15,11 +15,15 @@ import {
   createMetricsRecorder,
   appendMetric,
   prompt,
+  DEFAULT_COMPACTION_THRESHOLD,
+  compactSession,
+  estimateTokens,
   type HarnessPaths,
   type ConfigModel,
   type Agent,
   type MetricsRecorder,
   type DaemonEventType,
+  type CompactionOptions,
 } from "@harness/core";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -124,6 +128,7 @@ export class DaemonRuntime {
   private readonly heartbeatHooks: HeartbeatHook[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private shuttingDown = false;
+  private compactionConfig: CompactionOptions | null = null;
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
     this.paths = resolveHarnessPaths();
@@ -568,6 +573,11 @@ export class DaemonRuntime {
             };
           }
 
+          // Update compaction sessionId to the active session
+          if (this.compactionConfig) {
+            this.compactionConfig.sessionId = sessionId;
+          }
+
           // Run agent with event streaming
           const result = await this.agent.run(messages, {
             metricsRecorder: entry.metricsRecorder,
@@ -749,10 +759,19 @@ export class DaemonRuntime {
     // Load tools
     const tools = loadTools(this.memoryService?.getBackend());
 
+    // Compaction config — opt-in, shared across sessions.
+    // sessionId is updated per-turn before agent.run() to the active session's ID.
+    this.compactionConfig = {
+      paths: this.paths,
+      sessionId: "daemon-init",
+      threshold: DEFAULT_COMPACTION_THRESHOLD,
+    };
+
     // Create agent
     this.agent = createAgent({
       tools,
       model: this.model,
+      compaction: this.compactionConfig,
     });
 
     // Load system prompt
@@ -1007,6 +1026,52 @@ export class DaemonRuntime {
         info: "/resume",
         turnsCompleted: entry.turnsCompleted,
       };
+    }
+
+    // /compact — manually trigger context compaction
+    if (trimmed === "/compact") {
+      const entry = this.sessions.get(sessionId);
+      if (!entry) {
+        return {
+          type: "error",
+          message: "No active session to compact.",
+          sessionId,
+        };
+      }
+      if (!this.model) {
+        return {
+          type: "error",
+          message: "Model not initialized.",
+          sessionId,
+        };
+      }
+
+      const tokensBefore = estimateTokens(entry.messages);
+      const compactResult = await compactSession(entry.messages, {
+        model: this.model,
+        paths: this.paths,
+        sessionId,
+      });
+
+      if (compactResult.performed) {
+        entry.messages = compactResult.messages;
+        const tokensAfter = estimateTokens(entry.messages);
+        return {
+          type: "turn-complete",
+          sessionId,
+          finalResponse: `Compacted ${compactResult.compactedTurnCount} messages.\nTokens: ${tokensBefore} → ${tokensAfter}\nAlt-context: ${compactResult.altContextPath}`,
+          info: "/compact",
+          turnsCompleted: entry.turnsCompleted,
+        };
+      } else {
+        return {
+          type: "turn-complete",
+          sessionId,
+          finalResponse: `No compaction needed (not enough messages or compaction would not reduce size).\nTokens: ${tokensBefore}\nAlt-context: ${compactResult.altContextPath || "(none)"}`,
+          info: "/compact",
+          turnsCompleted: entry.turnsCompleted,
+        };
+      }
     }
 
     void send; // send is used for streaming, not needed for slash commands

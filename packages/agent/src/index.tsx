@@ -58,6 +58,71 @@ if (process.argv[2] === "send") {
   process.exit(result.exitCode);
 }
 
+// ─── Subcommand: render ───────────────────────────────────────
+// harness render --channel <c> <file.md> — render markdown for a specific channel
+if (process.argv[2] === "render") {
+  const { renderToChannel, getCapabilities, getSupportedChannels } = await import("./output/index.js");
+
+  const args = process.argv.slice(3);
+  let channel: string | undefined;
+  let filePath: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === "--channel" || args[i] === "-c") && i + 1 < args.length) {
+      channel = args[i + 1];
+      i++;
+    } else if (!args[i]?.startsWith("-")) {
+      filePath = args[i];
+    }
+  }
+
+  const supported = getSupportedChannels();
+  if (!channel || !supported.includes(channel as never)) {
+    console.error(`Invalid channel: ${channel ?? "(missing)"}`);
+    console.error(`Usage: harness render --channel <channel> <file.md>`);
+    console.error(`Channels: ${supported.join(", ")}`);
+    process.exit(1);
+  }
+
+  if (!filePath) {
+    console.error("Usage: harness render --channel <channel> <file.md>");
+    process.exit(1);
+  }
+
+  const { readFile } = await import("node:fs/promises");
+  const markdown = await readFile(filePath, "utf-8");
+  const caps = getCapabilities(channel as never);
+  const result = await renderToChannel(markdown, channel as never);
+
+  console.log(`═══ Channel: ${channel} (maxLength: ${caps.maxLength}) ═══`);
+  console.log(`═══ ${result.messages.length} message(s) ═══\n`);
+
+  if (result.tierLog.length > 0) {
+    console.log("─── Tier Log ───");
+    for (const entry of result.tierLog) {
+      const reason = entry.reason ? ` (${entry.reason})` : "";
+      console.log(`  block[${entry.blockIndex}] ${entry.blockType} → ${entry.tier}${reason}`);
+    }
+    console.log("");
+  }
+
+  for (let i = 0; i < result.messages.length; i++) {
+    const msg = result.messages[i]!;
+    console.log(`─── Message ${i + 1}/${result.messages.length} ───`);
+    console.log(msg.text || "(empty text)");
+
+    if (msg.attachments.length > 0) {
+      console.log("\n  Attachments:");
+      for (const att of msg.attachments) {
+        console.log(`    [${att.type}] ${att.mimeType} (${att.data.length} bytes)`);
+      }
+    }
+    console.log("");
+  }
+
+  process.exit(0);
+}
+
 // ─── Subcommand: help ─────────────────────────────────────────
 if (process.argv[2] === "help" || process.argv[2] === "--help" || process.argv[2] === "-h") {
   const { printHelp } = await import("./cli/help.js");
@@ -184,7 +249,7 @@ if (process.argv[2] === "reload-config") {
 // ─── Interactive TUI mode (default) ───────────────────────────
 
 // Reject unknown subcommands before any heavy initialization.
-const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat", "help"]);
+const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat", "render", "help"]);
 if (!knownCommands.has(process.argv[2])) {
   console.error(`Unknown command: ${process.argv[2] ?? ""}`);
   console.error("Usage: harness [help|daemon|sessions|send|chat|migrate-home|reload-config]");

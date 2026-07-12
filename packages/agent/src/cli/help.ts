@@ -24,6 +24,8 @@ Commands:
   sessions       List all sessions (via daemon IPC).
   send           Send a single message to a session (via daemon IPC).
   reload-config  Hot-reload daemon config without restart.
+  render         Render a markdown file for a specific channel.
+                 Usage: harness render --channel <whatsapp|discord|signal|mail> <file.md>
   migrate-home   Migrate legacy substrate to $HARNESS_HOME.
   help           Show this help.
 
