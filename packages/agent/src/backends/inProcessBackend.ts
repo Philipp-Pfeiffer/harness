@@ -276,6 +276,8 @@ function translateAgentEvent(event: AgentEvent): BackendEvent | null {
   switch (event.type) {
     case "token":
       return { type: "token", text: event.text };
+    case "thinking":
+      return { type: "thinking", text: event.text };
     case "tool_call_start":
       return { type: "tool_call_start", name: event.name, args: event.args };
     case "tool_call_done":

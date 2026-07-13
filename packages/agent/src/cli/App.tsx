@@ -135,6 +135,7 @@ export type CompletedTurn = {
   userText: string;
   assistantText: string;
   assistantRendered: boolean;
+  thinkingText?: string;
   tools: ToolItem[];
   toolOffsets: number[];
   aborted: boolean;
@@ -145,6 +146,7 @@ export type CompletedTurn = {
 type ActiveTurn = {
   userText: string;
   assistantText: string;
+  thinkingText: string;
   tools: ToolItem[];
   toolOffsets: number[];
   status: "streaming" | "thinking" | "tool" | "aborted" | "error" | "complete";
@@ -401,6 +403,13 @@ function TurnView({ turn }: { turn: CompletedTurn }) {
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
+      {turn.thinkingText ? (
+        <Box flexDirection="column" marginY={0}>
+          <Text italic color="gray">┌ thinking</Text>
+          <Text italic color="gray" wrap="truncate">{turn.thinkingText.slice(-2000)}</Text>
+          <Text italic color="gray">└</Text>
+        </Box>
+      ) : null}
       {content.length > 0 ? content : null}
       {turn.error && (
         <Text color="red">
@@ -423,6 +432,13 @@ function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
+      {turn.thinkingText ? (
+        <Box flexDirection="column" marginY={0}>
+          <Text italic color="gray">┌ thinking</Text>
+          <Text italic color="gray" wrap="truncate">{turn.thinkingText.slice(-2000)}</Text>
+          <Text italic color="gray">└</Text>
+        </Box>
+      ) : null}
       {content.length > 0 ? content : null}
       {turn.steers.length > 0 && (
         <Box flexDirection="column" marginY={1}>
@@ -859,7 +875,7 @@ export default function App({
     [memoryService, webConfig]
   );
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
-  const inProcessAgent = useMemo(() => createAgent({ tools, model: activeModel }), [tools, activeModel]);
+  const inProcessAgent = useMemo(() => createAgent({ tools, model: activeModel, inlineThinking: (activeModel as any).inlineThinking ?? false }), [tools, activeModel]);
   useEffect(() => {
     inProcessAgent.setModel(activeModel);
   }, [inProcessAgent, activeModel]);
@@ -1414,7 +1430,7 @@ export default function App({
 
       setInputHistory((prev) => [...prev, trimmed]);
 
-      activeTurnRef.current = { userText: trimmed, assistantText: "", tools: [], toolOffsets: [], status: "thinking", steers: [] };
+      activeTurnRef.current = { userText: trimmed, assistantText: "", thinkingText: "", tools: [], toolOffsets: [], status: "thinking", steers: [] };
       isRunningRef.current = true;
       forceUpdate();
 
@@ -1435,6 +1451,15 @@ export default function App({
                   ...activeTurnRef.current,
                   assistantText: activeTurnRef.current.assistantText + event.text,
                   status: "streaming",
+                };
+                forceUpdate();
+              }
+            } else if (event.type === "thinking") {
+              if (activeTurnRef.current) {
+                activeTurnRef.current = {
+                  ...activeTurnRef.current,
+                  thinkingText: activeTurnRef.current.thinkingText + event.text,
+                  status: "thinking",
                 };
                 forceUpdate();
               }
@@ -1511,6 +1536,7 @@ export default function App({
               userText: turn.userText,
               assistantText: turn.assistantText || (!result.aborted ? result.finalResponse : ""),
               assistantRendered: !result.aborted && !userAbortedRef.current && turn.status !== "error",
+              thinkingText: turn.thinkingText || undefined,
               tools: turn.tools,
               toolOffsets: turn.toolOffsets,
               aborted: result.aborted || userAbortedRef.current,

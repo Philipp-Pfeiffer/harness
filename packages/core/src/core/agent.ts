@@ -21,6 +21,7 @@ import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
 import type { MetricsRecorder } from "./metrics.js";
 import { traceTokenUsage } from "./tokenTrace.js";
+import { ThinkingStreamTransformer } from "./thinkingStream.js";
 
 interface ValidationErrorLike {
   instancePath: string;
@@ -130,6 +131,7 @@ export type RunResult =
  */
 export type AgentEvent =
   | { type: "token"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "tool_call_start"; name: string; args: unknown }
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
@@ -249,6 +251,11 @@ export interface AgentConfig {
   maxIterations?: number;
   model?: Model<Api>;
   logger?: Logger;
+  /** Whether the model emits thinking as inline `simd` tags instead of
+   * separate `reasoning_content`. When true, a `ThinkingStreamTransformer`
+   * parses `text_delta` chunks for `simd...` segments and routes them
+   * as `thinking` events. */
+  inlineThinking?: boolean;
 }
 
 /**
@@ -272,7 +279,7 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, maxIterations = 10, model, logger } = config;
+  const { tools, maxIterations = 10, model, logger, inlineThinking = false } = config;
   // Caller must set a system prompt via setSystemPrompt(). Empty default
   // is intentional — the prompt template requires `inboxPath`; calling
   // prompt("system-prompt") without vars triggers a missing-variable warning.
@@ -369,12 +376,38 @@ export function createAgent(config: AgentConfig): Agent {
         const eventStream = stream(resolvedModel, context, { signal, apiKey });
         let response: AssistantMessage;
         let partialText = "";
+        const thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
 
         try {
           for await (const event of eventStream) {
             if (event.type === "text_delta") {
-              partialText += event.delta;
-              onEvent?.({ type: "token", text: event.delta });
+              if (thinkingTransformer) {
+                const outputs = thinkingTransformer.feed(event.delta);
+                for (const out of outputs) {
+                  if (out.type === "token") {
+                    partialText += out.text;
+                    onEvent?.({ type: "token", text: out.text });
+                  } else {
+                    onEvent?.({ type: "thinking", text: out.text });
+                  }
+                }
+              } else {
+                partialText += event.delta;
+                onEvent?.({ type: "token", text: event.delta });
+              }
+            } else if (event.type === "thinking_delta") {
+              onEvent?.({ type: "thinking", text: event.delta });
+            }
+          }
+          // Flush any remaining buffered content from the transformer.
+          if (thinkingTransformer) {
+            for (const out of thinkingTransformer.flush()) {
+              if (out.type === "token") {
+                partialText += out.text;
+                onEvent?.({ type: "token", text: out.text });
+              } else {
+                onEvent?.({ type: "thinking", text: out.text });
+              }
             }
           }
           response = await eventStream.result();

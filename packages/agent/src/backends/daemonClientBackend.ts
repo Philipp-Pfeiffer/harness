@@ -177,6 +177,8 @@ function translateStreamEvent(ev: TurnStreamEvent): BackendEvent | null {
   switch (ev.type) {
     case "token":
       return { type: "token", text: ev.text };
+    case "thinking":
+      return { type: "thinking", text: ev.text };
     case "tool_call_start":
       return { type: "tool_call_start", name: ev.name, args: ev.args };
     case "tool_call_done":

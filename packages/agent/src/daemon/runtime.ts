@@ -25,6 +25,7 @@ import {
   type MetricsRecorder,
   type DaemonEventType,
   type Mailbox,
+  type ResolvedModel,
 } from "@harness/core";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -613,6 +614,9 @@ export class DaemonRuntime {
                   case "token":
                     streamEvent = { type: "token", text: event.text };
                     break;
+                  case "thinking":
+                    streamEvent = { type: "thinking", text: event.text };
+                    break;
                   case "tool_call_start":
                     streamEvent = { type: "tool_call_start", name: event.name, args: event.args };
                     break;
@@ -826,6 +830,7 @@ export class DaemonRuntime {
     this.agent = createAgent({
       tools,
       model: this.model,
+      inlineThinking: (this.model as ResolvedModel).inlineThinking ?? false,
     });
 
     // Load system prompt

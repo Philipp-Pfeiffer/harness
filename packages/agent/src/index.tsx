@@ -308,7 +308,7 @@ if (!initModel) {
 
 // Create agent + tools for in-process mode
 const initTools = loadTools(memoryService?.getBackend(), configResult.webConfig);
-const initAgent = createAgent({ tools: initTools, model: initModel });
+const initAgent = createAgent({ tools: initTools, model: initModel, inlineThinking: (initModel as any).inlineThinking ?? false });
 
 // Load system prompt
 const coreMemory = await loadCoreMemoryRaw(paths.core);

@@ -18,6 +18,7 @@ export {
   type TokenUsage,
   type CompactionOptions,
 } from "./core/agent.js";
+export { ThinkingStreamTransformer, type ThinkingStreamOutput } from "./core/thinkingStream.js";
 
 // Tool types and individual tools
 export { type Tool } from "./tools/types.js";

@@ -84,6 +84,7 @@ export type IpcResponse =
  */
 export type TurnStreamEvent =
   | { type: "token"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "tool_call_start"; name: string; args: unknown }
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
