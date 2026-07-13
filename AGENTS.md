@@ -63,6 +63,16 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+### 5. Commit Discipline
+
+**Jede abgeschlossene Änderung wird sofort committet.**
+
+- Committe nach jedem logischen Arbeitsschritt, nicht erst am Ende einer Session.
+- Ein Commit pro Changeset — klein, fokussiert, mit klarem Message-Präfix (`fix:`, `feat:`, `refactor:`, `docs:`, `test:`).
+- So bleiben einzelne Changes nachverfolgbar, revertierbar und reviewbar.
+- Vor dem Commit: `tsc --noEmit` clean + relevante Tests grün.
+- Keine WIP-Commits mit Platzhaltern. Liefer den kompletten Change.
+
 ---
 
 ## Projekt-Konventionen
