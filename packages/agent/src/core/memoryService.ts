@@ -96,6 +96,12 @@ export class MemoryService {
       process.env.QMD_EMBED_MODEL = this.config.embedModel;
     }
 
+    // Force CPU-only inference: avoids loading CUDA/cuBLAS libraries (~900 MB RSS)
+    // on machines without a dedicated GPU for the embedding model.
+    if (!process.env.QMD_FORCE_CPU) {
+      process.env.QMD_FORCE_CPU = "1";
+    }
+
     try {
       this.store = await createStore({
         dbPath: this.config.dbPath,

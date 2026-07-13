@@ -52,6 +52,7 @@ function createFakeStore(overrides?: Partial<QMDStore>): QMDStore {
     getStatus: vi.fn(async () => ({ totalDocuments: 0, needsEmbedding: 0, hasVectorIndex: false, collections: [] })),
     getIndexHealth: vi.fn(async () => ({ needsEmbedding: 0, totalDocs: 0, daysStale: null })),
     close: vi.fn(async () => {}),
+    rerank: vi.fn(async () => ({ results: [] })),
     ...overrides,
   } as QMDStore;
 }
@@ -192,6 +193,34 @@ describe("QmdBackend (SDK)", () => {
 
     expect(store.searchLex).toHaveBeenCalledWith("q", { limit: 9 });
     expect(store.searchVector).toHaveBeenCalledWith("q", { limit: 9 });
+    expect(store.search).not.toHaveBeenCalled();
+  });
+
+  it("regression: query path never calls store.rerank (no LLM reranker)", async () => {
+    const store = createFakeStore({
+      searchLex: vi.fn(async () => [makeSearchResult("/p/a.md", "A", 0.8, "body")]),
+      searchVector: vi.fn(async () => [makeSearchResult("/p/b.md", "B", 0.9, "body")]),
+    });
+
+    const backend = new QmdBackend(store);
+    await backend.query("test", 5);
+
+    // Reranker must never be invoked — query uses RRF only
+    expect(store.rerank).not.toHaveBeenCalled();
+    expect(store.expandQuery).not.toHaveBeenCalled();
+    expect(store.search).not.toHaveBeenCalled();
+  });
+
+  it("regression: vsearch path never calls store.rerank or store.search", async () => {
+    const store = createFakeStore({
+      searchVector: vi.fn(async () => [makeSearchResult("/p/a.md", "A", 0.9, "body")]),
+    });
+
+    const backend = new QmdBackend(store);
+    await backend.vsearch("test", 5);
+
+    expect(store.rerank).not.toHaveBeenCalled();
+    expect(store.expandQuery).not.toHaveBeenCalled();
     expect(store.search).not.toHaveBeenCalled();
   });
 
