@@ -73,6 +73,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Vor dem Commit: `tsc --noEmit` clean + relevante Tests grün.
 - Keine WIP-Commits mit Platzhaltern. Liefer den kompletten Change.
 
+### 6. Change Documentation
+
+**Alle wichtigen Änderungen werden in `docs/changes/` dokumentiert.**
+
+- Ein Markdown-File pro Changeset, benannt nach Schema: `fix-<topic>.md`, `feat-<topic>.md`, `refactor-<topic>.md`.
+- Inhalt: Problem/Symptom, Befund, was geändert wurde, welche Dateien, welche Tests.
+- Kurz und präzise — kein Roman, aber genug Kontext um den Change ohne Git-Archäologie zu verstehen.
+- Wird zusammen mit dem Code-Commit geliefert, nicht nachträglich.
+
 ---
 
 ## Projekt-Konventionen
