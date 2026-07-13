@@ -42,7 +42,7 @@ export async function daemonStart(): Promise<CliResult> {
   // cwd is set to paths.home so the daemon's workspace is HARNESS_HOME.
   const nodeBin = process.execPath;
   const moduleDir = fileURLToPath(new URL(".", import.meta.url));
-  const entryPath = resolve(moduleDir, "../dist/index.js");
+  const entryPath = resolve(moduleDir, "../index.js");
   const daemonProc = spawn(nodeBin, [entryPath, "daemon", "run"], {
     detached: true,
     stdio: "ignore",
@@ -281,7 +281,7 @@ async function checkStaleDaemon(): Promise<string | null> {
   const { stat } = await import("node:fs/promises");
   const { resolve } = await import("node:path");
   const moduleDir = fileURLToPath(new URL(".", import.meta.url));
-  const distPath = resolve(moduleDir, "../dist/index.js");
+  const distPath = resolve(moduleDir, "../index.js");
   try {
     const stats = await stat(distPath);
     const buildTime = stats.mtime;
