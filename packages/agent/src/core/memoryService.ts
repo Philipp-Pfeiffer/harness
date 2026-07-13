@@ -10,7 +10,26 @@ export interface MemoryServiceConfig {
   sourcesPath: string;
   dbPath: string;
   embedModel?: string;
+  /**
+   * Force CPU-only inference (skips CUDA/Vulkan addon loading).
+   * Default: true. Set to false to enable GPU offloading.
+   * Saves ~900 MB RSS (cuBLAS libraries) on machines without a dedicated GPU.
+   */
+  forceCpu?: boolean;
 }
+
+/**
+ * Approximate RSS budget for the QMD memory stack.
+ *
+ * embeddinggemma-300M-Q8_0 GGUF: ~312 MB (model weights, mmap'd)
+ * llama.cpp CPU runtime + context: ~150 MB
+ * SQLite + sqlite-vec: ~20 MB
+ * Node.js overhead: ~38 MB
+ * Total: ~520 MB resident
+ *
+ * With QMD_FORCE_CPU=1 (default), CUDA/cuBLAS libraries (~900 MB) are not loaded.
+ */
+const MEMORY_RSS_BUDGET_MB = 520;
 
 /**
  * Wraps a QmdBackend and gates all calls behind a warmup Promise.
@@ -96,9 +115,10 @@ export class MemoryService {
       process.env.QMD_EMBED_MODEL = this.config.embedModel;
     }
 
-    // Force CPU-only inference: avoids loading CUDA/cuBLAS libraries (~900 MB RSS)
-    // on machines without a dedicated GPU for the embedding model.
-    if (!process.env.QMD_FORCE_CPU) {
+    // Force CPU-only inference by default: avoids loading CUDA/cuBLAS libraries
+    // (~900 MB RSS) on machines without a dedicated GPU for the embedding model.
+    // Can be disabled via MemoryServiceConfig.forceCpu = false.
+    if (this.config.forceCpu !== false && !process.env.QMD_FORCE_CPU) {
       process.env.QMD_FORCE_CPU = "1";
     }
 
@@ -135,7 +155,7 @@ export class MemoryService {
       () => { this.warmupDone = true; },
     );
 
-    console.log(`[harness] memory service ready (db: ${this.config.dbPath}, warming up in background)`);
+    console.log(`[harness] memory service ready (db: ${this.config.dbPath}, RSS budget ~${MEMORY_RSS_BUDGET_MB} MB, warming up in background)`);
   }
 
   /**

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { createStore } from "@tobilu/qmd";
 import { QmdBackend } from "../../src/core/qmdBackend.js";
-import { writeFile, mkdir, rm } from "node:fs/promises";
+import { writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -77,6 +77,19 @@ describe("QMD SDK Smoke Test", () => {
     expect(explicitHits.length).toBeGreaterThan(0);
     const explicitHit = explicitHits.find((h) => h.content.toLowerCase().includes("gateway"));
     expect(explicitHit).toBeDefined();
+
+    // Regression: only embeddinggemma GGUF should be mapped in /proc/self/maps
+    // after embed() + searchVector() — no reranker, no query-expansion model.
+    const maps = await readFile("/proc/self/maps", "utf-8");
+    const ggufLines = maps.split("\n").filter((l) => l.includes(".gguf"));
+    const ggufNames = new Set(
+      ggufLines.map((l) => l.trim().split(/\s+/).pop() ?? "")
+    );
+    expect(ggufNames.size).toBeGreaterThan(0); // embed model must be loaded
+    for (const name of ggufNames) {
+      expect(name).toMatch(/embeddinggemma/);
+      expect(name).not.toMatch(/query-expansion|reranker|qwen3-reranker/i);
+    }
 
     await store.close();
     await rm(testDir, { recursive: true, force: true });
