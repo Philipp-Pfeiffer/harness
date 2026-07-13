@@ -13,6 +13,7 @@ export const slashCommands: SlashCommandInfo[] = [
   { name: "/new", description: "Start a new session" },
   { name: "/sessions", description: "List sessions" },
   { name: "/compact", description: "Manually compact context" },
+  { name: "/showthink", description: "Toggle thinking block visibility" },
 ];
 
 export function getCommand(name: string): SlashCommandInfo | undefined {

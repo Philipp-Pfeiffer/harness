@@ -240,7 +240,7 @@ function useForceUpdate() {
 
 /* ─── Sub-components ─── */
 
-function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; lastCallTokens?: number; contextWindow?: number }) {
+function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow, workspace }: { modelId: string; status: string; usage?: { inputTokens: number; outputTokens: number; totalTokens: number }; lastCallTokens?: number; contextWindow?: number; workspace: string }) {
   const statusColor =
     status === "ready"
       ? "green"
@@ -252,7 +252,7 @@ function StatusBar({ modelId, status, usage, lastCallTokens, contextWindow }: { 
             ? "gray"
             : "cyan";
 
-  const cwd = process.cwd();
+  const cwd = workspace;
   const used = lastCallTokens ?? usage?.totalTokens ?? 0;
   const usedStr = formatTokens(used);
   const maxStr = contextWindow ? formatTokens(contextWindow) : "?";
@@ -397,13 +397,13 @@ export function renderTurnContent(
   return elements;
 }
 
-function TurnView({ turn }: { turn: CompletedTurn }) {
+function TurnView({ turn, showThinking }: { turn: CompletedTurn; showThinking: boolean }) {
   const content = renderTurnContent(turn.assistantText, turn.tools, turn.toolOffsets, turn.assistantRendered);
 
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
-      {turn.thinkingText ? (
+      {turn.thinkingText && showThinking ? (
         <Box flexDirection="column" marginY={0}>
           <Text italic color="gray">┌ thinking</Text>
           <Text italic color="gray" wrap="truncate">{turn.thinkingText.slice(-2000)}</Text>
@@ -426,13 +426,13 @@ function TurnView({ turn }: { turn: CompletedTurn }) {
   );
 }
 
-function ActiveTurnView({ turn }: { turn: ActiveTurn }) {
+function ActiveTurnView({ turn, showThinking }: { turn: ActiveTurn; showThinking: boolean }) {
   const content = renderTurnContent(turn.assistantText, turn.tools, turn.toolOffsets, false);
 
   return (
     <Box flexDirection="column">
       <Text color="cyan">❯ {turn.userText}</Text>
-      {turn.thinkingText ? (
+      {turn.thinkingText && showThinking ? (
         <Box flexDirection="column" marginY={0}>
           <Text italic color="gray">┌ thinking</Text>
           <Text italic color="gray" wrap="truncate">{turn.thinkingText.slice(-2000)}</Text>
@@ -833,6 +833,7 @@ export default function App({
   const [inputHistory, setInputHistory] = useState<string[]>([]);
   const [sessionUsage, setSessionUsage] = useState<{ inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number } | undefined>(undefined);
   const [lastCallTokens, setLastCallTokens] = useState<number | undefined>(undefined);
+  const [showThinking, setShowThinking] = useState(true);
 
   const historyRef = useRef<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1296,10 +1297,25 @@ export default function App({
         setPastTurns((prev) => [...prev, helpTurn]);
         return;
       }
+      if (trimmed === "/showthink") {
+        const newVal = !showThinking;
+        setShowThinking(newVal);
+        const infoTurn: CompletedTurn = {
+          id: randomUUID(),
+          userText: trimmed,
+          assistantText: `Thinking blocks ${newVal ? "visible" : "hidden"}.`,
+          assistantRendered: false,
+          tools: [],
+          toolOffsets: [],
+          aborted: false,
+        };
+        setPastTurns((prev) => [...prev, infoTurn]);
+        return;
+      }
       if (isStatusCommand(trimmed)) {
         const statusText = await handleStatusCommand(trimmed, {
           model: activeModel.id,
-          workspace: process.cwd(),
+          workspace: paths.home,
           sessionState: isRunningRef.current ? "active" : "ready",
           sessionId: sessionIdRef.current ?? undefined,
           sessionUsage,
@@ -1743,13 +1759,13 @@ export default function App({
   return (
     <Box flexDirection="column" width={termSize.columns}>
       <Static items={staticTurns}>
-        {(turn) => <TurnView key={turn.id} turn={turn} />}
+        {(turn) => <TurnView key={turn.id} turn={turn} showThinking={showThinking} />}
       </Static>
       <Box flexDirection="column" flexGrow={1}>
         {liveTurns.map((turn) => (
-          <TurnView key={turn.id} turn={turn} />
+          <TurnView key={turn.id} turn={turn} showThinking={showThinking} />
         ))}
-        {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} />}
+        {activeTurnRef.current && <ActiveTurnView turn={activeTurnRef.current} showThinking={showThinking} />}
         {configError && (
           <Text color="yellow">Warning: {configError}</Text>
         )}
@@ -1798,7 +1814,7 @@ export default function App({
       {!showSessionPicker && (
         <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
       )}
-      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} />
+      <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} workspace={paths.home} />
     </Box>
   );
 }

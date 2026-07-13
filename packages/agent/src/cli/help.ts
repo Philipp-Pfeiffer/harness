@@ -36,6 +36,8 @@ Session Slash Commands (in TUI):
   /clear         Clear the TUI display.
   /model         Switch model (in-process mode only).
   /status        Show harness status overview.
+  /compact       Manually compact context.
+  /showthink     Toggle thinking block visibility.
   /help          Show slash commands and keybinds.
   /quit          Exit the TUI.
 

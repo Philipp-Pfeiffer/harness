@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { resolve, join } from "node:path";
 import { readFile, readdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 import { resolveHarnessPaths } from "@harness/core";
 import { sendIpcRequest, sendIpcStreaming } from "./ipc.js";
@@ -36,13 +37,17 @@ export async function daemonStart(): Promise<CliResult> {
   // Clean up stale PID file
   await cleanupStalePidFile(paths.pidFile);
 
-  // Spawn daemon as a detached background process
+  // Spawn daemon as a detached background process.
+  // entryPath resolves via import.meta.url so it works from any cwd.
+  // cwd is set to paths.home so the daemon's workspace is HARNESS_HOME.
   const nodeBin = process.execPath;
-  const entryPath = resolve(process.cwd(), "dist/index.js");
+  const moduleDir = fileURLToPath(new URL(".", import.meta.url));
+  const entryPath = resolve(moduleDir, "../dist/index.js");
   const daemonProc = spawn(nodeBin, [entryPath, "daemon", "run"], {
     detached: true,
     stdio: "ignore",
     env: { ...process.env },
+    cwd: paths.home,
   });
   daemonProc.unref();
 
@@ -275,7 +280,8 @@ async function checkStaleDaemon(): Promise<string | null> {
   // Get dist build time
   const { stat } = await import("node:fs/promises");
   const { resolve } = await import("node:path");
-  const distPath = resolve(process.cwd(), "dist/index.js");
+  const moduleDir = fileURLToPath(new URL(".", import.meta.url));
+  const distPath = resolve(moduleDir, "../dist/index.js");
   try {
     const stats = await stat(distPath);
     const buildTime = stats.mtime;
