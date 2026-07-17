@@ -1,5 +1,6 @@
-import { resolve } from "node:path";
+import { resolve, join, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { Server } from "node:net";
@@ -19,6 +20,12 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   compactSession,
   estimateTokens,
+  loadSkills,
+  validateRequires,
+  readTelemetry,
+  telemetryPathFor,
+  buildHotSet,
+  renderHotSet,
   type HarnessPaths,
   type ConfigModel,
   type Agent,
@@ -26,6 +33,7 @@ import {
   type DaemonEventType,
   type Mailbox,
   type ResolvedModel,
+  type SkillRecord,
 } from "@harness/core";
 import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -140,6 +148,7 @@ export class DaemonRuntime {
   private readonly heartbeatHooks: HeartbeatHook[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private scheduler: CronScheduler | null = null;
+  private skillRecords: SkillRecord[] = [];
   private shuttingDown = false;
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
@@ -922,8 +931,44 @@ export class DaemonRuntime {
       this.model = resolveModel("minimax", "MiniMax-M2.7");
     }
 
-    // Load tools
-    const tools = loadTools(this.memoryService?.getBackend());
+    // Load skills
+    const builtinSkillsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
+    const skillResult = await loadSkills({
+      skillsDir: this.paths.skills,
+      builtinDir: builtinSkillsDir,
+    });
+    this.skillRecords = skillResult.skills;
+
+    for (const err of skillResult.errors) {
+      log.warn("skill load error", { skill: err.skillName, message: err.message });
+    }
+    for (const w of skillResult.warnings) {
+      log.warn("skill warning", { message: w });
+    }
+
+    const requireErrors = validateRequires(skillResult.skills);
+    for (const err of requireErrors) {
+      log.warn("skill requires error", { message: err });
+    }
+
+    // Build hot-set (Tier-0)
+    const telemetryPath = telemetryPathFor(this.paths.skills);
+    const telemetry = await readTelemetry(telemetryPath);
+    const hotSet = buildHotSet(skillResult.skills, telemetry);
+    const hotSetBlock = renderHotSet(hotSet);
+
+    log.info("skills loaded", {
+      total: skillResult.skills.length,
+      errors: skillResult.errors.length,
+      hotSet: hotSet.length,
+    });
+
+    // Load tools (with skills)
+    const tools = loadTools({
+      memoryBackend: this.memoryService?.getBackend(),
+      skills: this.skillRecords,
+      skillsDir: this.paths.skills,
+    });
 
     // Create agent — compaction options are now passed per run() call,
     // not on the shared agent config, to avoid sessionId race conditions.
@@ -937,7 +982,10 @@ export class DaemonRuntime {
     const coreMemory = await loadCoreMemoryRaw(this.paths.core);
     const basePrompt = prompt("system-prompt", { inboxPath: this.paths.inbox });
     const composed = composeSystemPrompt(basePrompt, coreMemory);
-    this.agent.setSystemPrompt(composed);
+    const fullPrompt = hotSetBlock
+      ? `${composed}\n\n${hotSetBlock}`
+      : composed;
+    this.agent.setSystemPrompt(fullPrompt);
 
     log.info("agent initialized", { model: this.model.name });
   }

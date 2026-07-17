@@ -123,6 +123,14 @@ if (process.argv[2] === "render") {
   process.exit(0);
 }
 
+// ─── Subcommand: doctor ────────────────────────────────────────
+if (process.argv[2] === "doctor") {
+  const { harnessDoctor } = await import("./cli/doctor.js");
+  const result = await harnessDoctor();
+  if (result.stdout) console.log(result.stdout);
+  process.exit(result.exitCode);
+}
+
 // ─── Subcommand: help ─────────────────────────────────────────
 if (process.argv[2] === "help" || process.argv[2] === "--help" || process.argv[2] === "-h") {
   const { printHelp } = await import("./cli/help.js");
@@ -249,10 +257,10 @@ if (process.argv[2] === "reload-config") {
 // ─── Interactive TUI mode (default) ───────────────────────────
 
 // Reject unknown subcommands before any heavy initialization.
-const knownCommands = new Set([undefined, "migrate-home", "daemon", "reload-config", "sessions", "send", "chat", "render", "help"]);
+const knownCommands = new Set([undefined, "migrate-home", "daemon", "doctor", "reload-config", "sessions", "send", "chat", "render", "help"]);
 if (!knownCommands.has(process.argv[2])) {
   console.error(`Unknown command: ${process.argv[2] ?? ""}`);
-  console.error("Usage: harness [help|daemon|sessions|send|chat|migrate-home|reload-config]");
+  console.error("Usage: harness [help|doctor|daemon|sessions|send|chat|migrate-home|reload-config]");
   console.error("Run 'harness help' for a full overview.");
   process.exit(1);
 }
@@ -284,7 +292,7 @@ const memoryService = new MemoryService({
 await memoryService.init();
 
 // Workspace = cwd (where the user started harness). No subdir creation.
-const { createAgent, loadTools, resolveModel, prompt, loadConfig } = await import("@harness/core");
+const { createAgent, loadTools, resolveModel, prompt, loadConfig, loadSkills, validateRequires, readTelemetry, telemetryPathFor, buildHotSet, renderHotSet } = await import("@harness/core");
 const { loadCoreMemoryRaw } = await import("./core/coreMemory.js");
 const { buildSystemPrompt } = await import("./core/systemPrompt.js");
 const { InProcessBackend } = await import("./backends/inProcessBackend.js");
@@ -306,8 +314,39 @@ if (!initModel) {
   initModel = resolveModel("minimax", "MiniMax-M2.7");
 }
 
+// Load skills
+const { join, dirname: joinDirname } = await import("node:path");
+const { fileURLToPath: fileURL } = await import("node:url");
+const builtinSkillsResolved = join(joinDirname(fileURL(import.meta.url)), "..", "skills");
+const skillResult = await loadSkills({
+  skillsDir: paths.skills,
+  builtinDir: builtinSkillsResolved,
+});
+for (const err of skillResult.errors) {
+  console.warn(`[harness] skill error: ${err.skillName}: ${err.message}`);
+}
+for (const w of skillResult.warnings) {
+  console.warn(`[harness] skill warning: ${w}`);
+}
+const requireErrors = validateRequires(skillResult.skills);
+for (const err of requireErrors) {
+  console.warn(`[harness] skill requires error: ${err}`);
+}
+
+// Build hot-set
+const telemetryPath = telemetryPathFor(paths.skills);
+const telemetry = await readTelemetry(telemetryPath);
+const hotSet = buildHotSet(skillResult.skills, telemetry);
+const hotSetBlock = renderHotSet(hotSet);
+console.log(`[harness] skills: ${skillResult.skills.length} loaded, ${hotSet.length} in hot-set`);
+
 // Create agent + tools for in-process mode
-const initTools = loadTools(memoryService?.getBackend(), configResult.webConfig);
+const initTools = loadTools({
+  memoryBackend: memoryService?.getBackend(),
+  webConfig: configResult.webConfig,
+  skills: skillResult.skills,
+  skillsDir: paths.skills,
+});
 const initAgent = createAgent({ tools: initTools, model: initModel, inlineThinking: (initModel as any).inlineThinking ?? false });
 
 // Load system prompt
@@ -318,7 +357,8 @@ const composed = buildSystemPrompt({
   coreMemoryRaw: coreMemory,
   activeToolNames: initTools.map((t: { name: string }) => t.name),
 });
-initAgent.setSystemPrompt(composed);
+const fullPrompt = hotSetBlock ? `${composed}\n\n${hotSetBlock}` : composed;
+initAgent.setSystemPrompt(fullPrompt);
 console.log(`[harness] core memory loaded: ${coreMemory ? coreMemory.length : 0} chars`);
 
 const backend = new InProcessBackend({
