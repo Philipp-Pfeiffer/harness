@@ -111,7 +111,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 | Kategorie | Pfad | Inhalt | Git? |
 |-----------|------|--------|------|
 | **HOME** (durable) | `$HARNESS_HOME` (Default `~/harness`) | `core.md`, `AGENTS.md`, `config.json`, `memory/`, `sources/`, `skills/` | Eigenes Git |
-| **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/`, `logs/`, `daemon.pid`, `daemon.sock` | Nein |
+| **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/`, `logs/`, `jobs/`, `daemon.pid`, `daemon.sock` | Nein |
 | **CODE** | Repo | `src/`, `prompts/`, `tests/`, `docs/` | Ja |
 
 - **HOME** ist portabel und wird von mehreren Agent-Prozessen geteilt.
@@ -290,7 +290,29 @@ Adapters register via `DaemonRuntime.registerGateway()`. The WhatsApp/Baileys ad
 
 ### Heartbeat Hook
 
-`DaemonRuntime.registerHeartbeat(hook)` accepts periodic health checks. The scheduler implementation comes with the cron/scheduler feature — this is only the mounting point.
+`DaemonRuntime.registerHeartbeat(hook)` accepts periodic health checks.
+
+### Cron Scheduler
+
+**Files:** `src/daemon/` (jobs.ts, scheduler.ts, scripts.ts)
+
+Job files live in `$HARNESS_STATE/jobs/*.md` — Markdown with frontmatter (`name`, `schedule`, `enabled`, `type: agent|script`, optional `jitter` like `"2h"`); the body is the prompt (`agent`) or the registry function name (`script`).
+
+```
+---
+name: metrics-rotation
+schedule: 0 3 * * *
+enabled: true
+type: script
+jitter: 2h
+---
+metrics-rotation
+```
+
+- `CronScheduler` (scheduler.ts) uses **croner**: loads jobs on daemon start, reloads on directory changes (`fs.watch`, debounced), draws a random per-run delay in `[0, jitterMs]`.
+- `type: agent` runs `DaemonRuntime.runCronAgentJob()`: new session with `origin: "cron"`, body as first turn (via the internal IPC path — same turn queue, transcript and metrics as any session).
+- `type: script` looks up the body in the internal registry (scripts.ts). Built-in example: `metrics-rotation` (deletes metric files older than `logRetentionDays`).
+- Robustness: job errors are logged, never thrown; no catch-up for missed runs; overlapping runs of one job are blocked (croner `protect`).
 
 ### Metrics
 

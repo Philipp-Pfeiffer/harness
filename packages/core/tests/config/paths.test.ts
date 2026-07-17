@@ -102,6 +102,7 @@ describe("resolveHarnessPaths", () => {
     expect(paths.metrics).toBe("/s/metrics");
     expect(paths.index).toBe("/s/index");
     expect(paths.logs).toBe("/s/logs");
+    expect(paths.jobs).toBe("/s/jobs");
     expect(paths.pidFile).toBe("/s/daemon.pid");
     expect(paths.socketFile).toBe("/s/daemon.sock");
   });
@@ -137,6 +138,7 @@ describe("ensureDirs", () => {
       customPaths.metrics,
       customPaths.index,
       customPaths.logs,
+      customPaths.jobs,
     ];
 
     for (const dir of dirs) {

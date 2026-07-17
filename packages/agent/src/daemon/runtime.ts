@@ -44,6 +44,8 @@ import { ensureInbox } from "../core/memoryFolders.js";
 
 import { DaemonLogger } from "./logger.js";
 import { startIpcServer, stopIpcServer } from "./ipc.js";
+import { CronScheduler } from "./scheduler.js";
+import type { CronJob } from "./jobs.js";
 import {
   writePidFile,
   removePidFile,
@@ -65,8 +67,8 @@ import { DEFAULT_DAEMON_CONFIG } from "./types.js";
  * Heartbeat hook — periodic self-check interface.
  *
  * Implementations register here; the daemon calls `check()` on the
- * configured interval. The actual scheduler/heartbeat implementation
- * comes with the cron/scheduler feature — this is the mounting point.
+ * configured interval. (Cron jobs are a separate mechanism — see
+ * scheduler.ts; heartbeat hooks are health checks, not scheduled work.)
  */
 export interface HeartbeatHook {
   /** Unique name for this heartbeat check. */
@@ -135,6 +137,7 @@ export class DaemonRuntime {
   private readonly gateways = new Map<string, GatewayAdapter>();
   private readonly heartbeatHooks: HeartbeatHook[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private scheduler: CronScheduler | null = null;
   private shuttingDown = false;
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
@@ -205,6 +208,29 @@ export class DaemonRuntime {
       this.startHeartbeat();
     }
 
+    // Start cron scheduler (job files in $HARNESS_STATE/jobs/).
+    // Scheduler failure must not prevent daemon startup.
+    try {
+      this.scheduler = new CronScheduler({
+        jobsDir: this.paths.jobs,
+        logger: this.logger.child("cron"),
+        runAgentJob: async (job) => {
+          await this.runCronAgentJob(job);
+        },
+        scriptCtx: {
+          paths: this.paths,
+          logger: this.logger.child("cron-script"),
+          retentionDays: this.config.logRetentionDays,
+        },
+      });
+      await this.scheduler.start();
+    } catch (err) {
+      this.scheduler = null;
+      log.error("cron scheduler failed to start — continuing without it", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // Record start metric
     await this.recordDaemonMetric("daemon_start");
     log.info("daemon started", { uptime: 0 });
@@ -224,6 +250,13 @@ export class DaemonRuntime {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+
+    // Stop cron scheduler (running jobs finish, pending jitter is dropped)
+    if (this.scheduler) {
+      this.scheduler.stop();
+      this.scheduler = null;
+      log.info("cron scheduler stopped");
     }
 
     // Stop gateways
@@ -333,6 +366,36 @@ export class DaemonRuntime {
   registerHeartbeat(hook: HeartbeatHook): void {
     this.heartbeatHooks.push(hook);
     this.logger.info("heartbeat hook registered", { name: hook.name });
+  }
+
+  /**
+   * Executes an agent-type cron job: creates a fresh session with origin
+   * "cron" via the session registry and runs the job body as its first
+   * turn. Returns the new session id. Throws on failure — the scheduler
+   * catches and logs it.
+   */
+  async runCronAgentJob(job: CronJob): Promise<string> {
+    const created = await this.handleIpcRequest({
+      type: "create-session",
+      origin: "cron",
+      title: `cron: ${job.name}`,
+    });
+    if (created.type !== "session-created") {
+      throw new Error(
+        created.type === "error"
+          ? created.message
+          : `unexpected create-session response: ${created.type}`,
+      );
+    }
+    const resp = await this.handleIpcRequest({
+      type: "submit-turn",
+      text: job.body,
+      sessionId: created.sessionId,
+    });
+    if (resp.type === "error") {
+      throw new Error(resp.message);
+    }
+    return created.sessionId;
   }
 
   /**
