@@ -91,6 +91,8 @@ export interface SessionTurn {
   messages?: Message[];
 }
 
+export type SessionStatus = "active" | "idle" | "suspended" | "ended";
+
 export interface Session {
   id: string;
   title: string;
@@ -100,7 +102,9 @@ export interface Session {
   tokenTotals: SessionTokenTotals;
   parentSessionId?: string;
   transcriptPath: string;
-  status: "active" | "idle" | "ended";
+  status: SessionStatus;
+  /** ISO timestamp when the session was explicitly ended. Absent for active/idle/suspended. */
+  endedAt?: string;
 }
 
 export interface SessionIndexEntry {
@@ -111,7 +115,15 @@ export interface SessionIndexEntry {
   tokenTotals: SessionTokenTotals;
   parentSessionId?: string;
   title: string;
-  status: "active" | "idle" | "ended";
+  status: SessionStatus;
+  /** ISO timestamp when the session was explicitly ended. Absent for active/idle/suspended. */
+  endedAt?: string;
+}
+
+/** Marker appended to the transcript when a session is explicitly ended. */
+export interface SessionEndMarker {
+  type: "session-end";
+  endedAt: string;
 }
 
 export interface CreateSessionOptions {
@@ -319,6 +331,7 @@ function sessionToIndexEntry(session: Session): SessionIndexEntry {
     parentSessionId: session.parentSessionId,
     title: session.title,
     status: session.status,
+    endedAt: session.endedAt,
   };
 }
 
@@ -379,16 +392,36 @@ export async function endSession(
   session: Session,
   paths: HarnessPaths
 ): Promise<Session> {
-  const ended: Session = { ...session, status: "ended" };
+  const endedAt = new Date().toISOString();
+  // Write end marker to transcript so the boundary is visible without the index.
+  const marker: SessionEndMarker = { type: "session-end", endedAt };
+  await appendFile(session.transcriptPath, JSON.stringify(marker) + "\n", "utf-8");
+
+  const ended: Session = { ...session, status: "ended", endedAt };
   await upsertIndexEntry(paths, sessionToIndexEntry(ended));
   return ended;
+}
+
+/**
+ * Suspends a session: marks it as "suspended" in the index without
+ * writing an end marker. Used on daemon shutdown — suspended sessions
+ * are resumable, unlike explicitly ended sessions.
+ */
+export async function suspendSession(
+  session: Session,
+  paths: HarnessPaths
+): Promise<Session> {
+  const suspended: Session = { ...session, status: "suspended" };
+  await upsertIndexEntry(paths, sessionToIndexEntry(suspended));
+  return suspended;
 }
 
 /**
  * Marks all sessions currently in "active" status as "idle".
  * Called on daemon start to clean up orphaned active markers from
  * a crash or unclean shutdown. "active" = in-memory only; anything
- * not loaded in the daemon is "idle" (resumable) or "ended" (explicitly stopped).
+ * not loaded in the daemon is "idle" (crashed, resumable),
+ * "suspended" (graceful shutdown, resumable), or "ended" (explicitly stopped).
  */
 export async function markActiveSessionsIdle(paths: HarnessPaths): Promise<number> {
   const index = await loadIndex(paths);
@@ -440,8 +473,68 @@ export async function recordTurn(
   return updated;
 }
 
+/* ─── Tool Data Extraction ─── */
+
+/**
+ * Extracts structured `tool_calls` and `tool_results` from a message slice
+ * produced by the agent loop. Called by both `DaemonRuntime` and
+ * `InProcessBackend` to populate the corresponding `SessionTurn` fields
+ * without duplicating extraction logic.
+ *
+ * - `tool_calls` are collected from `toolCall` content blocks on assistant messages.
+ * - `tool_results` are collected from `toolResult`-role messages.
+ */
+export function extractToolData(messages: Message[]): {
+  tool_calls: SessionTurnToolCall[];
+  tool_results: SessionTurnToolResult[];
+} {
+  const tool_calls: SessionTurnToolCall[] = [];
+  const tool_results: SessionTurnToolResult[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part && typeof part === "object" && (part as { type?: string }).type === "toolCall") {
+          const tc = part as { id: string; name: string; arguments: unknown };
+          tool_calls.push({ id: tc.id, name: tc.name, arguments: tc.arguments });
+        }
+      }
+    } else if (msg.role === "toolResult") {
+      const tr = msg as {
+        toolCallId: string;
+        toolName: string;
+        content: Array<{ type: string; text?: string }>;
+        isError: boolean;
+      };
+      const resultText = (tr.content ?? [])
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("\n");
+      tool_results.push({
+        toolCallId: tr.toolCallId,
+        name: tr.toolName,
+        result: resultText,
+        isError: tr.isError,
+      });
+    }
+  }
+
+  return { tool_calls, tool_results };
+}
+
 /* ─── Read API ─── */
 
+/**
+ * Loads a session's index entry and all turns from disk.
+ *
+ * Reads the JSONL transcript file, skipping `session-end` markers.
+ * Returns `null` if the session is not in the index or the transcript
+ * file does not exist.
+ *
+ * @param sessionId  The session id to load.
+ * @param paths      Harness paths (resolves `$HARNESS_STATE`).
+ * @returns `{ session, turns }` or `null` if not found.
+ */
 export async function readSession(
   sessionId: string,
   paths: HarnessPaths
@@ -467,7 +560,10 @@ export async function readSession(
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      turns.push(JSON.parse(trimmed) as SessionTurn);
+      const parsed = JSON.parse(trimmed) as { type?: string } & SessionTurn;
+      // Skip end-marker lines — they are not turns.
+      if (parsed.type === "session-end") continue;
+      turns.push(parsed as SessionTurn);
     } catch {
       // Skip corrupt lines silently.
     }
@@ -488,7 +584,10 @@ export async function countTurnsInTranscript(
   if (!tPath) return 0;
   try {
     const raw = await readFile(tPath, "utf-8");
-    return raw.split("\n").filter((line) => line.trim()).length;
+    return raw.split("\n").filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.includes('"session-end"');
+    }).length;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return 0;
@@ -496,6 +595,17 @@ export async function countTurnsInTranscript(
   }
 }
 
+/**
+ * Lists all sessions from the index, optionally filtered by `lastActivity`
+ * range.
+ *
+ * The filter uses `lastActivity` (the timestamp of the most recent turn),
+ * not `createdAt`, so that a session started on a previous day but active
+ * today is included in a "today" range.
+ *
+ * @param paths  Harness paths.
+ * @param range  Optional `{ from?, to? }` inclusive ISO date/time bounds on `lastActivity`.
+ */
 export async function listSessions(
   paths: HarnessPaths,
   range?: ListSessionsRange
@@ -504,8 +614,8 @@ export async function listSessions(
   if (!range) return index;
 
   return index.filter((entry) => {
-    if (range.from && entry.created < range.from) return false;
-    if (range.to && entry.created > range.to) return false;
+    if (range.from && entry.lastActivity < range.from) return false;
+    if (range.to && entry.lastActivity > range.to) return false;
     return true;
   });
 }
@@ -647,6 +757,7 @@ export async function loadSession(
     parentSessionId: loaded.session.parentSessionId,
     transcriptPath,
     status: loaded.session.status,
+    endedAt: loaded.session.endedAt,
   };
 
   const messages = turnsToMessages(loaded.turns);

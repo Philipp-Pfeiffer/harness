@@ -1,4 +1,5 @@
 import type { Message } from "@mariozechner/pi-ai";
+import type { SessionStatus } from "../core/session.js";
 
 /* ─── Gateway Adapter Interface ─── */
 
@@ -113,7 +114,7 @@ export interface SessionSummary {
   sessionId: string;
   title: string;
   origin: SessionOrigin;
-  status: "active" | "idle" | "ended";
+  status: SessionStatus;
   createdAt: string;
   lastActiveAt: string;
   model: string;

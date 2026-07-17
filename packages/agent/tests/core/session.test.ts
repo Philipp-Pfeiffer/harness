@@ -10,14 +10,17 @@ import {
   createSessionId,
   recordTurn,
   endSession,
+  suspendSession,
   readSession,
   listSessions,
   listSessionsWithDetails,
   turnsToMessages,
   calculateTurnCost,
   estimateContextTokens,
+  extractToolData,
   loadSession,
   migrateLegacySessionFiles,
+  countTurnsInTranscript,
   SESSION_LOAD_WARN_THRESHOLD,
   SESSION_LOAD_SILENT_MAX,
   type SessionTurn,
@@ -255,15 +258,29 @@ describe("session", () => {
   });
 
   describe("endSession", () => {
-    it("marks the session as ended in the index", async () => {
+    it("marks the session as ended in the index with endedAt", async () => {
       const session = await createSession(paths, { model: "minimax-m2.7" });
       const ended = await endSession(session, paths);
 
       expect(ended.status).toBe("ended");
+      expect(ended.endedAt).toBeDefined();
 
       const index = await readIndex(paths);
       expect(index).toHaveLength(1);
-      expect((index[0] as { status: string }).status).toBe("ended");
+      const entry = index[0] as { status: string; endedAt?: string };
+      expect(entry.status).toBe("ended");
+      expect(entry.endedAt).toBeDefined();
+    });
+
+    it("writes a session-end marker to the transcript", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+      await endSession(session, paths);
+
+      const raw = await readFile(session.transcriptPath, "utf-8");
+      const lines = raw.trim().split("\n");
+      const lastLine = JSON.parse(lines[lines.length - 1]!) as { type?: string };
+      expect(lastLine.type).toBe("session-end");
     });
   });
 
@@ -311,11 +328,11 @@ describe("session", () => {
       expect(sessions).toHaveLength(2);
     });
 
-    it("filters sessions by date range", async () => {
+    it("filters sessions by lastActivity range", async () => {
       const s1 = await createSession(paths, { model: "a" });
       const s2 = await createSession(paths, { model: "b" });
 
-      // Override created dates manually for deterministic testing.
+      // Override lastActivity manually for deterministic testing.
       const index = await readIndex(paths);
       const updated = index.map((entry: unknown, idx: number) => ({
         ...(entry as object),
@@ -330,6 +347,26 @@ describe("session", () => {
       });
       expect(filtered).toHaveLength(1);
       expect(filtered[0].sessionId).toBe(s2.id);
+    });
+
+    it("filters on lastActivity, not created — session from previous day active today is included", async () => {
+      const s1 = await createSession(paths, { model: "a" });
+
+      // Session created yesterday, but lastActivity is today
+      const index = await readIndex(paths);
+      const updated = index.map((entry: unknown) => ({
+        ...(entry as object),
+        created: "2026-06-24T08:00:00.000Z",
+        lastActivity: "2026-06-25T14:00:00.000Z",
+      }));
+      await writeFile(join(paths.sessions, "sessions.json"), JSON.stringify(updated, null, 2), "utf-8");
+
+      const filtered = await listSessions(paths, {
+        from: "2026-06-25T00:00:00.000Z",
+        to: "2026-06-25T23:59:59.000Z",
+      });
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].sessionId).toBe(s1.id);
     });
   });
 
@@ -483,6 +520,149 @@ describe("session", () => {
       expect(sessions).toHaveLength(1);
       expect(sessions[0].turnCount).toBe(2);
       expect(sessions[0].tokenEstimate).toBeGreaterThan(0);
+    });
+  });
+
+  describe("suspendSession", () => {
+    it("marks the session as suspended without an end marker", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+      const suspended = await suspendSession(session, paths);
+
+      expect(suspended.status).toBe("suspended");
+      expect(suspended.endedAt).toBeUndefined();
+
+      // No end marker in the transcript
+      const raw = await readFile(session.transcriptPath, "utf-8");
+      const lines = raw.trim().split("\n");
+      for (const line of lines) {
+        const parsed = JSON.parse(line) as { type?: string };
+        expect(parsed.type).not.toBe("session-end");
+      }
+    });
+
+    it("suspended session is distinct from ended in the index", async () => {
+      const s1 = await createSession(paths, { model: "a" });
+      await suspendSession(s1, paths);
+      const s2 = await createSession(paths, { model: "b" });
+      await endSession(s2, paths);
+
+      const sessions = await listSessions(paths);
+      const s1Entry = sessions.find((s) => s.sessionId === s1.id);
+      const s2Entry = sessions.find((s) => s.sessionId === s2.id);
+      expect(s1Entry?.status).toBe("suspended");
+      expect(s1Entry?.endedAt).toBeUndefined();
+      expect(s2Entry?.status).toBe("ended");
+      expect(s2Entry?.endedAt).toBeDefined();
+    });
+  });
+
+  describe("readSession skips end markers", () => {
+    it("does not include session-end markers in turns", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+      await endSession(session, paths);
+
+      const loaded = await readSession(session.id, paths);
+      expect(loaded!.turns).toHaveLength(1);
+      expect(loaded!.turns[0].id).toBe("t1");
+    });
+  });
+
+  describe("extractToolData", () => {
+    it("extracts tool calls and results from a message slice", () => {
+      const messages = [
+        { role: "user" as const, content: "read foo.txt", timestamp: 1 },
+        {
+          role: "assistant" as const,
+          content: [
+            { type: "text" as const, text: "Reading file..." },
+            { type: "toolCall" as const, id: "tc-1", name: "readFile", arguments: { path: "foo.txt" } },
+          ],
+          timestamp: 2,
+        } as never,
+        {
+          role: "toolResult" as const,
+          toolCallId: "tc-1",
+          toolName: "readFile",
+          content: [{ type: "text" as const, text: "file contents here" }],
+          isError: false,
+          timestamp: 3,
+        } as never,
+      ];
+
+      const result = extractToolData(messages);
+      expect(result.tool_calls).toHaveLength(1);
+      expect(result.tool_calls[0]).toEqual({
+        id: "tc-1",
+        name: "readFile",
+        arguments: { path: "foo.txt" },
+      });
+      expect(result.tool_results).toHaveLength(1);
+      expect(result.tool_results[0]).toEqual({
+        toolCallId: "tc-1",
+        name: "readFile",
+        result: "file contents here",
+        isError: false,
+      });
+    });
+
+    it("returns empty arrays for a slice without tool calls", () => {
+      const messages = [
+        { role: "user" as const, content: "hello", timestamp: 1 },
+        { role: "assistant" as const, content: [{ type: "text" as const, text: "hi" }], timestamp: 2 } as never,
+      ];
+      const result = extractToolData(messages);
+      expect(result.tool_calls).toHaveLength(0);
+      expect(result.tool_results).toHaveLength(0);
+    });
+  });
+
+  describe("tool data roundtrip via recordTurn + readSession", () => {
+    it("persists and retrieves tool_calls and tool_results", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      const turn = baseTurn({
+        id: "t1",
+        tool_calls: [
+          { id: "tc-1", name: "readFile", arguments: { path: "foo.txt" } },
+        ],
+        tool_results: [
+          { toolCallId: "tc-1", name: "readFile", result: "contents", isError: false },
+        ],
+      });
+      await recordTurn(session, turn, paths);
+
+      const loaded = await readSession(session.id, paths);
+      expect(loaded!.turns).toHaveLength(1);
+      expect(loaded!.turns[0].tool_calls).toHaveLength(1);
+      expect(loaded!.turns[0].tool_calls![0]).toEqual({
+        id: "tc-1",
+        name: "readFile",
+        arguments: { path: "foo.txt" },
+      });
+      expect(loaded!.turns[0].tool_results).toHaveLength(1);
+      expect(loaded!.turns[0].tool_results![0]).toEqual({
+        toolCallId: "tc-1",
+        name: "readFile",
+        result: "contents",
+        isError: false,
+      });
+    });
+  });
+
+  describe("countTurnsInTranscript skips end markers", () => {
+    it("counts only turns, not end markers", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+      await recordTurn(
+        { ...session, tokenTotals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } },
+        baseTurn({ id: "t2" }),
+        paths,
+      );
+      await endSession(session, paths);
+
+      const count = await countTurnsInTranscript(session.id, paths);
+      expect(count).toBe(2);
     });
   });
 });
