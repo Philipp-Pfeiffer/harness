@@ -257,6 +257,12 @@ function addCost(
 
 /* ─── Index Management ─── */
 
+// Serializes read-modify-write cycles on the sessions index. Turns on
+// DIFFERENT sessions run in parallel (per-session turn queues), so
+// concurrent upsertIndexEntry calls would otherwise interleave
+// load → modify → save and silently lose each other's updates.
+let indexUpdateQueue: Promise<void> = Promise.resolve();
+
 async function loadIndex(paths: HarnessPaths): Promise<SessionIndexEntry[]> {
   try {
     const raw = await readFile(sessionsIndexPath(paths), "utf-8");
@@ -277,7 +283,9 @@ async function saveIndex(
   index: SessionIndexEntry[]
 ): Promise<void> {
   await mkdir(paths.sessions, { recursive: true });
-  const tmpPath = sessionsIndexPath(paths) + ".tmp";
+  // Unique tmp name: two harness processes sharing $HARNESS_STATE must
+  // not clobber each other's tmp file (rename would fail with ENOENT).
+  const tmpPath = `${sessionsIndexPath(paths)}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(tmpPath, JSON.stringify(index, null, 2) + "\n", "utf-8");
   await rename(tmpPath, sessionsIndexPath(paths));
 }
@@ -286,14 +294,19 @@ async function upsertIndexEntry(
   paths: HarnessPaths,
   entry: SessionIndexEntry
 ): Promise<void> {
-  const index = await loadIndex(paths);
-  const idx = index.findIndex((e) => e.sessionId === entry.sessionId);
-  if (idx === -1) {
-    index.push(entry);
-  } else {
-    index[idx] = entry;
-  }
-  await saveIndex(paths, index);
+  const op = indexUpdateQueue.then(async () => {
+    const index = await loadIndex(paths);
+    const idx = index.findIndex((e) => e.sessionId === entry.sessionId);
+    if (idx === -1) {
+      index.push(entry);
+    } else {
+      index[idx] = entry;
+    }
+    await saveIndex(paths, index);
+  });
+  // Keep the queue alive even when this update failed.
+  indexUpdateQueue = op.catch(() => {});
+  return op;
 }
 
 function sessionToIndexEntry(session: Session): SessionIndexEntry {

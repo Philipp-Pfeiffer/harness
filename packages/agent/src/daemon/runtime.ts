@@ -559,20 +559,11 @@ export class DaemonRuntime {
             if (cmdResult) return cmdResult;
           }
 
-          // Build message array
-          let messages: Message[];
-          if (req.text) {
-            // New-style: daemon manages context
-            messages = entry.messages;
-            messages.push({
-              role: "user",
-              content: req.text,
-              timestamp: Date.now(),
-            } as Message);
-          } else if (req.messages) {
-            // Old-style: caller provides full message array
-            messages = req.messages as Message[];
-          } else {
+          // Validate input up-front. The user message is NOT appended here —
+          // that happens inside the queued turn body below, so that
+          // entry.messages is only mutated while holding the session's
+          // turn queue.
+          if (!req.text && !req.messages) {
             return {
               type: "error",
               message: "submit-turn requires either 'text' or 'messages'",
@@ -582,22 +573,39 @@ export class DaemonRuntime {
 
           // ─── Turn Queue: serialize turns per session ───
           //
-          // If a turn is already running on this session, the agent loop
-          // will drain the mailbox at the next iteration boundary. We push
-          // the text to the mailbox and return a "queued" response so the
-          // caller knows their message was accepted but not yet processed.
+          // The turn body is a promise PRODUCER passed to
+          // entry.turnQueue.then(...) — not an immediately-invoked IIFE —
+          // so the user-message push and agent.run() only start once the
+          // previous turn on this session has fully settled. Two parallel
+          // submit-turns on the same session therefore run strictly serial
+          // on entry.messages; different sessions have separate queues and
+          // are not blocked by each other.
           //
-          // If no turn is running, we chain this turn onto the session's
-          // turnQueue promise. This ensures that even if two IPC requests
-          // arrive nearly simultaneously, the second waits for the first
-          // to complete before mutating entry.messages.
-
-          const turnStartedAt = new Date().toISOString();
-          const turnStartedMs = Date.now();
-
-          // Chain the turn onto the session's queue
+          // A failed turn must not tear the queue: entry.turnQueue always
+          // stores turnPromise.catch(() => undefined), so the next queued
+          // turn runs even when this one rejected.
           const agent = this.agent;
-          const turnPromise = (async () => {
+          const runQueuedTurn = async (): Promise<IpcResponse> => {
+            const turnStartedAt = new Date().toISOString();
+            const turnStartedMs = Date.now();
+
+            // Build message array — inside the queued body, while holding
+            // the queue. A queued turn never sees a later turn's user
+            // message: no interleaves on entry.messages.
+            let messages: Message[];
+            if (req.text) {
+              // New-style: daemon manages context
+              messages = entry.messages;
+              messages.push({
+                role: "user",
+                content: req.text,
+                timestamp: Date.now(),
+              } as Message);
+            } else {
+              // Old-style: caller provides full message array
+              messages = req.messages as Message[];
+            }
+
             const result = await agent.run(messages, {
               metricsRecorder: entry.metricsRecorder,
               memoryBackend: this.memoryService?.getBackend(),
@@ -690,10 +698,14 @@ export class DaemonRuntime {
                 cacheWrite: result.usage.cacheWrite,
               },
             };
-          })();
+          };
 
-          // Chain onto queue: next turn waits for this one to finish
-          entry.turnQueue = entry.turnQueue.then(() => turnPromise, () => turnPromise);
+          // Chain the producer onto the queue: this turn starts only after
+          // the previous turn on this session settled (either outcome).
+          // The stored queue promise never stays rejected, so a failed turn
+          // does not tear the queue for the next submit.
+          const turnPromise = entry.turnQueue.then(runQueuedTurn, runQueuedTurn);
+          entry.turnQueue = turnPromise.catch(() => undefined);
 
           return await turnPromise;
         } catch (err) {
