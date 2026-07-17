@@ -270,7 +270,7 @@ Structured JSON-lines logs go to `$HARNESS_STATE/logs/daemon-YYYY-MM-DD.log`. Da
 
 ### IPC
 
-CLI/TUI clients connect to the daemon via Unix socket at `$HARNESS_STATE/daemon.sock`. Wire protocol: newline-delimited JSON. Request types: `ping`, `status`, `submit-turn`, `reload-config`, `shutdown`.
+CLI/TUI clients connect to the daemon via Unix socket at `$HARNESS_STATE/daemon.sock`. Wire protocol: newline-delimited JSON. Request types: `ping`, `status`, `create-session`, `list-sessions`, `submit-turn`, `resume-session`, `end-session`, `reload-config`, `shutdown`.
 
 ### GatewayAdapter Interface
 
