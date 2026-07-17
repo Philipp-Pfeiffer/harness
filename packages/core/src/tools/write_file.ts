@@ -35,7 +35,7 @@ export const writeTool: Tool<typeof WriteArgs> = {
   conflictKey(args) {
     return resolveExpandedPath(args.path);
   },
-  async execute(args) {
+  async execute(args, context) {
     const absolutePath = resolveExpandedPath(args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
@@ -48,7 +48,7 @@ export const writeTool: Tool<typeof WriteArgs> = {
       return `${result.code}: ${result.message}`;
     }
 
-    markRead(absolutePath);
+    if (context?.sessionId) markRead(context.sessionId, absolutePath);
     return "ok";
   },
 };

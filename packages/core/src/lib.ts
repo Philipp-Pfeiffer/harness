@@ -21,7 +21,7 @@ export {
 export { ThinkingStreamTransformer, type ThinkingStreamOutput } from "./core/thinkingStream.js";
 
 // Tool types and individual tools
-export { type Tool } from "./tools/types.js";
+export { type Tool, type ToolCallContext } from "./tools/types.js";
 export { readFileTool } from "./tools/readFile.js";
 export { execTool } from "./tools/exec.js";
 export { processTool } from "./tools/process.js";

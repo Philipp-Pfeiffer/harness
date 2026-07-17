@@ -1,4 +1,5 @@
 import { stream } from "@mariozechner/pi-ai";
+import { randomUUID } from "node:crypto";
 import { resolveModel, getApiKey } from "./resolveModel.js";
 import { prompt } from "../prompts.js";
 import { shouldCompact, compactSession } from "./compaction.js";
@@ -15,7 +16,7 @@ import type {
   Message,
   AssistantMessage,
 } from "@mariozechner/pi-ai";
-import type { Tool } from "../tools/types.js";
+import type { Tool, ToolCallContext } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
 import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
@@ -96,6 +97,12 @@ export interface RunOptions {
   memoryBackend?: MemoryBackend;
   /** Optional metrics recorder for turn/tool/error events. */
   metricsRecorder?: MetricsRecorder;
+  /**
+   * Optional session scope for per-session tool state (read-before-edit
+   * guard). Falls back to `compaction.sessionId`, then to a
+   * per-agent-instance default. Never a process-global scope.
+   */
+  sessionId?: string;
   /**
    * Optional compaction config. When set, auto-compaction triggers before
    * LLM calls. Bound to a single run() invocation — sessionId is specific
@@ -285,6 +292,10 @@ export function createAgent(config: AgentConfig): Agent {
   // prompt("system-prompt") without vars triggers a missing-variable warning.
   let systemPrompt = config.systemPrompt ?? "";
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
+  // Fallback tool-call scope for run() invocations without an explicit
+  // sessionId. Scoped to this agent instance — never process-global — so
+  // two agents can never share read-before-edit state.
+  const defaultToolSessionScope = `agent-${randomUUID()}`;
 
   return {
     setModel(newModel: Model<Api>) {
@@ -296,6 +307,14 @@ export function createAgent(config: AgentConfig): Agent {
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction } = options;
       let effectiveSystemPrompt = systemPrompt;
+
+      // Session scope for per-session tool state (read-before-edit guard).
+      // Explicit sessionId wins; the daemon's per-run compaction options
+      // already carry the sessionId; otherwise fall back to this agent's
+      // own scope. Never a process-global scope.
+      const toolContext: ToolCallContext = {
+        sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
+      };
 
       if (memoryBackend) {
         let lastUserIndex = -1;
@@ -543,7 +562,7 @@ export function createAgent(config: AgentConfig): Agent {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
                     toolCallCount++;
-                    result = await Promise.resolve(tool.execute(toolCall.arguments));
+                    result = await Promise.resolve(tool.execute(toolCall.arguments, toolContext));
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                     logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
                     metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "ok" });
