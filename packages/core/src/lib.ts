@@ -103,6 +103,36 @@ export {
   type CompactionConfig,
 } from "./core/compaction.js";
 
+// Skill System
+export {
+  type SkillLevel,
+  type SkillStatus,
+  type SkillFrontmatter,
+  type SkillRecord,
+  type SkillError,
+  type SkillLoadResult,
+  type SkillTelemetryEntry,
+  type SkillTelemetry,
+  type HotSetOptions,
+  type LoadSkillsOptions,
+  parseSkillFile,
+  SkillFrontmatterError,
+  loadSkills,
+  validateRequires,
+  computeRoutableSkills,
+  readTelemetry,
+  writeTelemetry,
+  recordSkillUse,
+  telemetryPathFor,
+  buildHotSet,
+  formatSkillForHotSet,
+  renderHotSet,
+} from "./skills/index.js";
+
+// Skill Tools
+export { createLoadSkillTool } from "./tools/loadSkill.js";
+export { createFindSkillTool, type FindSkillToolOptions } from "./tools/findSkill.js";
+
 // Note on toolChoice (pi-ai 0.70.2):
 // The typed `StreamOptions` interface does not expose a `toolChoice` field.
 // However, `ProviderStreamOptions` is defined as `StreamOptions & Record<string, unknown>`,

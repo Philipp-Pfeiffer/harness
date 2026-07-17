@@ -13,6 +13,7 @@ Commands:
   chat           Connect to a running daemon and launch the TUI with a
                  session picker. Works from any directory — only needs the
                  daemon socket. Use --session <id> to attach directly.
+  doctor         Validate the skill system (frontmatter, requires, telemetry).
   daemon         Manage the background daemon process.
     start          Start the daemon as a detached background process.
     stop           Stop the running daemon.
