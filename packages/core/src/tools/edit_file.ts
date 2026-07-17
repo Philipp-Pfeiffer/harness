@@ -25,7 +25,7 @@ export const editTool: Tool<typeof EditArgs> = {
   conflictKey(args) {
     return resolveExpandedPath(args.path);
   },
-  async execute(args) {
+  async execute(args, context) {
     const absolutePath = resolveExpandedPath(args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
@@ -33,7 +33,8 @@ export const editTool: Tool<typeof EditArgs> = {
       return `SENSITIVE_PATH: ${sensitiveCheck.reason}`;
     }
 
-    if (!wasRead(absolutePath)) {
+    const sessionId = context?.sessionId;
+    if (!sessionId || !wasRead(sessionId, absolutePath)) {
       return `READ_REQUIRED: file must be read before editing`;
     }
 
@@ -86,7 +87,7 @@ export const editTool: Tool<typeof EditArgs> = {
       return `${result.code}: ${result.message}`;
     }
 
-    markRead(absolutePath);
+    markRead(sessionId, absolutePath);
     return `ok: ${args.edits.length}`;
   },
 };

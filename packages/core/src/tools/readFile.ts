@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { cwd } from "node:process";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
-import type { Tool } from "./types.js";
+import type { Tool, ToolCallContext } from "./types.js";
 import { markRead } from "./file_state.js";
 
 const ReadFileArgs = Type.Object({
@@ -95,11 +95,15 @@ function checkSize(text: string): string | null {
   return null;
 }
 
+function markSessionRead(context: ToolCallContext | undefined, path: string): void {
+  if (context?.sessionId) markRead(context.sessionId, path);
+}
+
 export const readFileTool: Tool<typeof ReadFileArgs> = {
   name: "readFile",
   description: "Read the contents of a file from the local filesystem. Supports plain UTF-8 text and PDF (text extraction). Returns text content. For large files, use lineStart/lineEnd to read a specific range.",
   parameters: ReadFileArgs,
-  async execute(args) {
+  async execute(args, context) {
     const expanded = expandTilde(args.path);
     const resolvedPath = resolve(cwd(), expanded);
 
@@ -139,7 +143,7 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
         const sizeError = checkSize(text);
         if (sizeError) return sizeError;
 
-        markRead(resolvedPath);
+        markSessionRead(context, resolvedPath);
         return `--- PDF, ${doc.numPages} pages ---\n${text}`;
       } catch (err) {
         return `Failed to parse PDF: ${err instanceof Error ? err.message : String(err)}`;
@@ -164,13 +168,13 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
       content = sliceLines(content, args.lineStart, clampedEnd);
       if (content.startsWith("Error:")) return content;
       const start = args.lineStart ?? 1;
-      markRead(resolvedPath);
+      markSessionRead(context, resolvedPath);
       return `--- Lines ${start}-${clampedEnd} of ${totalLines} ---\n${content}`;
     }
 
     const sizeError = checkSize(content);
     if (sizeError) return sizeError;
-    markRead(resolvedPath);
+    markSessionRead(context, resolvedPath);
     return content;
   },
 };

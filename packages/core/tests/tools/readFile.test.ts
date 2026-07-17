@@ -109,8 +109,9 @@ describe("readFile tool", () => {
     });
 
     it("marks PDF as read so edit does not fail on READ_REQUIRED", async () => {
-      await readFileTool.execute({ path: samplePdf });
-      expect(wasRead(samplePdf)).toBe(true);
+      await readFileTool.execute({ path: samplePdf }, { sessionId: "pdf-read-session" });
+      expect(wasRead("pdf-read-session", samplePdf)).toBe(true);
+      expect(wasRead("other-session", samplePdf)).toBe(false);
     });
   });
 

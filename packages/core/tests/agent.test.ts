@@ -120,6 +120,76 @@ describe("Agent", () => {
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
+  it("passes the run's sessionId to the tool execution context", async () => {
+    const mockToolCall = makeAssistantMessage(
+      [{ type: "toolCall", id: "tc_ctx1", name: "echo", arguments: { text: "x" } }],
+      "toolUse"
+    );
+    const mockFinal = makeAssistantMessage([{ type: "text", text: "done" }], "stop");
+
+    vi.mocked(stream)
+      .mockReturnValueOnce(mockStream(mockToolCall))
+      .mockReturnValueOnce(mockStream(mockFinal));
+
+    let capturedSession: string | undefined;
+    const probeTool: Tool<typeof echoArgs> = {
+      name: "echo",
+      description: "Probe for tool context",
+      parameters: echoArgs,
+      execute(args, ctx) { capturedSession = ctx?.sessionId; return args.text; },
+    };
+    const agent = createAgent({ tools: [probeTool], model });
+
+    await agent.run([makeUserMessage("Hi")], { sessionId: "session-xyz" });
+
+    expect(capturedSession).toBe("session-xyz");
+  });
+
+  it("scopes the tool execution context per run on a shared agent", async () => {
+    let capturedSession: string | undefined;
+    const probeTool: Tool<typeof echoArgs> = {
+      name: "echo",
+      description: "Probe for tool context",
+      parameters: echoArgs,
+      execute(args, ctx) { capturedSession = ctx?.sessionId; return args.text; },
+    };
+    const agent = createAgent({ tools: [probeTool], model });
+
+    const queueToolCallTurn = () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_ctx2", name: "echo", arguments: { text: "x" } }],
+        "toolUse"
+      );
+      const mockFinal = makeAssistantMessage([{ type: "text", text: "done" }], "stop");
+      vi.mocked(stream)
+        .mockReturnValueOnce(mockStream(mockToolCall))
+        .mockReturnValueOnce(mockStream(mockFinal));
+    };
+
+    queueToolCallTurn();
+    await agent.run([makeUserMessage("Hi")], { sessionId: "session-a" });
+    expect(capturedSession).toBe("session-a");
+
+    queueToolCallTurn();
+    await agent.run([makeUserMessage("Hi")], { sessionId: "session-b" });
+    expect(capturedSession).toBe("session-b");
+
+    // No sessionId → per-agent default scope, never a process-global one.
+    queueToolCallTurn();
+    await agent.run([makeUserMessage("Hi")]);
+    const defaultScope = capturedSession;
+    expect(typeof defaultScope).toBe("string");
+    expect(defaultScope).not.toBe("session-a");
+    expect(defaultScope).not.toBe("session-b");
+
+    // A different agent instance gets a different default scope.
+    const otherAgent = createAgent({ tools: [probeTool], model });
+    queueToolCallTurn();
+    await otherAgent.run([makeUserMessage("Hi")]);
+    expect(capturedSession).toBeDefined();
+    expect(capturedSession).not.toBe(defaultScope);
+  });
+
   it("throws when stopReason is error", async () => {
     const errorResponse = makeAssistantMessage([], "error", "Rate limit exceeded");
     vi.mocked(stream).mockReturnValueOnce(mockStream(errorResponse));
