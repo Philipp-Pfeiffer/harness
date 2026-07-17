@@ -29,6 +29,8 @@ export interface HarnessPaths {
   index: string;
   /** $state/logs/ */
   logs: string;
+  /** $state/jobs/ — Cron-Job-Definitionen (Markdown mit Frontmatter) */
+  jobs: string;
   /** $state/daemon.pid */
   pidFile: string;
   /** $state/daemon.sock */
@@ -69,6 +71,7 @@ export function resolveHarnessPaths(opts?: { home?: string }): HarnessPaths {
     metrics: path.join(state, "metrics"),
     index: path.join(state, "index"),
     logs: path.join(state, "logs"),
+    jobs: path.join(state, "jobs"),
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
   };
@@ -86,4 +89,5 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.metrics, { recursive: true });
   await mkdir(paths.index, { recursive: true });
   await mkdir(paths.logs, { recursive: true });
+  await mkdir(paths.jobs, { recursive: true });
 }
