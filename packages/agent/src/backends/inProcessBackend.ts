@@ -22,6 +22,7 @@ import {
   turnsToMessages,
   countTurnsInTranscript,
   calculateTurnCost,
+  extractToolData,
   type Session,
   type SessionTurn,
 } from "../core/session.js";
@@ -91,6 +92,9 @@ export class InProcessBackend implements AgentBackend {
     const loaded = await loadSession(sessionId, this.paths);
     if (!loaded) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (loaded.session.status === "ended") {
+      throw new Error(`Session ${sessionId} is ended and cannot be resumed.`);
     }
 
     const messages = turnsToMessages(loaded.turns);
@@ -236,13 +240,15 @@ export class InProcessBackend implements AgentBackend {
     runStartMs: number,
   ): Promise<Session> {
     const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+    const turnSlice = messages.slice(messagesBeforeTurn);
+    const { tool_calls, tool_results } = extractToolData(turnSlice);
     const sessionTurn: SessionTurn = {
       id: randomUUID(),
       role: "assistant",
       content: finalMessage,
       userContent: userText,
-      tool_calls: [],
-      tool_results: [],
+      tool_calls,
+      tool_results,
       tokens: {
         input: result.usage.inputTokens,
         output: result.usage.outputTokens,

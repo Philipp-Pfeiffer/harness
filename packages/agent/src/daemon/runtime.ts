@@ -33,11 +33,13 @@ import {
   createSession,
   recordTurn,
   endSession,
+  suspendSession,
   loadSession,
   turnsToMessages,
   listSessions,
   countTurnsInTranscript,
   markActiveSessionsIdle,
+  extractToolData,
   type Session,
 } from "../core/session.js";
 import { ensureInbox } from "../core/memoryFolders.js";
@@ -278,13 +280,13 @@ export class DaemonRuntime {
       this.ipcServer = null;
     }
 
-    // End all active sessions
+    // Suspend all active sessions — they are resumable, not ended.
     for (const [id, entry] of this.sessions) {
       try {
-        entry.session = await endSession(entry.session, this.paths);
-        log.info("session ended", { id });
+        entry.session = await suspendSession(entry.session, this.paths);
+        log.info("session suspended", { id });
       } catch (err) {
-        log.error("failed to end session", {
+        log.error("failed to suspend session", {
           id,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -529,11 +531,19 @@ export class DaemonRuntime {
           if (!loaded) {
             return { type: "error", message: `Session not found: ${sessionId}` };
           }
+          if (loaded.session.status === "ended") {
+            return {
+              type: "error",
+              message: `Session ${sessionId} is ended and cannot be resumed.`,
+              sessionId,
+            };
+          }
           const entry = this.createSessionEntry(
             loaded.session,
             "api",
             loaded.session.title,
           );
+          entry.session = { ...entry.session, status: "active" };
           entry.messages = loaded.turns.length > 0
             ? turnsToMessages(loaded.turns)
             : [];
@@ -593,11 +603,19 @@ export class DaemonRuntime {
                   sessionId: req.sessionId,
                 };
               }
+              if (loaded.session.status === "ended") {
+                return {
+                  type: "error",
+                  message: `Session ${req.sessionId} is ended and cannot be resumed.`,
+                  sessionId: req.sessionId,
+                };
+              }
               entry = this.createSessionEntry(
                 loaded.session,
                 "api",
                 loaded.session.title,
               );
+              entry.session = { ...entry.session, status: "active" };
               entry.messages = loaded.turns.length > 0
                 ? turnsToMessages(loaded.turns)
                 : [];
@@ -656,6 +674,9 @@ export class DaemonRuntime {
             // the queue. A queued turn never sees a later turn's user
             // message: no interleaves on entry.messages.
             let messages: Message[];
+            const messagesBeforeTurn = req.text
+              ? entry.messages.length
+              : 0;
             if (req.text) {
               // New-style: daemon manages context
               messages = entry.messages;
@@ -722,6 +743,8 @@ export class DaemonRuntime {
             const finalMessage = result.aborted
               ? "Aborted"
               : result.finalMessage;
+            const turnSlice = messages.slice(messagesBeforeTurn);
+            const { tool_calls, tool_results } = extractToolData(turnSlice);
             const turn = {
               id: crypto.randomUUID(),
               role: "assistant" as const,
@@ -730,6 +753,8 @@ export class DaemonRuntime {
                 req.text ??
                 (messages.find((m) => m.role === "user")?.content?.toString() ??
                   ""),
+              tool_calls,
+              tool_results,
               tokens: {
                 input: result.usage.inputTokens,
                 output: result.usage.outputTokens,
@@ -743,7 +768,7 @@ export class DaemonRuntime {
               },
               model: this.model?.name ?? "unknown",
               timestamp: new Date().toISOString(),
-              messages: req.messages ? messages : undefined,
+              messages: turnSlice,
             };
             entry.session = await recordTurn(entry.session, turn, this.paths);
 
@@ -1150,7 +1175,15 @@ export class DaemonRuntime {
           sessionId,
         };
       }
+      if (loaded.session.status === "ended") {
+        return {
+          type: "error",
+          message: `Session ${targetId} is ended and cannot be resumed.`,
+          sessionId,
+        };
+      }
       const entry = this.createSessionEntry(loaded.session, "api", loaded.session.title);
+      entry.session = { ...entry.session, status: "active" };
       entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
       this.sessions.set(targetId, entry);
       const log = this.logger.child("session");
