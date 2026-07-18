@@ -51,7 +51,7 @@ export type SessionOrigin = "tui" | "cron" | "whatsapp" | "api";
 export type IpcRequest =
   | { type: "ping" }
   | { type: "status" }
-  | { type: "create-session"; origin?: SessionOrigin; title?: string; model?: string }
+  | { type: "create-session"; origin?: SessionOrigin; title?: string; model?: string; profile?: string }
   | { type: "list-sessions" }
   | { type: "submit-turn"; messages?: SerializedMessage[]; text?: string; model?: string; sessionId?: string }
   | { type: "resume-session"; sessionId: string }
@@ -69,7 +69,7 @@ export type IpcRequest =
 export type IpcResponse =
   | { type: "pong"; uptime: number; pid: number }
   | { type: "status"; daemon: DaemonStatusInfo }
-  | { type: "session-created"; sessionId: string; origin: SessionOrigin; createdAt: string }
+  | { type: "session-created"; sessionId: string; origin: SessionOrigin; createdAt: string; profile?: string }
   | { type: "sessions-listed"; sessions: SessionSummary[] }
   | { type: "session-resumed"; sessionId: string; messageCount: number }
   | { type: "session-ended"; sessionId: string }

@@ -105,6 +105,8 @@ export interface Session {
   status: SessionStatus;
   /** ISO timestamp when the session was explicitly ended. Absent for active/idle/suspended. */
   endedAt?: string;
+  /** Agent profile the session runs under. Absent for pre-profile sessions (treated as "default"). */
+  profile?: string;
 }
 
 export interface SessionIndexEntry {
@@ -118,6 +120,8 @@ export interface SessionIndexEntry {
   status: SessionStatus;
   /** ISO timestamp when the session was explicitly ended. Absent for active/idle/suspended. */
   endedAt?: string;
+  /** Agent profile the session runs under. Absent for pre-profile sessions (treated as "default"). */
+  profile?: string;
 }
 
 /** Marker appended to the transcript when a session is explicitly ended. */
@@ -130,6 +134,8 @@ export interface CreateSessionOptions {
   model: string;
   title?: string;
   parentSessionId?: string;
+  /** Agent profile name — persisted so resume restores the same profile. */
+  profile?: string;
 }
 
 export interface ModelCost {
@@ -332,6 +338,7 @@ function sessionToIndexEntry(session: Session): SessionIndexEntry {
     title: session.title,
     status: session.status,
     endedAt: session.endedAt,
+    profile: session.profile,
   };
 }
 
@@ -367,6 +374,7 @@ export async function createSession(
     parentSessionId: options.parentSessionId,
     transcriptPath,
     status: "active",
+    profile: options.profile,
   };
 
   await mkdir(dirname(transcriptPath), { recursive: true });
@@ -758,6 +766,7 @@ export async function loadSession(
     transcriptPath,
     status: loaded.session.status,
     endedAt: loaded.session.endedAt,
+    profile: loaded.session.profile,
   };
 
   const messages = turnsToMessages(loaded.turns);

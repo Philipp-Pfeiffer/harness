@@ -23,4 +23,5 @@ Each `.md` file is a standalone prompt template. The code loads it by name and p
 
 | File | Trigger | Injection Site | Status |
 |------|---------|----------------|--------|
+| `base-prompt.md` | immer (Daemon-Sessions) | Anfang des System-Prompts, vor der Profil-Persona | required |
 | `web-content-safety.md` | `web_fetch` or `web_search` in active tool set | `buildSystemPrompt()` after `system-prompt` + `<core_memory>` | required when web tools active |

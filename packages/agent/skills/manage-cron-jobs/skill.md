@@ -40,6 +40,7 @@ metrics-rotation
 | `enabled` | no       | `true` (default) or `false` — disabled jobs are parsed but never scheduled |
 | `type`    | yes      | `agent` or `script`                                   |
 | `jitter`  | no       | Max random start delay per run, e.g. `30m`, `2h`     |
+| `agent`   | no       | Agent profile name (`type: agent` only) — the job's session runs with that profile's prompt, model and tool set. Default: `default`. Unknown profiles fail the run with a logged error |
 
 ### Body
 
@@ -75,6 +76,23 @@ jitter: 15m
 Summarize yesterday's sessions and write a brief report to memory/_inbox.md.
 Include total turns, token usage, and any errors.
 ```
+
+## Example: Agent Job with Profile
+
+```markdown
+---
+name: distill-notes
+schedule: 0 5 * * *
+enabled: true
+type: agent
+agent: distillation
+---
+Distill this week's notes into long-term memory entries.
+```
+
+The `agent` field selects an agent profile (built-in under `agents/<name>/`
+in the repo, or user-defined in `$HARNESS_HOME/agents/<name>/agent.md`).
+Without it, jobs run under the `default` profile.
 
 ## Example: Script Job
 

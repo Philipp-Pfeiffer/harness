@@ -26,6 +26,8 @@ import {
   telemetryPathFor,
   buildHotSet,
   renderHotSet,
+  loadAgentProfiles,
+  ALL_MEMORY_ZONES,
   type HarnessPaths,
   type ConfigModel,
   type Agent,
@@ -34,8 +36,12 @@ import {
   type Mailbox,
   type ResolvedModel,
   type SkillRecord,
+  type Tool,
+  type AgentProfile,
+  type MemoryZone,
 } from "@harness/core";
-import { loadCoreMemoryRaw, composeSystemPrompt } from "../core/coreMemory.js";
+import { loadCoreMemoryRaw } from "../core/coreMemory.js";
+import { composeProfilePrompt } from "../core/profilePrompt.js";
 import { MemoryService } from "../core/memoryService.js";
 import {
   createSession,
@@ -123,12 +129,27 @@ interface SessionEntry {
   title: string;
   createdAt: string;
   lastActiveAt: string;
+  /** Agent profile this session runs under ("default" when unspecified). */
+  profile: string;
   /** Mailbox for steering messages that arrive while a turn is running. */
   mailbox: Mailbox;
   /** Turn queue: serializes turns per session. A second submit-turn on the
    *  same session waits for the first to complete instead of racing on
    *  entry.messages in-place. Messages arriving mid-turn go to the mailbox. */
   turnQueue: Promise<unknown>;
+}
+
+/**
+ * Runtime context derived from an agent profile: the agent instance with
+ * its system prompt, model and tool set, plus the granted memory zones
+ * (used to gate ambient hints per turn).
+ */
+interface ProfileAgentContext {
+  agent: Agent;
+  model: Model<Api> | null;
+  tools: Tool[];
+  prompt: string;
+  memoryZones: MemoryZone[];
 }
 
 export class DaemonRuntime {
@@ -150,6 +171,21 @@ export class DaemonRuntime {
   private scheduler: CronScheduler | null = null;
   private skillRecords: SkillRecord[] = [];
   private shuttingDown = false;
+  /** Loaded agent profiles by name (built-in + user overrides). */
+  private profiles = new Map<string, AgentProfile>();
+  /** Agent contexts per profile name, created lazily. */
+  private readonly profileAgents = new Map<string, ProfileAgentContext>();
+  /** Full tool set before profile allowlists/zone gating are applied. */
+  private allTools: Tool[] = [];
+  /** Tool set of the default profile (== this.agent's tools). */
+  private defaultTools: Tool[] = [];
+  /** Bare base prompt (runtime conventions), prefix of every profile prompt. */
+  private basePrompt = "";
+  /** Rendered skill hot-set block, shared by profiles with skills enabled. */
+  private hotSetBlock = "";
+  private coreMemoryRaw: string | undefined;
+  /** Composed system prompt of the default profile (== this.agent's prompt). */
+  private defaultPrompt = "";
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
     this.paths = resolveHarnessPaths();
@@ -382,14 +418,16 @@ export class DaemonRuntime {
   /**
    * Executes an agent-type cron job: creates a fresh session with origin
    * "cron" via the session registry and runs the job body as its first
-   * turn. Returns the new session id. Throws on failure — the scheduler
-   * catches and logs it.
+   * turn. The job's optional `agent` field selects the agent profile for
+   * the session (default: "default"). Returns the new session id.
+   * Throws on failure — the scheduler catches and logs it.
    */
   async runCronAgentJob(job: CronJob): Promise<string> {
     const created = await this.handleIpcRequest({
       type: "create-session",
       origin: "cron",
       title: `cron: ${job.name}`,
+      profile: job.agent,
     });
     if (created.type !== "session-created") {
       throw new Error(
@@ -457,18 +495,38 @@ export class DaemonRuntime {
       case "create-session": {
         const origin: SessionOrigin = req.origin ?? "api";
         const title = req.title ?? `${origin} session`;
-        const model = req.model ?? this.model?.name ?? "unknown";
+        const profileName = req.profile ?? "default";
+        const profile = this.resolveProfile(profileName);
+        if (!profile) {
+          const available = [...this.profiles.keys()].join(", ") || "(none loaded)";
+          return {
+            type: "error",
+            message: `Unknown agent profile "${profileName}". Available profiles: ${available}`,
+          };
+        }
+        // Eagerly resolve the profile's agent context so configuration
+        // errors (e.g. an unresolvable model) surface as a clean error here.
+        let profileCtx: ProfileAgentContext;
         try {
-          const session = await createSession(this.paths, { model, title });
-          const entry = this.createSessionEntry(session, origin, title);
+          profileCtx = this.agentContextFor(profile);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.errorBuffer.push(msg);
+          return { type: "error", message: msg };
+        }
+        const model = req.model ?? profileCtx.model?.name ?? "unknown";
+        try {
+          const session = await createSession(this.paths, { model, title, profile: profile.name });
+          const entry = this.createSessionEntry(session, origin, title, profile.name);
           this.sessions.set(session.id, entry);
           const log = this.logger.child("session");
-          log.info("session created", { id: session.id, origin });
+          log.info("session created", { id: session.id, origin, profile: profile.name });
           return {
             type: "session-created",
             sessionId: session.id,
             origin,
             createdAt: entry.createdAt,
+            profile: profile.name,
           };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -551,6 +609,7 @@ export class DaemonRuntime {
             loaded.session,
             "api",
             loaded.session.title,
+            loaded.session.profile ?? "default",
           );
           entry.session = { ...entry.session, status: "active" };
           entry.messages = loaded.turns.length > 0
@@ -623,6 +682,7 @@ export class DaemonRuntime {
                 loaded.session,
                 "api",
                 loaded.session.title,
+                loaded.session.profile ?? "default",
               );
               entry.session = { ...entry.session, status: "active" };
               entry.messages = loaded.turns.length > 0
@@ -674,7 +734,30 @@ export class DaemonRuntime {
           // A failed turn must not tear the queue: entry.turnQueue always
           // stores turnPromise.catch(() => undefined), so the next queued
           // turn runs even when this one rejected.
-          const agent = this.agent;
+          //
+          // The session's profile determines which agent (system prompt,
+          // model, tool set) runs the turn. A profile that vanished since
+          // the session was created surfaces as a clean error here.
+          let turnCtx: ProfileAgentContext;
+          try {
+            const turnProfile = this.resolveProfile(entry.profile);
+            if (!turnProfile) {
+              const available = [...this.profiles.keys()].join(", ") || "(none loaded)";
+              return {
+                type: "error",
+                message: `Unknown agent profile "${entry.profile}". Available profiles: ${available}`,
+                sessionId,
+              };
+            }
+            turnCtx = this.agentContextFor(turnProfile);
+          } catch (err) {
+            return {
+              type: "error",
+              message: err instanceof Error ? err.message : String(err),
+              sessionId,
+            };
+          }
+          const agent = turnCtx.agent;
           const runQueuedTurn = async (): Promise<IpcResponse> => {
             const turnStartedAt = new Date().toISOString();
             const turnStartedMs = Date.now();
@@ -701,7 +784,9 @@ export class DaemonRuntime {
 
             const result = await agent.run(messages, {
               metricsRecorder: entry.metricsRecorder,
-              memoryBackend: this.memoryService?.getBackend(),
+              memoryBackend: turnCtx.memoryZones.includes("notes")
+                ? this.memoryService?.getBackend()
+                : undefined,
               compaction: {
                 paths: this.paths,
                 sessionId,
@@ -775,7 +860,7 @@ export class DaemonRuntime {
                 startedAt: turnStartedAt,
                 latencyMs: Date.now() - turnStartedMs,
               },
-              model: this.model?.name ?? "unknown",
+              model: turnCtx.model?.name ?? "unknown",
               timestamp: new Date().toISOString(),
               messages: turnSlice,
             };
@@ -931,6 +1016,36 @@ export class DaemonRuntime {
       this.model = resolveModel("minimax", "MiniMax-M2.7");
     }
 
+    // Load agent profiles (built-in + user overrides from $HARNESS_HOME/agents/)
+    const builtinProfilesDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
+    const profileResult = await loadAgentProfiles({
+      profilesDir: this.paths.agentProfiles,
+      builtinDir: builtinProfilesDir,
+      vars: { inboxPath: this.paths.inbox },
+    });
+    this.profiles = new Map(profileResult.profiles.map((p) => [p.name, p]));
+    for (const err of profileResult.errors) {
+      log.warn("agent profile load error", { profile: err.profileName, message: err.message });
+    }
+
+    const defaultProfile = this.profiles.get("default");
+    if (!defaultProfile) {
+      log.warn("default agent profile not found — falling back to prompts/system-prompt.md persona");
+    }
+
+    // A default profile may override the daemon's model.
+    const defaultModelRef = defaultProfile?.frontmatter.model;
+    if (defaultModelRef) {
+      try {
+        this.model = resolveModel(defaultModelRef.provider, defaultModelRef.model);
+      } catch (err) {
+        log.warn("default profile model could not be resolved, keeping daemon model", {
+          model: `${defaultModelRef.provider}/${defaultModelRef.model}`,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // Load skills
     const builtinSkillsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
     const skillResult = await loadSkills({
@@ -964,30 +1079,163 @@ export class DaemonRuntime {
     });
 
     // Load tools (with skills)
-    const tools = loadTools({
+    this.allTools = loadTools({
       memoryBackend: this.memoryService?.getBackend(),
       skills: this.skillRecords,
       skillsDir: this.paths.skills,
     });
+    const defaultZones = defaultProfile?.frontmatter.memory ?? ALL_MEMORY_ZONES;
+    this.defaultTools = this.applyProfileToolPolicy(
+      this.allTools,
+      defaultProfile?.frontmatter.tools,
+      defaultZones,
+    );
 
     // Create agent — compaction options are now passed per run() call,
     // not on the shared agent config, to avoid sessionId race conditions.
     this.agent = createAgent({
-      tools,
+      tools: this.defaultTools,
       model: this.model,
-      inlineThinking: (this.model as ResolvedModel).inlineThinking ?? false,
+      inlineThinking:
+        defaultProfile?.frontmatter.thinking ??
+        (this.model as ResolvedModel).inlineThinking ??
+        false,
+      temperature: defaultProfile?.frontmatter.temperature,
+      maxTokens: defaultProfile?.frontmatter.maxTokens,
     });
 
-    // Load system prompt
-    const coreMemory = await loadCoreMemoryRaw(this.paths.core);
-    const basePrompt = prompt("system-prompt", { inboxPath: this.paths.inbox });
-    const composed = composeSystemPrompt(basePrompt, coreMemory);
-    const fullPrompt = hotSetBlock
-      ? `${composed}\n\n${hotSetBlock}`
-      : composed;
-    this.agent.setSystemPrompt(fullPrompt);
+    // Compose the default profile's system prompt:
+    // bare base prompt + persona (profile body) + core memory + skill hot-set.
+    this.coreMemoryRaw = await loadCoreMemoryRaw(this.paths.core);
+    this.basePrompt = prompt("base-prompt");
+    this.hotSetBlock = hotSetBlock;
+    const defaultPersona =
+      defaultProfile?.body ?? prompt("system-prompt", { inboxPath: this.paths.inbox });
+    this.defaultPrompt = composeProfilePrompt({
+      basePrompt: this.basePrompt,
+      persona: defaultPersona,
+      coreMemoryRaw: this.coreMemoryRaw,
+      hotSetBlock,
+      memoryZones: defaultZones,
+      skillsHotSet: defaultProfile?.frontmatter.skills ?? true,
+    });
+    this.agent.setSystemPrompt(this.defaultPrompt);
 
-    log.info("agent initialized", { model: this.model.name });
+    log.info("agent initialized", {
+      model: this.model.name,
+      profiles: this.profiles.size,
+    });
+  }
+
+  /**
+   * Applies a profile's tool policy to the full tool set: an explicit
+   * `tools` allowlist filters by name (unknown names are logged and
+   * ignored); `search_memory` additionally requires the "notes" memory
+   * zone. Never throws.
+   */
+  private applyProfileToolPolicy(
+    allTools: Tool[],
+    allowlist: string[] | undefined,
+    zones: MemoryZone[],
+  ): Tool[] {
+    let tools = allTools;
+    if (allowlist) {
+      const known = new Set(allTools.map((t) => t.name));
+      const unknown = allowlist.filter((name) => !known.has(name));
+      if (unknown.length > 0) {
+        this.logger.child("agent").warn("profile lists unknown tools — ignored", {
+          tools: unknown.join(", "),
+        });
+      }
+      const allow = new Set(allowlist);
+      tools = tools.filter((t) => allow.has(t.name));
+    }
+    if (!zones.includes("notes")) {
+      tools = tools.filter((t) => t.name !== "search_memory");
+    }
+    return tools;
+  }
+
+  /**
+   * Resolves a profile by name. "default" always resolves — when no
+   * default profile was loaded (e.g. init not run), a synthesized
+   * fallback keeps the daemon usable.
+   */
+  private resolveProfile(name: string): AgentProfile | undefined {
+    const profile = this.profiles.get(name);
+    if (profile) return profile;
+    if (name === "default") {
+      return {
+        name: "default",
+        frontmatter: { name: "default", skills: true },
+        body: "",
+        filePath: "",
+        dir: "",
+        builtin: true,
+      };
+    }
+    return undefined;
+  }
+
+  /**
+   * Returns the agent context for a profile, creating and caching it on
+   * first use. The default profile's context wraps the shared daemon
+   * agent. Throws when the profile's model cannot be resolved or the
+   * daemon is not fully initialized.
+   */
+  private agentContextFor(profile: AgentProfile): ProfileAgentContext {
+    const cached = this.profileAgents.get(profile.name);
+    if (cached) return cached;
+
+    if (profile.name === "default") {
+      if (!this.agent) {
+        throw new Error("Daemon not fully initialized (agent missing)");
+      }
+      const ctx: ProfileAgentContext = {
+        agent: this.agent,
+        model: this.model,
+        tools: this.defaultTools,
+        prompt: this.defaultPrompt,
+        memoryZones: profile.frontmatter.memory ?? ALL_MEMORY_ZONES,
+      };
+      this.profileAgents.set("default", ctx);
+      return ctx;
+    }
+
+    if (!this.model) {
+      throw new Error("Daemon not fully initialized (model missing)");
+    }
+    const fm = profile.frontmatter;
+    const model = fm.model
+      ? resolveModel(fm.model.provider, fm.model.model)
+      : this.model;
+    const zones = fm.memory ?? ALL_MEMORY_ZONES;
+    const tools = this.applyProfileToolPolicy(this.allTools, fm.tools, zones);
+    const promptText = composeProfilePrompt({
+      basePrompt: this.basePrompt,
+      persona: profile.body,
+      coreMemoryRaw: this.coreMemoryRaw,
+      hotSetBlock: this.hotSetBlock,
+      memoryZones: zones,
+      skillsHotSet: fm.skills,
+    });
+    const agent = createAgent({
+      tools,
+      model,
+      inlineThinking: fm.thinking ?? (model as ResolvedModel).inlineThinking ?? false,
+      temperature: fm.temperature,
+      maxTokens: fm.maxTokens,
+    });
+    agent.setSystemPrompt(promptText);
+
+    const ctx: ProfileAgentContext = { agent, model, tools, prompt: promptText, memoryZones: zones };
+    this.profileAgents.set(profile.name, ctx);
+    this.logger.child("agent").info("profile agent created", {
+      profile: profile.name,
+      model: model.name,
+      tools: tools.length,
+    });
+    return ctx;
   }
 
   /**
@@ -1047,6 +1295,7 @@ export class DaemonRuntime {
     session: Session,
     origin: SessionOrigin,
     title: string,
+    profile: string = "default",
   ): SessionEntry {
     const now = new Date().toISOString();
     return {
@@ -1058,6 +1307,7 @@ export class DaemonRuntime {
       title,
       createdAt: session.createdAt ?? now,
       lastActiveAt: session.lastActivityAt ?? now,
+      profile,
       mailbox: createMailbox(),
       turnQueue: Promise.resolve(),
     };
@@ -1230,7 +1480,7 @@ export class DaemonRuntime {
           sessionId,
         };
       }
-      const entry = this.createSessionEntry(loaded.session, "api", loaded.session.title);
+      const entry = this.createSessionEntry(loaded.session, "api", loaded.session.title, loaded.session.profile ?? "default");
       entry.session = { ...entry.session, status: "active" };
       entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
       this.sessions.set(targetId, entry);

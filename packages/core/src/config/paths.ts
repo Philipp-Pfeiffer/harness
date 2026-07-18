@@ -21,6 +21,8 @@ export interface HarnessPaths {
   sources: string;
   /** $home/skills/ */
   skills: string;
+  /** $home/agents/ — Agent-Profile (Markdown mit Frontmatter) */
+  agentProfiles: string;
   /** $state/sessions/ */
   sessions: string;
   /** $state/metrics/ */
@@ -67,6 +69,7 @@ export function resolveHarnessPaths(opts?: { home?: string }): HarnessPaths {
     inbox: path.join(home, "memory", "_inbox.md"),
     sources: path.join(home, "sources"),
     skills: path.join(home, "skills"),
+    agentProfiles: path.join(home, "agents"),
     sessions: path.join(state, "sessions"),
     metrics: path.join(state, "metrics"),
     index: path.join(state, "index"),
@@ -85,6 +88,7 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.memory, { recursive: true });
   await mkdir(paths.sources, { recursive: true });
   await mkdir(paths.skills, { recursive: true });
+  await mkdir(paths.agentProfiles, { recursive: true });
   await mkdir(paths.sessions, { recursive: true });
   await mkdir(paths.metrics, { recursive: true });
   await mkdir(paths.index, { recursive: true });

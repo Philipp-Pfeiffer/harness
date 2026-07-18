@@ -133,6 +133,22 @@ export {
 export { createLoadSkillTool } from "./tools/loadSkill.js";
 export { createFindSkillTool, type FindSkillToolOptions } from "./tools/findSkill.js";
 
+// Agent Profile System
+export {
+  type MemoryZone,
+  ALL_MEMORY_ZONES,
+  type AgentProfileModelRef,
+  type AgentProfileFrontmatter,
+  type AgentProfile,
+  type AgentProfileError,
+  type AgentProfileLoadResult,
+  type LoadAgentProfilesOptions,
+  parseAgentProfileFile,
+  substituteVars,
+  AgentProfileFrontmatterError,
+  loadAgentProfiles,
+} from "./profiles/index.js";
+
 // Note on toolChoice (pi-ai 0.70.2):
 // The typed `StreamOptions` interface does not expose a `toolChoice` field.
 // However, `ProviderStreamOptions` is defined as `StreamOptions & Record<string, unknown>`,

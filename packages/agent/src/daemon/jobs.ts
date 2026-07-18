@@ -23,6 +23,9 @@ import { CronPattern } from "croner";
  * - enabled  (optional, default true) "true" | "false"
  * - type     (required) "agent" | "script"
  * - jitter   (optional) max random start delay per run, e.g. "30m", "2h"
+ * - agent    (optional, type=agent only) agent profile name — the job's
+ *            session runs with that profile's prompt, model and tools.
+ *            Default: "default".
  *
  * Body: prompt text for type=agent, registry function name for type=script.
  */
@@ -36,6 +39,8 @@ export interface CronJob {
   type: CronJobType;
   /** Max random start delay per run, in milliseconds. 0 = no jitter. */
   jitterMs: number;
+  /** Agent profile name for type=agent jobs. Absent = "default". */
+  agent?: string;
   /** Prompt text (agent) or script registry function name (script). */
   body: string;
   /** Path of the job file this job was loaded from. */
@@ -52,6 +57,8 @@ export class CronJobParseError extends Error {
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 
 const DURATION_RE = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/i;
+
+const PROFILE_NAME_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 const DURATION_UNIT_MS: Record<string, number> = {
   ms: 1,
@@ -160,6 +167,14 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
 
   const enabled = parseEnabled(filePath, fields.get("enabled"));
 
+  const agent = fields.get("agent");
+  if (agent !== undefined && !PROFILE_NAME_RE.test(agent)) {
+    throw new CronJobParseError(
+      filePath,
+      `invalid agent "${agent}" — must be a profile name (lowercase-hyphenated, e.g. "distillation")`,
+    );
+  }
+
   const jitterRaw = fields.get("jitter");
   let jitterMs = 0;
   if (jitterRaw !== undefined && jitterRaw !== "") {
@@ -182,7 +197,7 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
     );
   }
 
-  return { name, schedule, enabled, type, jitterMs, body, filePath };
+  return { name, schedule, enabled, type, jitterMs, agent, body, filePath };
 }
 
 export interface CronJobsLoadResult {
