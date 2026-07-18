@@ -29,7 +29,21 @@ function resolveShell(): string {
   throw new Error(`No suitable shell found (tried: ${candidates.join(", ")})`);
 }
 
-const SHELL_PATH = resolveShell();
+let cachedShellPath: string | undefined;
+
+function getShellPath(): { ok: true; path: string } | { ok: false; error: string } {
+  if (cachedShellPath !== undefined) {
+    return { ok: true, path: cachedShellPath };
+  }
+  try {
+    const path = resolveShell();
+    cachedShellPath = path;
+    return { ok: true, path };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `Failed to resolve shell: ${message}` };
+  }
+}
 
 function expandTilde(pathStr: string): string {
   if (pathStr.startsWith("~/") || pathStr === "~") {
@@ -86,15 +100,21 @@ export async function executeExecPty(args: {
     return { isError: true, content: noFlyCheck.message };
   }
 
+  const shellResult = getShellPath();
+  if (!shellResult.ok) {
+    return { isError: true, content: shellResult.error };
+  }
+  const shellPath = shellResult.path;
+
   const mergedEnv = args.env ? { ...process.env, ...args.env } : process.env;
   const finalCommand = args.elevated ? `sudo -n ${args.command}` : args.command;
   const timeoutMs = args.timeout ?? 30_000;
 
-  if (SHELL_PATH === "/bin/sh") {
+  if (shellPath === "/bin/sh") {
     console.warn("[execPty] Warning: falling back to /bin/sh. Bash-specific syntax may fail.");
   }
 
-  const ptyProc = pty.spawn(SHELL_PATH, ["-c", finalCommand], {
+  const ptyProc = pty.spawn(shellPath, ["-c", finalCommand], {
     name: "xterm-256color",
     cols: 80,
     rows: 24,
