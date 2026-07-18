@@ -263,6 +263,9 @@ export interface AgentConfig {
    * parses `text_delta` chunks for `simd...` segments and routes them
    * as `thinking` events. */
   inlineThinking?: boolean;
+  /** Optional sampling parameters forwarded to the provider on every call. */
+  temperature?: number;
+  maxTokens?: number;
 }
 
 /**
@@ -286,7 +289,7 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, maxIterations = 10, model, logger, inlineThinking = false } = config;
+  const { tools, maxIterations = 10, model, logger, inlineThinking = false, temperature, maxTokens } = config;
   // Caller must set a system prompt via setSystemPrompt(). Empty default
   // is intentional — the prompt template requires `inboxPath`; calling
   // prompt("system-prompt") without vars triggers a missing-variable warning.
@@ -392,7 +395,10 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         const apiKey = getApiKey(resolvedModel);
-        const eventStream = stream(resolvedModel, context, { signal, apiKey });
+        const streamOptions: { signal?: AbortSignal; apiKey?: string; temperature?: number; maxTokens?: number } = { signal, apiKey };
+        if (temperature !== undefined) streamOptions.temperature = temperature;
+        if (maxTokens !== undefined) streamOptions.maxTokens = maxTokens;
+        const eventStream = stream(resolvedModel, context, streamOptions);
         let response: AssistantMessage;
         let partialText = "";
         const thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;

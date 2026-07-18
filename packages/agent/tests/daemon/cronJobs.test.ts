@@ -154,6 +154,34 @@ describe("parseCronJobFile", () => {
       parseCronJobFile("/jobs/empty.md", jobFile("name: e\nschedule: 0 0 * * *\ntype: agent", "")),
     ).toThrow(/body/);
   });
+
+  it("parses the optional agent profile field", () => {
+    const job = parseCronJobFile(
+      "/jobs/profiled.md",
+      jobFile(
+        "name: p\nschedule: 0 0 * * *\ntype: agent\nagent: distillation",
+        "prompt",
+      ),
+    );
+    expect(job.agent).toBe("distillation");
+  });
+
+  it("defaults agent to undefined when absent", () => {
+    const job = parseCronJobFile(
+      "/jobs/plain-agent.md",
+      jobFile("name: p\nschedule: 0 0 * * *\ntype: agent", "prompt"),
+    );
+    expect(job.agent).toBeUndefined();
+  });
+
+  it("rejects an invalid agent profile name", () => {
+    expect(() =>
+      parseCronJobFile(
+        "/jobs/bad-agent.md",
+        jobFile("name: p\nschedule: 0 0 * * *\ntype: agent\nagent: Not A Profile", "prompt"),
+      ),
+    ).toThrow(/invalid agent/);
+  });
 });
 
 describe("loadCronJobs", () => {

@@ -110,7 +110,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 | Kategorie | Pfad | Inhalt | Git? |
 |-----------|------|--------|------|
-| **HOME** (durable) | `$HARNESS_HOME` (Default `~/harness`) | `core.md`, `AGENTS.md`, `config.json`, `memory/`, `sources/`, `skills/` | Eigenes Git |
+| **HOME** (durable) | `$HARNESS_HOME` (Default `~/harness`) | `core.md`, `AGENTS.md`, `config.json`, `memory/`, `sources/`, `skills/`, `agents/` | Eigenes Git |
 | **STATE** (ephemeral) | `$HARNESS_STATE` (Default `~/.harness`) | `sessions/`, `metrics/`, `index/`, `logs/`, `jobs/`, `daemon.pid`, `daemon.sock` | Nein |
 | **CODE** | Repo | `src/`, `prompts/`, `tests/`, `docs/` | Ja |
 
@@ -296,7 +296,7 @@ Adapters register via `DaemonRuntime.registerGateway()`. The WhatsApp/Baileys ad
 
 **Files:** `src/daemon/` (jobs.ts, scheduler.ts, scripts.ts)
 
-Job files live in `$HARNESS_STATE/jobs/*.md` — Markdown with frontmatter (`name`, `schedule`, `enabled`, `type: agent|script`, optional `jitter` like `"2h"`); the body is the prompt (`agent`) or the registry function name (`script`).
+Job files live in `$HARNESS_STATE/jobs/*.md` — Markdown with frontmatter (`name`, `schedule`, `enabled`, `type: agent|script`, optional `jitter` like `"2h"`, optional `agent` profile name); the body is the prompt (`agent`) or the registry function name (`script`).
 
 ```
 ---
@@ -310,9 +310,35 @@ metrics-rotation
 ```
 
 - `CronScheduler` (scheduler.ts) uses **croner**: loads jobs on daemon start, reloads on directory changes (`fs.watch`, debounced), draws a random per-run delay in `[0, jitterMs]`.
-- `type: agent` runs `DaemonRuntime.runCronAgentJob()`: new session with `origin: "cron"`, body as first turn (via the internal IPC path — same turn queue, transcript and metrics as any session).
+- `type: agent` runs `DaemonRuntime.runCronAgentJob()`: new session with `origin: "cron"`, body as first turn (via the internal IPC path — same turn queue, transcript and metrics as any session). The optional `agent` frontmatter field selects the agent profile for the session (default: `default`).
 - `type: script` looks up the body in the internal registry (scripts.ts). Built-in example: `metrics-rotation` (deletes metric files older than `logRetentionDays`).
 - Robustness: job errors are logged, never thrown; no catch-up for missed runs; overlapping runs of one job are blocked (croner `protect`).
+
+### Agent-Profile
+
+**Files:** `packages/core/src/profiles/` (types.ts, frontmatter.ts, loader.ts), `packages/agent/agents/<name>/agent.md` (Built-in), `$HARNESS_HOME/agents/<name>/agent.md` (User)
+
+Profile bestimmen System-Prompt, Modell/Thinking und Tool-Allowlist einer Session. User-Profile überschreiben Built-ins bei Namensgleichheit (wie bei Skills).
+
+```
+---
+name: distillation
+model: minimax/MiniMax-M2.7
+thinking: true
+tools: readFile, exec
+memory: core, notes
+skills: false
+temperature: 0.7
+maxTokens: 4096
+---
+Persona-Prompt …
+```
+
+- Frontmatter (alle außer `name` optional): `model` (`provider/model-id`), `thinking`, `tools` (Allowlist; absent = alle), `memory` (Zonen `core`|`notes`; absent = alle; `search_memory` + Ambient Hints brauchen `notes`), `skills` (Hot-Set-Block im Prompt, Default true), `temperature`/`maxTokens`.
+- Body = Persona. Finaler Prompt: `base-prompt.md` (bare Runtime-Konventionen) + Persona + `<core_memory>` (Zone `core`) + Skill-Hot-Set (`skills: true`).
+- Loader (`loadAgentProfiles`): validiert, sammelt Fehler, wirft nie. Built-in-Profile: `default` (bisheriger Main-Agent-Prompt) und `distillation` (Stub).
+- IPC `create-session` nimmt optional `profile: <name>`; unbekanntes Profil → sauberer `error`-Response. Das Profil wird im Session-Index persistiert und beim Resume wiederhergestellt.
+- Pro Profil wird lazily ein eigener Agent (Prompt, Modell, Tool-Subset) erzeugt und gecacht; Sessions ohne Profilangabe laufen exakt wie bisher über den Shared-Agent des `default`-Profils.
 
 ### Metrics
 
