@@ -43,3 +43,5 @@ workspace/
 # Runtime artifacts (now live in $HARNESS_HOME / $HARNESS_STATE, outside the repo)
 memory/
 .qmd/
+tests/fixtures/edit_test/
+tests/fixtures/write_test/
