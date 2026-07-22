@@ -398,6 +398,7 @@ export function createAgent(config: AgentConfig): Agent {
         const streamOptions: { signal?: AbortSignal; apiKey?: string; temperature?: number; maxTokens?: number } = { signal, apiKey };
         if (temperature !== undefined) streamOptions.temperature = temperature;
         if (maxTokens !== undefined) streamOptions.maxTokens = maxTokens;
+        const providerStartMs = Date.now();
         const eventStream = stream(resolvedModel, context, streamOptions);
         let response: AssistantMessage;
         let partialText = "";
@@ -485,6 +486,17 @@ export function createAgent(config: AgentConfig): Agent {
         onEvent?.({ type: "usage", inputTokens: totalInput, outputTokens: totalOutput, totalTokens, callInputTokens: response.usage.input, callOutputTokens: response.usage.output, callTotalTokens: response.usage.totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite, callCacheRead: response.usage.cacheRead, callCacheWrite: response.usage.cacheWrite });
 
         if (response.stopReason === "error") {
+          metricsRecorder?.recordTurn({
+            latencyMs: Date.now() - providerStartMs,
+            toolCallCount: 0,
+            status: "error",
+            model: resolvedModel.name,
+            inputTokens: response.usage.input,
+            outputTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+            cacheRead: response.usage.cacheRead,
+            cacheWrite: response.usage.cacheWrite,
+          });
           throw new Error(response.errorMessage ?? "Unbekannter Fehler");
         }
 
@@ -502,6 +514,17 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
+            metricsRecorder?.recordTurn({
+              latencyMs: Date.now() - providerStartMs,
+              toolCallCount: 0,
+              status: "aborted",
+              model: resolvedModel.name,
+              inputTokens: response.usage.input,
+              outputTokens: response.usage.output,
+              totalTokens: response.usage.totalTokens,
+              cacheRead: response.usage.cacheRead,
+              cacheWrite: response.usage.cacheWrite,
+            });
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
@@ -633,9 +656,31 @@ export function createAgent(config: AgentConfig): Agent {
             stripDanglingToolCalls(context.messages, executedIds);
             discardMailbox(mailbox);
             pushAbortAnnotation(context.messages, options.abortCommand);
+            metricsRecorder?.recordTurn({
+              latencyMs: Date.now() - providerStartMs,
+              toolCallCount: allResults.length,
+              status: "aborted",
+              model: resolvedModel.name,
+              inputTokens: response.usage.input,
+              outputTokens: response.usage.output,
+              totalTokens: response.usage.totalTokens,
+              cacheRead: response.usage.cacheRead,
+              cacheWrite: response.usage.cacheWrite,
+            });
             return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
+          metricsRecorder?.recordTurn({
+            latencyMs: Date.now() - providerStartMs,
+            toolCallCount: allResults.length,
+            status: "ok",
+            model: resolvedModel.name,
+            inputTokens: response.usage.input,
+            outputTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+            cacheRead: response.usage.cacheRead,
+            cacheWrite: response.usage.cacheWrite,
+          });
           continue;
         }
 
@@ -647,10 +692,32 @@ export function createAgent(config: AgentConfig): Agent {
           const textParts = response.content
             .filter((c): c is TextContent => c.type === "text")
             .map((c) => c.text);
+          metricsRecorder?.recordTurn({
+            latencyMs: Date.now() - providerStartMs,
+            toolCallCount: 0,
+            status: "ok",
+            model: resolvedModel.name,
+            inputTokens: response.usage.input,
+            outputTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+            cacheRead: response.usage.cacheRead,
+            cacheWrite: response.usage.cacheWrite,
+          });
           return { aborted: false, turns: i + 1, finalMessage: textParts.join(""), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         if (response.stopReason === "aborted") {
+          metricsRecorder?.recordTurn({
+            latencyMs: Date.now() - providerStartMs,
+            toolCallCount: 0,
+            status: "aborted",
+            model: resolvedModel.name,
+            inputTokens: response.usage.input,
+            outputTokens: response.usage.output,
+            totalTokens: response.usage.totalTokens,
+            cacheRead: response.usage.cacheRead,
+            cacheWrite: response.usage.cacheWrite,
+          });
           return {
             aborted: false,
             turns: i + 1,
@@ -663,6 +730,17 @@ export function createAgent(config: AgentConfig): Agent {
       }
 
       discardMailbox(mailbox);
+      metricsRecorder?.recordTurn({
+        latencyMs: 0,
+        toolCallCount: 0,
+        status: "aborted",
+        model: resolvedModel.name,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
       return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
     },
   };
