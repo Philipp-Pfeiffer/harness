@@ -95,8 +95,17 @@ export type Logger = (msg: string, level?: "warn" | "debug") => void;
  * Options passed to a single `run()` invocation.
  */
 export interface RunOptions {
-  /** Optional AbortSignal for cooperative cancellation. */
+  /** Optional AbortSignal for cooperative cancellation (user-initiated). */
   signal?: AbortSignal;
+  /**
+   * Optional internal AbortSignal for gateway-initiated restart.
+   * When aborted, the agent returns `{ aborted: true, reason: "internal_restart" }`
+   * WITHOUT calling pushAbortAnnotation or discardMailbox.
+   * Partial output is discarded (same as retry: nothing lands in context.messages).
+   * Internal abort is NOT a user abort — classifyError returns "internal_restart",
+   * which is never retryable.
+   */
+  internalAbortSignal?: AbortSignal;
   /** Optional callback for live stream and lifecycle events. */
   onEvent?: (event: AgentEvent) => void;
   /** Optional mailbox for runtime steering messages. */
@@ -138,7 +147,7 @@ export interface TokenUsage {
 
 export type RunResult =
   | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted"; message: string } }
-  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns"; usage: TokenUsage; toolCallCount: number };
+  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns" | "internal_restart"; usage: TokenUsage; toolCallCount: number };
 
 /**
  * Events emitted during a streaming run.
@@ -321,7 +330,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction } = options;
       let effectiveSystemPrompt = systemPrompt;
 
       // Session scope for per-session tool state (read-before-edit guard).
@@ -373,6 +382,12 @@ export function createAgent(config: AgentConfig): Agent {
       let compactionCooldownUntil = 0;
 
       for (let i = 0; i < maxIterations; i++) {
+        // Check 0: Internal abort (gateway restart) — BEFORE user signal check.
+        // Must not call pushAbortAnnotation or discardMailbox.
+        if (internalAbortSignal?.aborted) {
+          return { aborted: true, completedTurns: i, reason: "internal_restart", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+        }
+
         // Check 1: Before LLM call (Turn-Start)
         if (signal?.aborted) {
           discardMailbox(mailbox);
@@ -424,7 +439,7 @@ export function createAgent(config: AgentConfig): Agent {
           partialText = "";
           thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
 
-          const timeoutController = new TimeoutController(effectiveRetryPolicy.timeoutMs, signal);
+          const timeoutController = new TimeoutController(effectiveRetryPolicy.timeoutMs, signal, internalAbortSignal);
 
           try {
             const eventStream = stream(resolvedModel, context, { ...streamOptions, signal: timeoutController.signal });
@@ -481,6 +496,12 @@ export function createAgent(config: AgentConfig): Agent {
           } catch (err) {
             timeoutController.abort(); // cleanup
 
+            // INTERNAL ABORT (gateway restart) — NOT a user abort.
+            // Discard partial output, do NOT call pushAbortAnnotation or discardMailbox.
+            if (internalAbortSignal?.aborted) {
+              return { aborted: true, completedTurns: i, reason: "internal_restart", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+            }
+
             // USER ABORT — NEVER retry. Handle exactly as before.
             if (signal?.aborted || (err instanceof Error && err.name === "AbortError" && signal?.aborted)) {
               if (partialText.length > 0) {
@@ -501,7 +522,7 @@ export function createAgent(config: AgentConfig): Agent {
             }
 
             // Classify the error
-            const errorClass = classifyError(err, signal);
+            const errorClass = classifyError(err, signal, internalAbortSignal);
 
             // Check if retryable
             if (!effectiveRetryPolicy.retryableClasses.includes(errorClass)) {
@@ -589,6 +610,13 @@ export function createAgent(config: AgentConfig): Agent {
           // Check 2: Before any tool execution — if already aborted, strip
           // dangling tool calls from the assistant message so we don't leave
           // incomplete tool calls in history. Text content is preserved.
+
+          // Internal abort (gateway restart) — no pushAbortAnnotation, no discardMailbox.
+          if (internalAbortSignal?.aborted) {
+            stripDanglingToolCalls(context.messages, new Set());
+            return { aborted: true, completedTurns: i, reason: "internal_restart", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+          }
+
           if (signal?.aborted) {
             stripDanglingToolCalls(context.messages, new Set());
             discardMailbox(mailbox);
@@ -732,6 +760,14 @@ export function createAgent(config: AgentConfig): Agent {
           drainMailbox(mailbox, context.messages);
 
           // Check 3: Between iterations (after tool results, before next turn)
+
+          // Internal abort (gateway restart) — no pushAbortAnnotation, no discardMailbox.
+          if (internalAbortSignal?.aborted) {
+            const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
+            stripDanglingToolCalls(context.messages, executedIds);
+            return { aborted: true, completedTurns: i, reason: "internal_restart", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+          }
+
           if (signal?.aborted) {
             const executedIds = new Set(allResults.map((r) => r.message.toolCallId));
             stripDanglingToolCalls(context.messages, executedIds);

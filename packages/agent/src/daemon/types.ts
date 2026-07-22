@@ -31,6 +31,108 @@ export interface InboundMessage {
   text: string;
   /** ISO timestamp of receipt. */
   timestamp: string;
+  /** Optional media attachments associated with the message. */
+  media?: InboundMedia[];
+  /** Optional image content blocks for vision-capable models. */
+  imageBlocks?: InboundImageBlock[];
+  /** Optional annotations (file references, transcription results, etc.). */
+  annotations?: string[];
+}
+
+/** A media attachment downloaded from the transport. */
+export interface InboundMedia {
+  /** Local file path where the media was saved. */
+  filePath: string;
+  /** MIME type of the media. */
+  mimeType: string;
+  /** File size in bytes. */
+  size: number;
+  /** Media type category. */
+  type: "image" | "audio" | "video" | "document" | "sticker" | "voice";
+}
+
+/** An image content block for direct injection into the agent turn. */
+export interface InboundImageBlock {
+  /** MIME type of the image. */
+  mimeType: string;
+  /** Raw image data. */
+  data: Buffer;
+}
+
+/* ─── Channel Plugin Interface ─── */
+
+/**
+ * Higher-level gateway interface that includes outbound message rendering.
+ * Extends GatewayAdapter with channel-specific message sending.
+ *
+ * The daemon's plugin registry holds ChannelPlugin instances; WhatsApp
+ * is the first implementation.
+ */
+export interface ChannelPlugin extends GatewayAdapter {
+  /** Channel identifier for output-pipeline capability selection. */
+  readonly channel: string;
+  /** Send one or more rendered messages to a target (phone number, chat id). */
+  sendMessage(target: string, payload: { text: string; attachments?: InboundMedia[] }): Promise<void>;
+}
+
+/**
+ * Context provided to a ChannelPlugin at start time.
+ * Gives the plugin access to daemon-level callbacks and configuration.
+ */
+export interface ChannelPluginContext {
+  /** Logger function for structured logging. */
+  log: (msg: string, level?: "info" | "warn" | "error") => void;
+  /** Paths for file I/O (media storage, session persistence, etc.). */
+  paths: import("@harness/core").HarnessPaths;
+  /** Whether the plugin should run in test mode (no agent turns, echo only). */
+  testMode: boolean;
+  /**
+   * Callback for posting an inbound event into the daemon's routing layer.
+   * The daemon resolves session, runs debounce/abort logic, and dispatches
+   * to the agent loop.
+   */
+  onInboundEvent: (event: ChannelInboundEvent) => void;
+  /** Register an outbound handler — called when the daemon has a response to send. */
+  onOutbound: (handler: (target: string, messages: import("../output/index.js").RenderedMessage[]) => Promise<void>) => void;
+}
+
+/**
+ * Structured inbound event from a channel plugin.
+ * The daemon's routing layer processes this to determine session routing,
+ * debounce, abort-and-restart, and agent turn submission.
+ */
+export interface ChannelInboundEvent {
+  /** Channel plugin id (e.g. "whatsapp"). */
+  channel: string;
+  /** Source identifier (phone number, chat id). */
+  source: string;
+  /** Text content for the agent turn. */
+  text: string;
+  /** ISO timestamp of receipt. */
+  timestamp: string;
+  /** Media attachments. */
+  media?: InboundMedia[];
+  /** Image content blocks for vision. */
+  imageBlocks?: InboundImageBlock[];
+  /** Annotations to append to the turn text. */
+  annotations?: string[];
+  /** Whether this event is a voice message transcription. */
+  isVoiceTranscript?: boolean;
+}
+
+/* ─── Session Scope ─── */
+
+/**
+ * Session scope concept: multiple channels can route to the same session.
+ * MVP: one persistent session per chat (source identifier).
+ */
+export interface SessionScope {
+  /** Channel that owns this scope. */
+  channel: string;
+  /** Source identifier within the channel. */
+  source: string;
+  /** Resolved session ID (persisted across daemon restarts). */
+  sessionId: string;
 }
 
 /* ─── Session Origin ─── */
@@ -164,6 +266,16 @@ export interface DaemonConfig {
   logRetentionDays: number;
   /** Heartbeat interval in seconds (0 = disabled). */
   heartbeatIntervalSec: number;
+  /** WhatsApp gateway configuration. */
+  whatsapp?: WhatsAppConfig;
+}
+
+/** WhatsApp gateway configuration. */
+export interface WhatsAppConfig {
+  /** Test mode: no agent turns, echo only. */
+  testMode: boolean;
+  /** Phone number for pairing (JID format: number@s.whatsapp.net). */
+  phoneNumber: string;
 }
 
 export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {

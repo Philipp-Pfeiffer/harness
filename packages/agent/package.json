@@ -29,6 +29,7 @@
     "@sinclair/typebox": "^0.34.49",
     "@tobilu/qmd": "^2.5.3",
     "@types/turndown": "^5.0.6",
+    "baileys": "7.0.0-rc13",
     "croner": "^10.0.1",
     "dotenv": "^17.4.2",
     "ink": "^6.0.0",

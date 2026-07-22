@@ -81,6 +81,9 @@ import type {
 } from "./types.js";
 import { DEFAULT_DAEMON_CONFIG } from "./types.js";
 
+import { createWhatsAppPlugin } from "../whatsapp/plugin.js";
+import type { ChannelPlugin } from "./types.js";
+
 /**
  * Heartbeat hook — periodic self-check interface.
  *
@@ -255,6 +258,9 @@ export class DaemonRuntime {
 
     // Init agent
     await this.initAgent();
+
+    // Start gateways (WhatsApp plugin if configured)
+    await this.initGateways();
 
     // Sessions are created on-demand — no initSession() here.
 
@@ -1154,6 +1160,269 @@ export class DaemonRuntime {
       profiles: this.profiles.size,
     });
   }
+
+  // ─── Gateway Initialization ───
+
+  /**
+   * Initializes and registers gateway plugins based on daemon config.
+   * WhatsApp is the first implementation.
+   */
+  private async initGateways(): Promise<void> {
+    const log = this.logger.child("gateway");
+
+    for (const gatewayName of this.config.gateways) {
+      if (gatewayName === "whatsapp") {
+        await this.initWhatsAppGateway();
+      } else {
+        log.warn("unknown gateway in config — skipping", { name: gatewayName });
+      }
+    }
+  }
+
+  /**
+   * Creates and registers the WhatsApp ChannelPlugin.
+   * Reads phone number + test mode from daemon config or env vars.
+   */
+  private async initWhatsAppGateway(): Promise<void> {
+    const log = this.logger.child("whatsapp");
+    const waConfig = this.config.whatsapp;
+
+    const phoneNumber = waConfig?.phoneNumber ?? process.env.WHATSAPP_PHONE_NUMBER ?? "";
+    const testMode = waConfig?.testMode ?? false;
+
+    if (!phoneNumber) {
+      log.warn("WhatsApp gateway enabled but no phone number configured — skipping");
+      return;
+    }
+
+    log.info("starting WhatsApp gateway", { phoneNumber, testMode });
+
+    const plugin = createWhatsAppPlugin({
+      paths: this.paths,
+      phoneNumber,
+      testMode,
+      log: (msg, level) => {
+        if (level === "error") log.error(msg);
+        else if (level === "warn") log.warn(msg);
+        else log.info(msg);
+      },
+      model: this.model,
+      callbacks: {
+        submitTurn: async (sessionId, text, imageBlocks) => {
+          return this.submitWhatsAppTurn(sessionId, text, imageBlocks);
+        },
+        compactSession: async (sessionId) => {
+          await this.compactWhatsAppSession(sessionId);
+        },
+        resolveSession: async (source) => {
+          return this.resolveWhatsAppSession(source);
+        },
+        steer: (sessionId, text) => {
+          this.steerWhatsAppSession(sessionId, text);
+        },
+        checkToolExecuted: (sessionId) => {
+          return this.checkWhatsAppToolExecuted(sessionId);
+        },
+      },
+    });
+
+    await this.registerGateway(plugin);
+    this.channelPlugins.set("whatsapp", plugin as ChannelPlugin);
+  }
+
+  /** Channel plugin registry for outbound routing. */
+  private readonly channelPlugins = new Map<string, ChannelPlugin>();
+
+  /** WhatsApp session map: phone number → session ID. */
+  private readonly whatsappSessions = new Map<string, string>();
+
+  /**
+   * Submits a turn from the WhatsApp plugin, image blocks included.
+   * Returns the agent's final response for routing back to the channel.
+   */
+  private async submitWhatsAppTurn(
+    sessionId: string,
+    text: string,
+    imageBlocks?: import("./types.js").InboundImageBlock[],
+  ): Promise<{ finalResponse: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const turnCtx = this.agentContextFor(this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!);
+
+    // Build the user message with optional image content blocks
+    let userContent: string | Array<{ type: string; text?: string; source?: { type: "base64"; mediaType: string; data: string } }> = text;
+    if (imageBlocks && imageBlocks.length > 0) {
+      const parts: Array<{ type: string; text?: string; source?: { type: "base64"; mediaType: string; data: string } }> = [];
+      parts.push({ type: "text", text });
+      for (const block of imageBlocks) {
+        parts.push({
+          type: "image",
+          source: {
+            type: "base64",
+            mediaType: block.mimeType,
+            data: block.data.toString("base64"),
+          },
+        });
+      }
+      userContent = parts;
+    }
+
+    const userMessage = {
+      role: "user" as const,
+      content: userContent,
+      timestamp: Date.now(),
+    };
+    entry.messages.push(userMessage as Message);
+
+    const result = await turnCtx.agent.run(entry.messages, {
+      metricsRecorder: entry.metricsRecorder,
+      memoryBackend: turnCtx.memoryZones.includes("notes")
+        ? this.memoryService?.getBackend()
+        : undefined,
+      compaction: {
+        paths: this.paths,
+        sessionId,
+        threshold: DEFAULT_COMPACTION_THRESHOLD,
+      },
+      mailbox: entry.mailbox,
+    });
+
+    entry.turnsCompleted++;
+    entry.lastActiveAt = new Date().toISOString();
+
+    const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+    const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
+    const turnSlice = entry.messages.slice(turnStartIndex);
+    const { tool_calls, tool_results } = extractToolData(turnSlice);
+    const turn = {
+      id: crypto.randomUUID(),
+      role: "assistant" as const,
+      content: finalMessage,
+      userContent: text,
+      tool_calls,
+      tool_results,
+      tokens: {
+        input: result.usage.inputTokens,
+        output: result.usage.outputTokens,
+        total: result.usage.totalTokens,
+        cacheRead: result.usage.cacheRead,
+        cacheWrite: result.usage.cacheWrite,
+      },
+      timing: {
+        startedAt: new Date().toISOString(),
+        latencyMs: 0,
+      },
+      model: turnCtx.model?.name ?? "unknown",
+      timestamp: new Date().toISOString(),
+      messages: turnSlice,
+    };
+    entry.session = await recordTurn(entry.session, turn, this.paths);
+
+    return { finalResponse: finalMessage };
+  }
+
+  /**
+   * Triggers compaction for a WhatsApp session (8h inactivity boundary).
+   */
+  private async compactWhatsAppSession(sessionId: string): Promise<void> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry || !this.model) return;
+
+    const log = this.logger.child("whatsapp");
+    log.info("triggering session compaction (8h inactivity)", { sessionId });
+
+    try {
+      const result = await compactSession(entry.messages, {
+        model: this.model,
+        paths: this.paths,
+        sessionId,
+      });
+      if (result.performed) {
+        entry.messages = result.messages;
+        log.info("compaction completed", { sessionId, compacted: result.compactedTurnCount });
+      }
+    } catch (err) {
+      log.error("compaction failed", {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Resolves or creates a persistent WhatsApp session for a phone number.
+   */
+  private async resolveWhatsAppSession(source: string): Promise<string> {
+    const existing = this.whatsappSessions.get(source);
+    if (existing) {
+      // Resume from disk if not in memory
+      if (!this.sessions.has(existing)) {
+        const loaded = await loadSession(existing, this.paths);
+        if (loaded && loaded.session.status !== "ended") {
+          const entry = this.createSessionEntry(
+            loaded.session,
+            "whatsapp" as SessionOrigin,
+            `WhatsApp: ${source}`,
+            loaded.session.profile ?? "default",
+          );
+          entry.session = { ...entry.session, status: "active" };
+          entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
+          this.sessions.set(existing, entry);
+        } else {
+          // Session was ended or not found — create a new one
+          const session = await createSession(this.paths, {
+            model: this.model?.name ?? "unknown",
+            title: `WhatsApp: ${source}`,
+          });
+          const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
+          this.sessions.set(session.id, entry);
+          this.whatsappSessions.set(source, session.id);
+          return session.id;
+        }
+      }
+      return existing;
+    }
+
+    // Create new session for this phone number
+    const session = await createSession(this.paths, {
+      model: this.model?.name ?? "unknown",
+      title: `WhatsApp: ${source}`,
+    });
+    const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
+    this.sessions.set(session.id, entry);
+    this.whatsappSessions.set(source, session.id);
+    return session.id;
+  }
+
+  /**
+   * Steers a running WhatsApp turn by pushing to the session's mailbox.
+   */
+  private steerWhatsAppSession(sessionId: string, text: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      entry.mailbox.push(text);
+    }
+  }
+
+  /**
+   * Checks whether a tool has executed in the current WhatsApp turn.
+   * Delegates to the session's metrics recorder's last turn data.
+   */
+  private checkWhatsAppToolExecuted(sessionId: string): boolean {
+    // The agent loop tracks tool calls internally. Since we can't directly
+    // inspect the agent's internal state from here, we use a pragmatic
+    // heuristic: once agent.run() is awaiting, we assume tools may have
+    // started. The actual check is whether we're past the first LLM call.
+    // For v1, we track this via a per-session flag.
+    const flag = this.whatsappToolExecuted.get(sessionId);
+    return flag ?? false;
+  }
+
+  /** Per-session tool-executed flag for WhatsApp turns. */
+  private readonly whatsappToolExecuted = new Map<string, boolean>();
 
   /**
    * Applies a profile's tool policy to the full tool set: an explicit

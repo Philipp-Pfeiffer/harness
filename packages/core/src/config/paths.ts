@@ -33,6 +33,10 @@ export interface HarnessPaths {
   logs: string;
   /** $state/jobs/ — Cron-Job-Definitionen (Markdown mit Frontmatter) */
   jobs: string;
+  /** $state/inbound-media/ — Heruntergeladene Media-Dateien von Gateways */
+  inboundMedia: string;
+  /** $state/whatsapp/ — Baileys Session-Persistence und Auth-State */
+  whatsapp: string;
   /** $state/daemon.pid */
   pidFile: string;
   /** $state/daemon.sock */
@@ -75,6 +79,8 @@ export function resolveHarnessPaths(opts?: { home?: string }): HarnessPaths {
     index: path.join(state, "index"),
     logs: path.join(state, "logs"),
     jobs: path.join(state, "jobs"),
+    inboundMedia: path.join(state, "inbound-media"),
+    whatsapp: path.join(state, "whatsapp"),
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
   };
@@ -94,4 +100,6 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.index, { recursive: true });
   await mkdir(paths.logs, { recursive: true });
   await mkdir(paths.jobs, { recursive: true });
+  await mkdir(paths.inboundMedia, { recursive: true });
+  await mkdir(paths.whatsapp, { recursive: true });
 }

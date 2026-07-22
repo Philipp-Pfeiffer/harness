@@ -7,7 +7,7 @@
 
 // ─── Types ─────────────────────────────────────────────────────
 
-export type ErrorClass = "transient" | "rate_limit" | "permanent" | "user_abort";
+export type ErrorClass = "transient" | "rate_limit" | "permanent" | "user_abort" | "internal_restart";
 
 export interface RetryPolicy {
   maxRetries: number;
@@ -78,7 +78,8 @@ function getErrorMessage(err: unknown): string {
 /*
  * Classification rules (in order — first match wins):
  *
- * 1. userSignal?.aborted → "user_abort" (NEVER retryable, check FIRST)
+ * 0. internalAbortSignal?.aborted → "internal_restart" (NEVER retryable, check FIRST — NOT a user abort)
+ * 1. userSignal?.aborted → "user_abort" (NEVER retryable, check SECOND)
  * 2. AbortError with no user-abort → "transient" (our own timeout)
  * 3. HTTP status code based classification
  * 4. Network error message patterns → "transient"
@@ -87,7 +88,16 @@ function getErrorMessage(err: unknown): string {
  * 7. Rate-limit message patterns → "rate_limit"
  * 8. Generic fallback → "transient"
  */
-export function classifyError(err: unknown, userSignal?: AbortSignal): ErrorClass {
+export function classifyError(
+  err: unknown,
+  userSignal?: AbortSignal,
+  internalAbortSignal?: AbortSignal,
+): ErrorClass {
+  // Rule 0: internal restart — MUST be before user abort check
+  if (internalAbortSignal?.aborted) {
+    return "internal_restart";
+  }
+
   // Rule 1: user abort — ALWAYS first, NEVER retryable
   if (userSignal?.aborted) {
     return "user_abort";
@@ -239,19 +249,29 @@ export function computeBackoffDelay(attempt: number, policy: RetryPolicy): numbe
 export class TimeoutController {
   readonly signal: AbortSignal;
   private _timedOut = false;
+  private _internalAbort = false;
   private readonly controller: AbortController = new AbortController();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly timeoutMs: number;
   private readonly userSignal: AbortSignal | undefined;
   private readonly onUserAbort: (() => void) | undefined = undefined;
+  private readonly internalSignal: AbortSignal | undefined;
+  private readonly onInternalAbort: (() => void) | undefined = undefined;
 
-  constructor(timeoutMs: number, userSignal?: AbortSignal) {
+  constructor(timeoutMs: number, userSignal?: AbortSignal, internalSignal?: AbortSignal) {
     this.timeoutMs = timeoutMs;
     this.signal = this.controller.signal;
     this.userSignal = userSignal;
+    this.internalSignal = internalSignal;
 
     if (userSignal?.aborted) {
       this.controller.abort(userSignal.reason);
+      return;
+    }
+
+    if (internalSignal?.aborted) {
+      this._internalAbort = true;
+      this.controller.abort(internalSignal.reason);
       return;
     }
 
@@ -261,6 +281,15 @@ export class TimeoutController {
         this.controller.abort(userSignal.reason);
       };
       userSignal.addEventListener("abort", this.onUserAbort, { once: true });
+    }
+
+    if (internalSignal) {
+      this.onInternalAbort = () => {
+        this._internalAbort = true;
+        this.clearTimer();
+        this.controller.abort(internalSignal.reason);
+      };
+      internalSignal.addEventListener("abort", this.onInternalAbort, { once: true });
     }
 
     this.startTimer();
@@ -286,18 +315,26 @@ export class TimeoutController {
     this.startTimer();
   }
 
-  /** Manually abort for cleanup. Removes userSignal listener if present. */
+  /** Manually abort for cleanup. Removes userSignal/internalSignal listeners if present. */
   abort(): void {
     this.clearTimer();
     if (this.onUserAbort && this.userSignal) {
       this.userSignal.removeEventListener("abort", this.onUserAbort);
     }
+    if (this.onInternalAbort && this.internalSignal) {
+      this.internalSignal.removeEventListener("abort", this.onInternalAbort);
+    }
     this.controller.abort();
   }
 
-  /** True if this controller's timeout fired (NOT user abort). */
+  /** True if this controller's timeout fired (NOT user/internal abort). */
   get timedOut(): boolean {
     return this._timedOut;
+  }
+
+  /** True if the internal (gateway restart) signal fired. */
+  get internalAborted(): boolean {
+    return this._internalAbort;
   }
 }
 
