@@ -170,7 +170,8 @@ describe("token usage pipeline end-to-end", () => {
       cacheWrite: number;
     }> = [];
 
-    // Act: run agent across two turns, then persist turn metrics like App.tsx does
+    // Act: run agent across two turns — the agent loop now records turn metrics
+    // internally (since the cache-hit-rate feature), so no manual recordTurn() needed.
     const result = await agent.run([makeUserMessage("Hi")], {
       metricsRecorder: recorder,
       onEvent: (event) => {
@@ -184,19 +185,6 @@ describe("token usage pipeline end-to-end", () => {
           });
         }
       },
-    });
-
-    // Persist turn metrics exactly as App.tsx does after a successful run.
-    recorder.recordTurn({
-      model: model.name,
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
-      totalTokens: result.usage.totalTokens,
-      cacheRead: result.usage.cacheRead,
-      cacheWrite: result.usage.cacheWrite,
-      latencyMs: 100,
-      toolCallCount: result.toolCallCount,
-      status: "ok",
     });
 
     // Wait for fire-and-forget JSONL append to complete.
@@ -280,18 +268,6 @@ describe("token usage pipeline end-to-end", () => {
     const recorder = createMetricsRecorder({ dir: TEST_DIR });
     const result = await agent.run([makeUserMessage("Hello")], {
       metricsRecorder: recorder,
-    });
-
-    recorder.recordTurn({
-      model: model.name,
-      inputTokens: result.usage.inputTokens,
-      outputTokens: result.usage.outputTokens,
-      totalTokens: result.usage.totalTokens,
-      cacheRead: result.usage.cacheRead,
-      cacheWrite: result.usage.cacheWrite,
-      latencyMs: 50,
-      toolCallCount: result.toolCallCount,
-      status: "ok",
     });
 
     await new Promise((r) => setTimeout(r, 50));

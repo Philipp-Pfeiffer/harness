@@ -77,7 +77,7 @@ export interface ToolCallLog {
   isError: boolean;
 }
 
-export type Logger = (msg: string) => void;
+export type Logger = (msg: string, level?: "warn" | "debug") => void;
 
 
 
@@ -317,7 +317,7 @@ export function createAgent(config: AgentConfig): Agent {
       // own scope. Never a process-global scope.
       const toolContext: ToolCallContext = {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
-        logger: logger ? (msg: string, _level?: "warn" | "debug") => logger(msg) : undefined,
+        logger: logger,
       };
 
       if (memoryBackend) {

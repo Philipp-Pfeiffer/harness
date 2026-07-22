@@ -17,11 +17,12 @@ export {
   type RunResult,
   type TokenUsage,
   type CompactionOptions,
+  type Logger,
 } from "./core/agent.js";
 export { ThinkingStreamTransformer, type ThinkingStreamOutput } from "./core/thinkingStream.js";
 
 // Tool types and individual tools
-export { type Tool, type ToolCallContext } from "./tools/types.js";
+export { type Tool, type ToolCallContext, type ToolResult, ok, err } from "./tools/types.js";
 export { readFileTool } from "./tools/readFile.js";
 export { execTool } from "./tools/exec.js";
 export { processTool } from "./tools/process.js";
@@ -30,6 +31,9 @@ export { editTool } from "./tools/edit_file.js";
 export { createWebSearchTool } from "./tools/web_search.js";
 export { createWebFetchTool } from "./tools/web_fetch.js";
 export { loadTools, findTool } from "./tools/registry.js";
+
+// Process supervisor (singleton — used by exec/process tools, logger-injectable)
+export { processSupervisor } from "./tools/processSupervisor.js";
 
 // Model resolution
 export {

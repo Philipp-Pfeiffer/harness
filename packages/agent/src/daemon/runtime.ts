@@ -39,7 +39,9 @@ import {
   type Tool,
   type AgentProfile,
   type MemoryZone,
+  type Logger,
 } from "@harness/core";
+import { processSupervisor } from "@harness/core";
 import { loadCoreMemoryRaw } from "../core/coreMemory.js";
 import { composeProfilePrompt } from "../core/profilePrompt.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -198,10 +200,22 @@ export class DaemonRuntime {
     this.startMs = Date.now();
   }
 
+  /** Build a Logger for tools, bridging to DaemonLogger's structured output. */
+  private makeToolLogger(): Logger {
+    const log = this.logger.child("tool");
+    return (msg: string, level?: "warn" | "debug") => {
+      if (level === "warn") log.warn(msg);
+      else log.debug(msg);
+    };
+  }
+
   async start(): Promise<void> {
     await this.logger.init();
     const log = this.logger.child("runtime");
     log.info("daemon starting", { pid: process.pid, state: this.paths.state });
+
+    // Inject structured logger into processSupervisor (replaces console.warn fallback)
+    processSupervisor.setLogger(this.makeToolLogger());
 
     // Clean up stale PID file from a previous crash
     const wasStale = await cleanupStalePidFile(this.paths.pidFile);
@@ -1109,6 +1123,7 @@ export class DaemonRuntime {
     this.agent = createAgent({
       tools: this.defaultTools,
       model: this.model,
+      logger: this.makeToolLogger(),
       inlineThinking:
         defaultProfile?.frontmatter.thinking ??
         (this.model as ResolvedModel).inlineThinking ??
@@ -1235,6 +1250,7 @@ export class DaemonRuntime {
     const agent = createAgent({
       tools,
       model,
+      logger: this.makeToolLogger(),
       inlineThinking: fm.thinking ?? (model as ResolvedModel).inlineThinking ?? false,
       temperature: fm.temperature,
       maxTokens: fm.maxTokens,
