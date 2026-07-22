@@ -183,9 +183,11 @@ async function tableToImage(
 ): Promise<Attachment> {
   const fontData = await loadFont(fontPath);
 
-  // Column widths: proportional to content
-  const colWidths = calculateColWidths(rows, 700);
-  const tableWidth = colWidths.reduce((a, b) => a + b, 0) + 32; // padding
+  // Column widths: content widths only (padding/border added below)
+  const maxCanvasWidth = 700;
+  const colWidths = calculateColWidths(rows, maxCanvasWidth);
+  // Total width = content + cell padding (10px each side) + right border per cell + root border
+  const tableWidth = colWidths.reduce((a, b) => a + b, 0) + colWidths.length * 21 + 2;
 
   const elements = buildTableElement(rows, colWidths);
 
@@ -322,13 +324,16 @@ function calculateColWidths(rows: string[][], maxWidth: number): number[] {
   }
 
   const pxPerChar = 7;
-  const cellPadding = 20;
-  const minWidths = minWordLens.map((len) => len * pxPerChar + cellPadding);
-  const preferredWidths = contentLens.map((len) => len * pxPerChar + cellPadding);
+  // makeCell adds 10px padding on each side, so 20px total horizontal padding per cell.
+  const cellHorizontalPadding = 20;
+  const minWidths = minWordLens.map((len) => len * pxPerChar);
+  const preferredWidths = contentLens.map((len) => len * pxPerChar);
 
   // Natural width = at least min width, at most preferred content width
   let widths = preferredWidths.map((w, i) => Math.max(w, minWidths[i]!));
-  const naturalWidth = widths.reduce((a, b) => a + b, 0);
+  const naturalContentWidth = widths.reduce((a, b) => a + b, 0);
+  // Total rendered width = content + cell padding + 1px right border per cell + root left/right border
+  const naturalWidth = naturalContentWidth + colCount * (cellHorizontalPadding + 1) + 2;
 
   if (naturalWidth > maxWidth) {
     // Content is too wide — scale down proportionally, but never below min width
