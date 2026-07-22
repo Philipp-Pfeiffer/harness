@@ -175,51 +175,73 @@ export async function loadConfig(options?: {
 
   candidates.push({ path: path.join(homeDir, ".harness", "config.json"), source: "home" });
 
+  const errors: string[] = [];
+
   for (const candidate of candidates) {
+    let raw: string;
     try {
-      const raw = await readFile(candidate.path, "utf-8");
-      const parsed = JSON.parse(raw) as Config;
-      const config = resolveConfigValues(parsed) as Config;
-
-      const providers = config.providers ?? DEFAULT_PROVIDERS;
-      const models = config.models && Array.isArray(config.models)
-        ? mergeProviderDefaults(config.models, providers)
-        : [];
-
-      const webConfig: WebConfig = {
-        web_search: config.web_search,
-        web_fetch: config.web_fetch,
-      };
-
-      if (models.length === 0) {
-        return {
-          models: DEFAULT_MODELS,
-          providers: DEFAULT_PROVIDERS,
-          webConfig,
-          error: "Config has no models, using default",
-          source: candidate.source,
-        };
-      }
-
-      const defaultModel = config.defaultModel
-        ? mergeProviderDefaults([config.defaultModel], providers)[0]
-        : undefined;
-
-      return { models, providers, defaultModel, webConfig, source: candidate.source };
+      raw = await readFile(candidate.path, "utf-8");
     } catch (err) {
-      // If the config file was found but its content is invalid (e.g. missing
-      // env reference), surface the error instead of silently falling back.
-      if (err instanceof Error && err.message.startsWith("Missing environment variable")) {
-        throw err;
+      // File not found → try next candidate (expected for most candidates).
+      if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+        continue;
       }
-      // try next candidate
+      // Other read errors (permission denied, etc.) → record and try next.
+      errors.push(`${candidate.source} (${candidate.path}): ${err instanceof Error ? err.message : String(err)}`);
+      continue;
     }
+
+    // File exists — parse and resolve.
+    let parsed: Config;
+    try {
+      parsed = JSON.parse(raw) as Config;
+    } catch (err) {
+      // Invalid JSON in a config that exists → surface as a visible error.
+      return {
+        models: DEFAULT_MODELS,
+        providers: DEFAULT_PROVIDERS,
+        webConfig: {},
+        error: `Failed to parse config at ${candidate.path}: ${err instanceof Error ? err.message : String(err)}`,
+        source: candidate.source,
+      };
+    }
+
+    // resolveConfigValues may throw for missing env-var references — propagate.
+    const config = resolveConfigValues(parsed) as Config;
+
+    const providers = config.providers ?? DEFAULT_PROVIDERS;
+    const models = config.models && Array.isArray(config.models)
+      ? mergeProviderDefaults(config.models, providers)
+      : [];
+
+    const webConfig: WebConfig = {
+      web_search: config.web_search,
+      web_fetch: config.web_fetch,
+    };
+
+    if (models.length === 0) {
+      return {
+        models: DEFAULT_MODELS,
+        providers: DEFAULT_PROVIDERS,
+        webConfig,
+        error: "Config has no models, using default",
+        source: candidate.source,
+      };
+    }
+
+    const defaultModel = config.defaultModel
+      ? mergeProviderDefaults([config.defaultModel], providers)[0]
+      : undefined;
+
+    return { models, providers, defaultModel, webConfig, source: candidate.source };
   }
 
   return {
     models: DEFAULT_MODELS,
     providers: DEFAULT_PROVIDERS,
     webConfig: {},
-    error: "No config found, using default model",
+    error: errors.length > 0
+      ? `No usable config found. Errors: ${errors.join("; ")}`
+      : "No config found, using default model",
   };
 }

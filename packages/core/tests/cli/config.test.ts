@@ -177,6 +177,45 @@ describe("loadConfig", () => {
     );
   });
 
+  it("returns a clear error for invalid JSON in a config file", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    writeFileSync(path.join(cwd, "harness.config.json"), "{ invalid json !!!");
+
+    const result = await loadConfig({ cwd, homeDir: tmpBase, harnessHome: tmpBase });
+
+    expect(result.models).toEqual([
+      { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" },
+    ]);
+    expect(result.source).toBe("cwd");
+    expect(result.error).toContain("Failed to parse config");
+    expect(result.error).toContain("harness.config.json");
+  });
+
+  it("does not fall back to a later candidate when JSON is invalid", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+
+    const homeDir = path.join(tmpBase, "home");
+    const harnessDir = path.join(homeDir, ".harness");
+    mkdirSync(harnessDir, { recursive: true });
+
+    // CWD config has invalid JSON — should surface error, NOT skip to home config.
+    writeFileSync(path.join(cwd, "harness.config.json"), "{ broken");
+    const homeModels: ConfigModel[] = [
+      { provider: "openai", model: "gpt-5.2", alias: "GPT 5.2" },
+    ];
+    writeFileSync(path.join(harnessDir, "config.json"), JSON.stringify({ models: homeModels }));
+
+    const result = await loadConfig({ cwd, homeDir, harnessHome: tmpBase });
+
+    expect(result.source).toBe("cwd");
+    expect(result.error).toContain("Failed to parse config");
+    // Should NOT have loaded the home config.
+    expect(result.models).not.toEqual(homeModels);
+  });
+
   it("returns defaultModel with merged provider defaults", async () => {
     const cwd = path.join(tmpBase, "project");
     mkdirSync(cwd, { recursive: true });
