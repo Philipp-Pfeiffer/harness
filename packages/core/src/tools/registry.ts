@@ -13,6 +13,7 @@ import { createWebSearchTool } from "./web_search.js";
 import { createWebFetchTool } from "./web_fetch.js";
 import { createLoadSkillTool } from "./loadSkill.js";
 import { createFindSkillTool } from "./findSkill.js";
+import { sendFileTool } from "./send_file.js";
 
 export interface LoadToolsOptions {
   memoryBackend?: MemoryBackend;
@@ -47,6 +48,7 @@ export function loadTools(
     processTool,
     writeTool,
     editTool,
+    sendFileTool,
     createSearchMemoryTool(opts.memoryBackend),
     createWebSearchTool(opts.webConfig),
     createWebFetchTool(opts.webConfig),

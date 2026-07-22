@@ -23,6 +23,8 @@ export type ConfigModel = {
    * in the content stream instead of using `reasoning_content`. */
   inlineThinking?: boolean;
   input?: ("text" | "image")[];
+  /** Explicitly mark the model as vision-capable. Wins over name heuristics. */
+  supportsVision?: boolean;
   contextWindow?: number;
   maxTokens?: number;
   cost?: {

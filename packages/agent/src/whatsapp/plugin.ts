@@ -16,6 +16,8 @@ import type {
   ChannelPlugin,
   ChannelInboundEvent,
   InboundMedia,
+  ChannelSendPayload,
+  ChannelFileCapabilities,
 } from "../daemon/types.js";
 import type { HarnessPaths } from "@harness/core";
 import {
@@ -34,6 +36,7 @@ import {
 import { transcribeVoice } from "./voice.js";
 import { sendAgentResponse } from "./outbound.js";
 import { WhatsAppInboundProcessor } from "./inbound.js";
+import { getCapabilities } from "../output/capabilities.js";
 import type { Model, Api } from "@mariozechner/pi-ai";
 
 /** Options for creating the WhatsApp plugin. */
@@ -43,6 +46,8 @@ export interface WhatsAppPluginOptions {
   testMode: boolean;
   log: (msg: string, level?: "info" | "warn" | "error") => void;
   model: Model<Api> | null;
+  /** Whether the model supports vision (from config, overrides name heuristics). */
+  modelSupportsVision?: boolean;
   callbacks: {
     submitTurn: (sessionId: string, text: string, imageBlocks?: import("../daemon/types.js").InboundImageBlock[]) => Promise<{ finalResponse: string }>;
     compactSession: (sessionId: string) => Promise<void>;
@@ -81,7 +86,20 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
               await sendAgentResponse(
                 target,
                 markdown,
-                (jid, text) => client!.sendMessage(jid, text),
+                async (jid, payload) => {
+                  if (payload.text) {
+                    await client!.sendMessage(jid, payload.text);
+                  }
+                  if (payload.files) {
+                    for (const file of payload.files) {
+                      if (file.buffer) {
+                        await client!.sendFile(jid, { buffer: file.buffer, mimeType: file.mimeType, caption: file.caption, asSticker: file.asSticker });
+                      } else if (file.path) {
+                        await client!.sendFile(jid, { path: file.path, mimeType: file.mimeType, caption: file.caption, asSticker: file.asSticker });
+                      }
+                    }
+                  }
+                },
                 opts.log,
               );
             } catch (err) {
@@ -130,9 +148,33 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
       // The daemon's routing happens via the callbacks passed in options.
     },
 
-    async sendMessage(target: string, payload: { text: string; attachments?: InboundMedia[] }): Promise<void> {
+    async sendMessage(target: string, payload: ChannelSendPayload): Promise<void> {
       if (!client) throw new Error("WhatsApp client not started");
-      await client.sendMessage(target, payload.text);
+
+      // Send text
+      if (payload.text) {
+        await client.sendMessage(target, payload.text);
+      }
+
+      // Send files
+      if (payload.files) {
+        for (const file of payload.files) {
+          if (file.buffer) {
+            await client.sendFile(target, { buffer: file.buffer, mimeType: file.mimeType, caption: file.caption, asSticker: file.asSticker });
+          } else if (file.path) {
+            await client.sendFile(target, { path: file.path, mimeType: file.mimeType, caption: file.caption, asSticker: file.asSticker });
+          }
+        }
+      }
+    },
+
+    getFileCapabilities(): ChannelFileCapabilities {
+      const caps = getCapabilities("whatsapp");
+      return {
+        supportedMimePrefixes: [...caps.supportedFilePrefixes],
+        supportsSticker: caps.supportsSticker,
+        maxFileSize: caps.maxFileSize,
+      };
     },
   };
 }
@@ -205,7 +247,7 @@ async function parseBaileysMessage(
       mediaArray.push(media);
 
       // Vision check
-      if (opts.model && isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "" })) {
+      if (opts.model && isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "", supportsVision: opts.modelSupportsVision })) {
         const { createImageBlock } = await import("./media.js");
         imageBlocks = [await createImageBlock(media.filePath, media.mimeType)];
       }
@@ -300,7 +342,7 @@ async function parseBaileysMessage(
   // Build media annotations for non-sticker media
   if (mediaArray.length > 0) {
     const visionCapable = opts.model
-      ? isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "" })
+      ? isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "", supportsVision: opts.modelSupportsVision })
       : false;
     const { annotations: mediaAnnotations } = await processMediaForTurn(mediaArray, visionCapable);
     annotations.push(...mediaAnnotations);

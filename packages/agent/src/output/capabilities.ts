@@ -28,6 +28,12 @@ export interface ChannelCapabilities {
   readonly maxTableColumns: number;
   /** Raster scale factor for table-image PNGs (higher = sharper on mobile). */
   readonly imageScale: number;
+  /** Supported file MIME type prefixes for outbound attachments. */
+  readonly supportedFilePrefixes: readonly string[];
+  /** Whether the channel supports stickers. */
+  readonly supportsSticker: boolean;
+  /** Max outbound file size in bytes (0 = unlimited). */
+  readonly maxFileSize: number;
 }
 
 /** Re-exported from canonical to avoid circular deps. */
@@ -42,6 +48,9 @@ const WHATSAPP: ChannelCapabilities = {
   maxMonospaceWidth: 60,
   maxTableColumns: 4,
   imageScale: 3,
+  supportedFilePrefixes: ['image/', 'audio/', 'video/', 'application/pdf', 'application/zip', 'application/octet-stream', 'text/'],
+  supportsSticker: true,
+  maxFileSize: 100 * 1024 * 1024,
 };
 
 const DISCORD: ChannelCapabilities = {
@@ -53,6 +62,9 @@ const DISCORD: ChannelCapabilities = {
   maxMonospaceWidth: 80,
   maxTableColumns: 5,
   imageScale: 3,
+  supportedFilePrefixes: ['image/', 'audio/', 'video/', 'application/', 'text/'],
+  supportsSticker: false,
+  maxFileSize: 25 * 1024 * 1024,
 };
 
 const SIGNAL: ChannelCapabilities = {
@@ -64,6 +76,9 @@ const SIGNAL: ChannelCapabilities = {
   maxMonospaceWidth: 60,
   maxTableColumns: 4,
   imageScale: 3,
+  supportedFilePrefixes: ['image/', 'audio/', 'video/', 'application/pdf'],
+  supportsSticker: false,
+  maxFileSize: 100 * 1024 * 1024,
 };
 
 const MAIL: ChannelCapabilities = {
@@ -75,6 +90,9 @@ const MAIL: ChannelCapabilities = {
   maxMonospaceWidth: 120,
   maxTableColumns: 8,
   imageScale: 1,
+  supportedFilePrefixes: ['image/', 'audio/', 'video/', 'application/', 'text/'],
+  supportsSticker: false,
+  maxFileSize: 0,
 };
 
 const MATRIX: Readonly<Record<Channel, ChannelCapabilities>> = {
@@ -90,4 +108,10 @@ export function getCapabilities(channel: Channel): ChannelCapabilities {
 
 export function getSupportedChannels(): Channel[] {
   return Object.keys(MATRIX) as Channel[];
+}
+
+/** Checks whether the channel supports a given MIME type. */
+export function supportsMimeType(channel: Channel, mimeType: string): boolean {
+  const caps = getCapabilities(channel);
+  return caps.supportedFilePrefixes.some((prefix) => mimeType.startsWith(prefix));
 }

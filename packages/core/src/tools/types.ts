@@ -39,6 +39,12 @@ export function err(content: string): ToolResult {
 export interface ToolCallContext {
   sessionId?: string;
   logger?: (msg: string, level?: "warn" | "debug") => void;
+  /**
+   * Optional channel file sender. When present, enables the `send_file` tool
+   * to send files to the active channel chat. When absent (e.g. TUI sessions),
+   * `send_file` returns an error.
+   */
+  channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export interface Tool<TParameters extends TSchema = TSchema> {

@@ -52,8 +52,10 @@ describe("WhatsApp Media Pipeline", () => {
       for (let i = 0; i < 100; i++) {
         filenames.add(generateMediaFilename("image/jpeg", MEDIA_DIR));
       }
-      // At least 90% should be unique (timestamps may collide on fast loops)
-      expect(filenames.size).toBeGreaterThan(80);
+      // With 4 random hex chars (65.536 combinations) and timestamp resolution
+      // at seconds, 100 names should be 100% unique.
+      // (If timestamps collide, the 4 random chars still differentiate.)
+      expect(filenames.size).toBe(100);
     });
 
     it("uses correct extension for different MIME types", () => {
@@ -131,6 +133,21 @@ describe("WhatsApp Media Pipeline", () => {
     it("returns false for non-vision models", () => {
       expect(isVisionCapableModel({ name: "gpt-3.5-turbo", provider: "openai" })).toBe(false);
       expect(isVisionCapableModel({ name: "minimax-m2", provider: "minimax" })).toBe(false);
+    });
+
+    it("supportsVision=true overrides name heuristics", () => {
+      expect(isVisionCapableModel({ name: "kimi-k2.7-code", provider: "neuralwatt", supportsVision: true })).toBe(true);
+      expect(isVisionCapableModel({ name: "minimax-m2", provider: "minimax", supportsVision: true })).toBe(true);
+    });
+
+    it("supportsVision=false overrides name heuristics", () => {
+      expect(isVisionCapableModel({ name: "claude-3-opus", provider: "anthropic", supportsVision: false })).toBe(false);
+      expect(isVisionCapableModel({ name: "gpt-4o", provider: "openai", supportsVision: false })).toBe(false);
+    });
+
+    it("falls back to name heuristics when supportsVision is undefined", () => {
+      expect(isVisionCapableModel({ name: "claude-3-opus", provider: "anthropic", supportsVision: undefined })).toBe(true);
+      expect(isVisionCapableModel({ name: "gpt-3.5-turbo", provider: "openai", supportsVision: undefined })).toBe(false);
     });
   });
 

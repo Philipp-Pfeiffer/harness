@@ -71,8 +71,42 @@ export interface InboundImageBlock {
 export interface ChannelPlugin extends GatewayAdapter {
   /** Channel identifier for output-pipeline capability selection. */
   readonly channel: string;
-  /** Send one or more rendered messages to a target (phone number, chat id). */
-  sendMessage(target: string, payload: { text: string; attachments?: InboundMedia[] }): Promise<void>;
+  /** Send a structured payload (text and/or files) to a target. */
+  sendMessage(target: string, payload: ChannelSendPayload): Promise<void>;
+  /** Returns the file-type capabilities of this channel. */
+  getFileCapabilities?(): ChannelFileCapabilities;
+}
+
+/** A file to send via the channel. */
+export interface ChannelFile {
+  /** Local file path. Mutually exclusive with `buffer`. */
+  path?: string;
+  /** Raw file data. Mutually exclusive with `path`. */
+  buffer?: Buffer;
+  /** MIME type of the file. */
+  mimeType: string;
+  /** Optional caption / text accompanying the file. */
+  caption?: string;
+  /** Send as sticker (WebP). Only supported if the channel supports stickers. */
+  asSticker?: boolean;
+}
+
+/** Structured payload for channel.sendMessage(). */
+export interface ChannelSendPayload {
+  /** Text content. */
+  text?: string;
+  /** Files to send. */
+  files?: ChannelFile[];
+}
+
+/** File-type capabilities of a channel. */
+export interface ChannelFileCapabilities {
+  /** Supported file MIME type prefixes (e.g. "image/", "audio/", "video/", "application/pdf"). */
+  supportedMimePrefixes: string[];
+  /** Whether the channel supports stickers. */
+  supportsSticker: boolean;
+  /** Max file size in bytes (0 = unlimited). */
+  maxFileSize: number;
 }
 
 /**

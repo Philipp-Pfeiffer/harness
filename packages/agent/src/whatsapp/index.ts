@@ -3,7 +3,7 @@
  */
 
 // Client
-export { createWhatsAppClient, createMockWhatsAppClient } from "./client.js";
+export { createWhatsAppClient, createMockWhatsAppClient, baileysMessageType } from "./client.js";
 export type { WhatsAppClient, WhatsAppClientOptions, BaileysMessage, ConnectionUpdate, WAMessage, DisconnectReason } from "./client.js";
 
 // Whitelist
