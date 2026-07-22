@@ -109,14 +109,21 @@ describe('Output Pipeline', () => {
 
       it('renders simple table via monospace tier', async () => {
         const result = await renderToChannel(SIMPLE_TABLE, channel);
-        // Simple table fits monospace on all channels
         const tableTier = result.tierLog.find((t) => t.blockType === 'table');
         expect(tableTier).toBeDefined();
-        expect(tableTier!.tier).toBe('monospace');
-        // Should be in a code fence
-        expect(result.messages[0]!.text).toContain('```');
-        // Should not have an image attachment
-        expect(result.messages[0]!.attachments).toHaveLength(0);
+
+        if (channel === 'whatsapp') {
+          // WhatsApp is configured to always render tables as images
+          expect(tableTier!.tier).toBe('image');
+          const msgWithAtt = result.messages.find((m) => m.attachments.length > 0);
+          expect(msgWithAtt).toBeDefined();
+          expect(msgWithAtt!.attachments[0]!.type).toBe('image');
+        } else {
+          // Simple table fits monospace on other channels
+          expect(tableTier!.tier).toBe('monospace');
+          expect(result.messages[0]!.text).toContain('```');
+          expect(result.messages[0]!.attachments).toHaveLength(0);
+        }
       });
 
       it('renders wide table — escalates beyond monospace', async () => {
@@ -216,10 +223,10 @@ describe('Output Pipeline', () => {
       expect(tier!.tier).toBe('native');
     });
 
-    it('simple table → monospace tier on whatsapp', async () => {
+    it('simple table → image tier on whatsapp (tables always rendered as image)', async () => {
       const result = await renderToChannel(SIMPLE_TABLE, 'whatsapp');
       const tier = result.tierLog.find((t) => t.blockType === 'table');
-      expect(tier!.tier).toBe('monospace');
+      expect(tier!.tier).toBe('image');
     });
 
     it('wide table → image or linearize tier (not monospace)', async () => {

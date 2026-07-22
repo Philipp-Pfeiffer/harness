@@ -58,7 +58,6 @@ export async function sendAgentResponse(
         const file: ChannelFile = {
           buffer: att.data,
           mimeType: att.mimeType,
-          caption: att.filename,
         };
         await sendPayloadFn(target, { files: [file] });
       } catch (err) {
@@ -103,7 +102,7 @@ export async function sendRenderedMessages(
       const att = msg.attachments[j]!;
       try {
         await sendPayloadFn(target, {
-          files: [{ buffer: att.data, mimeType: att.mimeType, caption: att.filename }],
+          files: [{ buffer: att.data, mimeType: att.mimeType }],
         });
       } catch (err) {
         await sendPayloadFn(target, { text: `[${att.filename ?? "Attachment"} konnte nicht gesendet werden]` });

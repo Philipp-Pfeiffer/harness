@@ -1,17 +1,21 @@
 {
   "attachmentCounts": [
     0,
+    1,
+    0,
   ],
   "channel": "whatsapp",
-  "hasAttachments": false,
-  "messageCount": 1,
+  "hasAttachments": true,
+  "messageCount": 3,
   "textLengths": [
-    243,
+    66,
+    0,
+    102,
   ],
   "tiers": [
     {
       "block": 2,
-      "tier": "monospace",
+      "tier": "image",
       "type": "table",
     },
   ],

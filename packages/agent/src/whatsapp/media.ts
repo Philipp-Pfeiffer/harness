@@ -8,7 +8,7 @@
  * callback so tests can mock the Baileys socket.
  */
 
-import { writeFile, stat } from "node:fs/promises";
+import { writeFile, stat, access } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { InboundMedia, InboundImageBlock } from "../daemon/types.js";
@@ -41,15 +41,34 @@ export interface MediaInfo {
 /**
  * Generates a media filename: YYYY-MM-DD_HH-mm-ss_<4 random chars>.<ext>
  */
-export function generateMediaFilename(mimeType: string, mediaDir: string): string {
+export async function generateMediaFilename(mimeType: string, mediaDir: string): Promise<string> {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   const datePart = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-  const random = randomBytes(MEDIA_FILENAME_RANDOM_CHARS)
-    .toString("hex")
-    .slice(0, MEDIA_FILENAME_RANDOM_CHARS);
   const ext = getMimeTypeExtension(mimeType);
+
+  // Retry loop: if generated filename already exists, regenerate.
+  // Prevents collisions when multiple downloads land in the same second.
+  const maxAttempts = 10;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const random = randomBytes(MEDIA_FILENAME_RANDOM_CHARS)
+      .toString("hex")
+      .slice(0, MEDIA_FILENAME_RANDOM_CHARS);
+    const filename = `${datePart}_${timePart}_${random}.${ext}`;
+    const filePath = join(mediaDir, filename);
+    try {
+      await access(filePath);
+      // File exists — try again
+      continue;
+    } catch {
+      // File does not exist — safe to use
+      return filePath;
+    }
+  }
+
+  // Fallback: append a larger random suffix so we never throw
+  const random = randomBytes(8).toString("hex");
   const filename = `${datePart}_${timePart}_${random}.${ext}`;
   return join(mediaDir, filename);
 }
@@ -93,7 +112,7 @@ export async function downloadMedia(
     throw new MediaTooLargeError(buffer.length, MAX_MEDIA_DOWNLOAD_BYTES);
   }
 
-  const filePath = generateMediaFilename(mimeType, mediaDir);
+  const filePath = await generateMediaFilename(mimeType, mediaDir);
   await writeFile(filePath, buffer);
   const fileStat = await stat(filePath);
 

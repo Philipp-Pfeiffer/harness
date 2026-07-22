@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { rm, mkdir, readFile } from "node:fs/promises";
+import { rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -39,34 +39,42 @@ afterEach(async () => {
 
 describe("WhatsApp Media Pipeline", () => {
   describe("generateMediaFilename", () => {
-    it("generates filename with correct pattern", () => {
-      const filename = generateMediaFilename("image/jpeg", MEDIA_DIR);
+    it("generates filename with correct pattern", async () => {
+      const filename = await generateMediaFilename("image/jpeg", MEDIA_DIR);
       const basename = filename.split("/").pop()!;
 
       // Pattern: YYYY-MM-DD_HH-mm-ss_XXXX.ext
       expect(basename).toMatch(/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_[a-f0-9]{4}\.jpg$/);
     });
 
-    it("generates unique filenames (collision-freedom)", () => {
+    it("generates unique filenames when files already exist (collision-freedom)", async () => {
       const filenames = new Set<string>();
       for (let i = 0; i < 100; i++) {
-        filenames.add(generateMediaFilename("image/jpeg", MEDIA_DIR));
+        const filePath = await generateMediaFilename("image/jpeg", MEDIA_DIR);
+        filenames.add(filePath);
+        // Write the file so the next iteration must check existence and regenerate
+        await writeFile(filePath, "dummy");
       }
-      // With 4 random hex chars (65.536 combinations) and timestamp resolution
-      // at seconds, 100 names should be 100% unique.
-      // (If timestamps collide, the 4 random chars still differentiate.)
+      // With existence-check + regenerate, 100 written files must be 100% unique.
       expect(filenames.size).toBe(100);
     });
 
-    it("uses correct extension for different MIME types", () => {
-      const png = generateMediaFilename("image/png", MEDIA_DIR);
+    it("uses correct extension for different MIME types", async () => {
+      const png = await generateMediaFilename("image/png", MEDIA_DIR);
       expect(png).toMatch(/\.png$/);
 
-      const ogg = generateMediaFilename("audio/ogg", MEDIA_DIR);
+      const ogg = await generateMediaFilename("audio/ogg", MEDIA_DIR);
       expect(ogg).toMatch(/\.ogg$/);
 
-      const pdf = generateMediaFilename("application/pdf", MEDIA_DIR);
+      const pdf = await generateMediaFilename("application/pdf", MEDIA_DIR);
       expect(pdf).toMatch(/\.pdf$/);
+    });
+
+    it("regenerates filename when target already exists", async () => {
+      const first = await generateMediaFilename("image/jpeg", MEDIA_DIR);
+      await writeFile(first, "dummy");
+      const second = await generateMediaFilename("image/jpeg", MEDIA_DIR);
+      expect(second).not.toBe(first);
     });
   });
 

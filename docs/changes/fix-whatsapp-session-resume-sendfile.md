@@ -42,15 +42,23 @@
 
 ### `packages/agent/src/whatsapp/media.ts`
 - Voice-Transkription über AssemblyAI liefert nur noch den Text zurück.
+- `generateMediaFilename` prüft jetzt, ob der Zielpfad bereits existiert, und generiert bei Kollision einen neuen Namen (max. 10 Versuche, danach 16-Byte-Fallback).
+
+### `packages/agent/src/output/capabilities.ts`
+- WhatsApp-Capabilities `maxMonospaceWidth` und `maxTableColumns` auf `0` gesetzt, damit Tabellen **immer** als PNG-Bild gerendert werden.
+
+### `packages/agent/src/whatsapp/outbound.ts`
+- Attachments werden ohne `caption` versandt (keine "table.png"-Unterschrift mehr).
 
 ## Tests
 - `pnpm -r typecheck` clean.
-- `pnpm -r test` vollständig grün (349 Tests in packages/agent).
+- `pnpm -r test` vollständig grün (350 Tests in packages/agent).
 - Neue/existierende Tests:
   - `tests/whatsapp/send_file.test.ts`
   - `tests/whatsapp/client.test.ts`
   - `tests/whatsapp/outbound.test.ts`
-  - `tests/whatsapp/whitelist.test.ts`
+  - `tests/whatsapp/media.test.ts`
+  - `tests/output/pipeline.test.ts`
 
 ## Dateien
 - `packages/agent/src/daemon/runtime.ts`
@@ -58,6 +66,9 @@
 - `packages/agent/src/whatsapp/plugin.ts`
 - `packages/agent/src/whatsapp/inbound.ts`
 - `packages/agent/src/whatsapp/media.ts`
+- `packages/agent/src/whatsapp/outbound.ts`
 - `packages/agent/src/whatsapp/limits.ts`
+- `packages/agent/src/output/capabilities.ts`
 - `packages/agent/tests/whatsapp/*.test.ts`
+- `packages/agent/tests/output/snapshots/whatsapp-mixed.snap.json`
 - `docs/changes/fix-whatsapp-session-resume-sendfile.md`
