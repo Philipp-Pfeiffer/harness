@@ -28,10 +28,16 @@ Daemon config is an optional `"daemon"` key inside the existing `config.json`:
     "skills": [],
     "memory": { "ambientHints": true, "maxHints": 5 },
     "logRetentionDays": 14,
-    "heartbeatIntervalSec": 0
+    "heartbeatIntervalSec": 0,
+    "whatsapp": {
+      "testMode": false,
+      "phoneNumber": "4915112345678"
+    }
   }
 }
 ```
+
+WhatsApp gateway is enabled by adding `"whatsapp"` to the `gateways` array. The `whatsapp` block is optional but required when the gateway is enabled — see [docs/architecture/whatsapp-gateway.md](whatsapp-gateway.md).
 
 **Hot-reloadable (via `harness reload-config`):** `memory.ambientHints`, `memory.maxHints`, `logRetentionDays`, `heartbeatIntervalSec`.
 
@@ -45,9 +51,9 @@ Structured JSON-lines logs go to `$HARNESS_STATE/logs/daemon-YYYY-MM-DD.log`. Da
 
 CLI/TUI clients connect to the daemon via Unix socket at `$HARNESS_STATE/daemon.sock`. Wire protocol: newline-delimited JSON. Request types: `ping`, `status`, `create-session`, `list-sessions`, `submit-turn`, `resume-session`, `end-session`, `reload-config`, `shutdown`.
 
-## GatewayAdapter Interface
+## Channel Plugins & Gateways
 
-External transports (WhatsApp, etc.) implement:
+External transports (WhatsApp, Telegram, etc.) implement the `ChannelPlugin` interface, which extends `GatewayAdapter` with structured outbound sending:
 
 ```typescript
 interface GatewayAdapter {
@@ -57,9 +63,21 @@ interface GatewayAdapter {
   healthCheck(): Promise<boolean>;
   onInbound(handler: (message: InboundMessage) => void): void;
 }
+
+interface ChannelPlugin extends GatewayAdapter {
+  readonly channel: string;                                              // "whatsapp", "discord", ...
+  sendMessage(target: string, payload: ChannelSendPayload): Promise<void>;
+  getFileCapabilities?(): ChannelFileCapabilities;                       // MIME support, sticker, maxFileSize
+}
 ```
 
-Adapters register via `DaemonRuntime.registerGateway()`. The WhatsApp/Baileys adapter docks here in the next goal.
+Plugins are registered via `DaemonRuntime.registerGateway()` and held in a `channelPlugins` map. `initGateways()` is called during `start()` and iterates `config.gateways` to instantiate plugins. WhatsApp is the first implementation — see [docs/architecture/whatsapp-gateway.md](whatsapp-gateway.md).
+
+**Inbound flow:** Plugin emits `ChannelInboundEvent` → daemon resolves/creates a persistent session per source (phone number) → `submitWhatsAppTurn()` hands it to the agent loop with image blocks + annotations.
+
+**Outbound flow:** Agent response → `sendAgentResponse()` → `renderToChannel(markdown, "whatsapp")` → chunks + attachments sent sequentially via `plugin.sendMessage()` with 500ms delay (anti-ban).
+
+**send_file Tool:** The agent can proactively send files via `send_file` tool → `channelFileSender` callback → `plugin.sendMessage()` with `{ files: [{ path, mimeType, caption }] }`. Channel-aware: rejects if the channel doesn't support the file type or no channel context exists.
 
 ## Heartbeat Hook
 

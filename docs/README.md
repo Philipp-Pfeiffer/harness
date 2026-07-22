@@ -6,7 +6,7 @@ Living docs. Wird bei jeder relevanten Änderung oder Design-Entscheidung aktual
 
 | Ordner | Was kommt hier rein? |
 |--------|---------------------|
-| `architecture/` | Design-Entscheidungen, ADRs, Architektur-Übersichten |
+| `architecture/` | Design-Entscheidungen, ADRs, Architektur-Übersichten (`daemon.md`, `whatsapp-gateway.md`, `topology.md`, ...) |
 | `agent/` | Agent Loop, Debugging-Guides, Verhaltensdokumentation |
 | `changes/` | Changelog, Release Notes, Breaking Changes |
 | `tools/` | Dokumentation der verfügbaren Tools (Parameter, Beispiele, Edge Cases) |

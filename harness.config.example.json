@@ -44,5 +44,16 @@
     "provider": "neuralwatt",
     "model": "kimi-k2.7-code",
     "alias": "Kimi K2.7 Code"
+  },
+  "daemon": {
+    "gateways": [],
+    "skills": [],
+    "memory": { "ambientHints": true, "maxHints": 5 },
+    "logRetentionDays": 14,
+    "heartbeatIntervalSec": 0,
+    "whatsapp": {
+      "testMode": true,
+      "phoneNumber": "4915112345678"
+    }
   }
 }
