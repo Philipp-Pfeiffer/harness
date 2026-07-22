@@ -54,7 +54,20 @@ export interface DaemonMetric {
   message?: string;
 }
 
-export type MetricEvent = TurnMetric | ToolCallMetric | ErrorMetric | DaemonMetric;
+export interface RetryMetric {
+  ts: string;
+  type: "retry";
+  sessionId?: string;
+  attempt: number;
+  maxRetries: number;
+  errorClass: string;
+  errorMessage: string;
+  retryAfterMs?: number;
+  provider?: string;
+  model?: string;
+}
+
+export type MetricEvent = TurnMetric | ToolCallMetric | ErrorMetric | DaemonMetric | RetryMetric;
 
 // ─── Directory Resolution ──────────────────────────────────────
 
@@ -99,6 +112,7 @@ const FILE_PREFIX: Record<MetricEvent["type"], string> = {
   tool_call: "tools",
   error: "system",
   daemon: "system",
+  retry: "retries",
 };
 
 /** Returns YYYY-MM-DD in UTC for consistent daily rotation. */
@@ -133,6 +147,7 @@ export interface MetricsRecorder {
   recordToolCall(metric: Omit<ToolCallMetric, "ts" | "type">): void;
   recordError(metric: Omit<ErrorMetric, "ts" | "type">): void;
   recordDaemon(metric: Omit<DaemonMetric, "ts" | "type">): void;
+  recordRetry(metric: Omit<RetryMetric, "ts" | "type">): void;
 }
 
 /**
@@ -180,6 +195,9 @@ export function createMetricsRecorder(options?: {
     },
     recordDaemon(metric) {
       void appendMetric(stamp(metric, "daemon"), dir);
+    },
+    recordRetry(metric) {
+      void appendMetric(stamp(metric, "retry"), dir);
     },
   };
 }

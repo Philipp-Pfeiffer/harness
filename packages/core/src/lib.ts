@@ -82,6 +82,7 @@ export {
 export {
   createMetricsRecorder,
   type MetricsRecorder,
+  type RetryMetric,
   appendMetric,
   resolveMetricsDir,
   type DaemonEventType,
@@ -106,6 +107,20 @@ export {
   type CompactSessionResult,
   type CompactionConfig,
 } from "./core/compaction.js";
+
+// Retry & timeout primitives (LLM provider calls)
+export {
+  type ErrorClass,
+  type RetryPolicy,
+  type RetryInfo,
+  DEFAULT_RETRY_POLICY,
+  classifyError,
+  extractRetryAfter,
+  computeBackoffDelay,
+  TimeoutController,
+  ProviderTimeoutError,
+  sleepCancellable,
+} from "./core/retryPolicy.js";
 
 // Skill System
 export {

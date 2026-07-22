@@ -23,6 +23,16 @@ import type { MemoryBackend } from "./memoryBackend.js";
 import type { MetricsRecorder } from "./metrics.js";
 import { traceTokenUsage } from "./tokenTrace.js";
 import { ThinkingStreamTransformer } from "./thinkingStream.js";
+import {
+  DEFAULT_RETRY_POLICY,
+  classifyError,
+  extractRetryAfter,
+  computeBackoffDelay,
+  TimeoutController,
+  sleepCancellable,
+  type RetryPolicy,
+  type RetryInfo,
+} from "./retryPolicy.js";
 
 interface ValidationErrorLike {
   instancePath: string;
@@ -266,6 +276,8 @@ export interface AgentConfig {
   /** Optional sampling parameters forwarded to the provider on every call. */
   temperature?: number;
   maxTokens?: number;
+  /** Retry policy for LLM provider calls. Defaults to DEFAULT_RETRY_POLICY. */
+  retryPolicy?: RetryPolicy;
 }
 
 /**
@@ -289,12 +301,13 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, maxIterations = 10, model, logger, inlineThinking = false, temperature, maxTokens } = config;
+  const { tools, maxIterations = 10, model, logger, inlineThinking = false, temperature, maxTokens, retryPolicy } = config;
   // Caller must set a system prompt via setSystemPrompt(). Empty default
   // is intentional — the prompt template requires `inboxPath`; calling
   // prompt("system-prompt") without vars triggers a missing-variable warning.
   let systemPrompt = config.systemPrompt ?? "";
   let resolvedModel = model ?? resolveModel("minimax", "MiniMax-M2.7");
+  const effectiveRetryPolicy = retryPolicy ?? DEFAULT_RETRY_POLICY;
   // Fallback tool-call scope for run() invocations without an explicit
   // sessionId. Scoped to this agent instance — never process-global — so
   // two agents can never share read-before-edit state.
@@ -396,79 +409,144 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         const apiKey = getApiKey(resolvedModel);
-        const streamOptions: { signal?: AbortSignal; apiKey?: string; temperature?: number; maxTokens?: number } = { signal, apiKey };
+        const streamOptions: { apiKey?: string; temperature?: number; maxTokens?: number } = { apiKey };
         if (temperature !== undefined) streamOptions.temperature = temperature;
         if (maxTokens !== undefined) streamOptions.maxTokens = maxTokens;
         const providerStartMs = Date.now();
-        const eventStream = stream(resolvedModel, context, streamOptions);
+
         let response: AssistantMessage;
         let partialText = "";
-        const thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
+        let thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
+        let retryCount = 0;
 
-        try {
-          for await (const event of eventStream) {
-            if (event.type === "text_delta") {
-              if (thinkingTransformer) {
-                const outputs = thinkingTransformer.feed(event.delta);
-                for (const out of outputs) {
-                  if (out.type === "token") {
-                    partialText += out.text;
-                    onEvent?.({ type: "token", text: out.text });
-                  } else {
-                    onEvent?.({ type: "thinking", text: out.text });
+        retry_loop: for (;;) {
+          // Reset per-attempt state
+          partialText = "";
+          thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
+
+          const timeoutController = new TimeoutController(effectiveRetryPolicy.timeoutMs, signal);
+
+          try {
+            const eventStream = stream(resolvedModel, context, { ...streamOptions, signal: timeoutController.signal });
+
+            for await (const event of eventStream) {
+              timeoutController.reset(); // inactivity timer — reset on every chunk
+
+              if (event.type === "text_delta") {
+                if (thinkingTransformer) {
+                  const outputs = thinkingTransformer.feed(event.delta);
+                  for (const out of outputs) {
+                    if (out.type === "token") {
+                      partialText += out.text;
+                      onEvent?.({ type: "token", text: out.text });
+                    } else {
+                      onEvent?.({ type: "thinking", text: out.text });
+                    }
                   }
+                } else {
+                  partialText += event.delta;
+                  onEvent?.({ type: "token", text: event.delta });
                 }
-              } else {
-                partialText += event.delta;
-                onEvent?.({ type: "token", text: event.delta });
-              }
-            } else if (event.type === "thinking_delta") {
-              onEvent?.({ type: "thinking", text: event.delta });
-            }
-          }
-          // Flush any remaining buffered content from the transformer.
-          if (thinkingTransformer) {
-            for (const out of thinkingTransformer.flush()) {
-              if (out.type === "token") {
-                partialText += out.text;
-                onEvent?.({ type: "token", text: out.text });
-              } else {
-                onEvent?.({ type: "thinking", text: out.text });
+              } else if (event.type === "thinking_delta") {
+                onEvent?.({ type: "thinking", text: event.delta });
               }
             }
-          }
-          response = await eventStream.result();
-          traceTokenUsage("provider-response", {
-            inputTokens: response.usage.input,
-            outputTokens: response.usage.output,
-            totalTokens: response.usage.totalTokens,
-            cacheRead: response.usage.cacheRead,
-            cacheWrite: response.usage.cacheWrite,
-          }, { turn: i + 1, model: resolvedModel.name });
-        } catch (err) {
-          // If the signal triggered the cancellation, return gracefully.
-          // pi-ai may throw an AbortError or the signal may simply be set.
-          if (
-            signal?.aborted ||
-            (err instanceof Error && err.name === "AbortError")
-          ) {
-            if (partialText.length > 0) {
-              context.messages.push({
-                role: "assistant",
-                content: [{ type: "text", text: partialText }],
-                stopReason: "aborted",
-                provider: resolvedModel.provider,
-                api: resolvedModel.api,
-                model: resolvedModel.name,
-                usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-                timestamp: Date.now(),
-              });
+
+            // Flush any remaining buffered content from the transformer.
+            if (thinkingTransformer) {
+              for (const out of thinkingTransformer.flush()) {
+                if (out.type === "token") {
+                  partialText += out.text;
+                  onEvent?.({ type: "token", text: out.text });
+                } else {
+                  onEvent?.({ type: "thinking", text: out.text });
+                }
+              }
             }
-            discardMailbox(mailbox);
-            pushAbortAnnotation(context.messages, options.abortCommand);
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+
+            response = await eventStream.result();
+
+            // Success — clean up timeout controller
+            timeoutController.abort();
+
+            traceTokenUsage("provider-response", {
+              inputTokens: response.usage.input,
+              outputTokens: response.usage.output,
+              totalTokens: response.usage.totalTokens,
+              cacheRead: response.usage.cacheRead,
+              cacheWrite: response.usage.cacheWrite,
+            }, { turn: i + 1, model: resolvedModel.name });
+
+            break; // exit retry loop — success
+          } catch (err) {
+            timeoutController.abort(); // cleanup
+
+            // USER ABORT — NEVER retry. Handle exactly as before.
+            if (signal?.aborted || (err instanceof Error && err.name === "AbortError" && signal?.aborted)) {
+              if (partialText.length > 0) {
+                context.messages.push({
+                  role: "assistant",
+                  content: [{ type: "text", text: partialText }],
+                  stopReason: "aborted",
+                  provider: resolvedModel.provider,
+                  api: resolvedModel.api,
+                  model: resolvedModel.name,
+                  usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+                  timestamp: Date.now(),
+                });
+              }
+              discardMailbox(mailbox);
+              pushAbortAnnotation(context.messages, options.abortCommand);
+              return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+            }
+
+            // Classify the error
+            const errorClass = classifyError(err, signal);
+
+            // Check if retryable
+            if (!effectiveRetryPolicy.retryableClasses.includes(errorClass)) {
+              // Permanent or user_abort error — fail immediately
+              throw err;
+            }
+
+            // Check max retries
+            if (retryCount >= effectiveRetryPolicy.maxRetries) {
+              // Exhausted retries — throw the last error
+              throw err;
+            }
+
+            // Record retry metric
+            retryCount++;
+            const retryAfterMs = errorClass === "rate_limit" ? extractRetryAfter(err) : undefined;
+            const retryInfo: RetryInfo = {
+              attempt: retryCount,
+              maxRetries: effectiveRetryPolicy.maxRetries,
+              errorClass,
+              errorMessage: err instanceof Error ? err.message : String(err),
+              retryAfterMs,
+              provider: resolvedModel.provider,
+              model: resolvedModel.name,
+            };
+            metricsRecorder?.recordRetry(retryInfo);
+            logger?.(`[RETRY] Attempt ${retryCount}/${effectiveRetryPolicy.maxRetries}: ${errorClass} — ${retryInfo.errorMessage}. Waiting ${retryAfterMs ?? computeBackoffDelay(retryCount, effectiveRetryPolicy)}ms`);
+
+            // Wait with backoff (cancellable by user signal)
+            const delay = retryAfterMs ?? computeBackoffDelay(retryCount, effectiveRetryPolicy);
+            try {
+              await sleepCancellable(delay, signal);
+            } catch {
+              // User aborted during backoff wait — immediate abort, no further retry
+              discardMailbox(mailbox);
+              pushAbortAnnotation(context.messages, options.abortCommand);
+              return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+            }
+
+            // Partial output is already discarded — partialText and thinkingTransformer
+            // are reset at the top of the loop. context.messages has NOT been modified
+            // with any partial output from the failed attempt (we only push to messages
+            // after successful stream completion).
+            continue retry_loop;
           }
-          throw err;
         }
 
         totalInput += response.usage.input;
