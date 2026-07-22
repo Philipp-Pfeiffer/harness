@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, exec } from "node:child_process";
 import { resolve, join } from "node:path";
 import { readFile, readdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { resolveHarnessPaths } from "@harness/core";
 import { sendIpcRequest, sendIpcStreaming } from "./ipc.js";
@@ -99,8 +100,8 @@ export async function daemonStop(): Promise<CliResult> {
     };
   }
 
-  // Wait for the process to exit (up to 10 seconds)
-  const exited = await waitForExit(pid, 10_000);
+  // Wait for the process to exit (up to 15 seconds)
+  const exited = await waitForExit(pid, 15_000);
   if (!exited) {
     // Force kill
     try {
@@ -108,7 +109,7 @@ export async function daemonStop(): Promise<CliResult> {
     } catch {
       // Ignore
     }
-    await sleep(100);
+    await sleep(500);
   }
 
   await removePidFile(paths.pidFile);
@@ -131,8 +132,19 @@ export async function daemonRestart(): Promise<CliResult> {
     }
   }
 
+  // Guarantee the old process is fully gone before we attempt to start a new
+  // one. Two daemons running simultaneously corrupt the Baileys WhatsApp auth
+  // state and force a fresh QR-code scan.
+  const stopped = await waitUntilNoDaemonProcess(20_000);
+  if (!stopped) {
+    return {
+      stdout: "Daemon restart failed: old daemon process did not exit in time.",
+      exitCode: 1,
+    };
+  }
+
   // Wait briefly for socket cleanup
-  await sleep(300);
+  await sleep(500);
 
   return daemonStart();
 }
@@ -547,6 +559,8 @@ export async function harnessChat(sessionId?: string): Promise<CliResult> {
 
 /* ─── helpers ─── */
 
+const execAsync = promisify(exec);
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -556,6 +570,22 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   while (Date.now() - start < timeoutMs) {
     if (!isProcessAlive(pid)) return true;
     await sleep(200);
+  }
+  return false;
+}
+
+/**
+ * Polls until no process matching the daemon command line is visible.
+ * Returns true if all daemon processes disappeared within the timeout.
+ */
+async function waitUntilNoDaemonProcess(timeoutMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { stdout } = await execAsync(
+      "pgrep -f 'node packages/agent/dist/index.js daemon run' || true",
+    );
+    if (!stdout.trim()) return true;
+    await sleep(250);
   }
   return false;
 }
