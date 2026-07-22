@@ -8,6 +8,7 @@
     "build": "pnpm -r build",
     "dev": "pnpm -C packages/agent dev",
     "start": "node packages/agent/dist/index.js",
+    "prestart": "pnpm build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test"
   },

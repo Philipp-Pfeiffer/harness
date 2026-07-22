@@ -39,6 +39,6 @@ describe("library surface", () => {
 
   it("prompt() still falls back to built-in prompts without opts.dir", () => {
     const result = prompt("system-prompt");
-    expect(result).toContain("OpenClaw");
+    expect(result).toContain("Harness");
   });
 });

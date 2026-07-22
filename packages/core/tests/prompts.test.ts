@@ -29,7 +29,7 @@ describe("prompt()", () => {
 
   it("system-prompt snapshot", () => {
     const result = prompt("system-prompt");
-    expect(result).toContain("OpenClaw");
+    expect(result).toContain("Harness");
     expect(result).toContain("Bullet-Listen");
     expect(result).not.toContain("<!--");
   });
