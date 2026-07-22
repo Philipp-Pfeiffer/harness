@@ -2,7 +2,6 @@
 
 **Status:** Implementiert (MVP)
 **Datei:** `src/tools/readFile.ts`
-**Spec:** `AGENTS.md` → Tool: readFile (MVP)
 
 ## Überblick
 
