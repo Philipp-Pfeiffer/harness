@@ -17,6 +17,7 @@ import {
   type WAMessage,
   type DisconnectReason,
 } from "baileys";
+import { readFile } from "node:fs/promises";
 import {
   RECONNECT_BACKOFF_BASE_MS,
   RECONNECT_BACKOFF_MAX_MS,
@@ -54,6 +55,7 @@ export interface WhatsAppClient {
   start(): Promise<void>;
   stop(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  sendFile(jid: string, file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void>;
   getPairingCode(): string | null;
   isConnected(): boolean;
 }
@@ -195,6 +197,21 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
       await sock.sendMessage(jid, { text });
     },
 
+    async sendFile(jid: string, file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void> {
+      if (!sock) throw new Error("WhatsApp client not started");
+      const buffer = file.buffer ?? (file.path ? await readFile(file.path) : undefined);
+      if (!buffer) throw new Error("sendFile requires either buffer or path");
+
+      const messageType = baileysMessageType(file.mimeType, file.asSticker ?? false);
+      const content: Record<string, unknown> = { mimetype: file.mimeType, data: buffer };
+
+      if (file.caption && !file.asSticker) {
+        content.caption = file.caption;
+      }
+
+      await sock.sendMessage(jid, { [messageType]: content } as never);
+    },
+
     getPairingCode(): string | null {
       return pairingCode;
     },
@@ -214,6 +231,7 @@ export function createMockWhatsAppClient(): WhatsAppClient {
     async start(): Promise<void> {},
     async stop(): Promise<void> {},
     async sendMessage(_jid: string, _text: string): Promise<void> {},
+    async sendFile(_jid: string, _file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void> {},
     getPairingCode(): string | null {
       return null;
     },
@@ -221,4 +239,18 @@ export function createMockWhatsAppClient(): WhatsAppClient {
       return false;
     },
   };
+}
+
+/**
+ * Maps a MIME type to the Baileys message type key.
+ * asSticker=true overrides to 'sticker' for WebP images.
+ *
+ * @returns The Baileys message content key ('image', 'audio', 'video', 'document', 'sticker').
+ */
+export function baileysMessageType(mimeType: string, asSticker: boolean): string {
+  if (asSticker) return "sticker";
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType.startsWith("audio/")) return "audio";
+  if (mimeType.startsWith("video/")) return "video";
+  return "document";
 }

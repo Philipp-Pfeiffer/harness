@@ -28,6 +28,7 @@ export { execTool } from "./tools/exec.js";
 export { processTool } from "./tools/process.js";
 export { writeTool } from "./tools/write_file.js";
 export { editTool } from "./tools/edit_file.js";
+export { sendFileTool, detectMimeFromExtension } from "./tools/send_file.js";
 export { createWebSearchTool } from "./tools/web_search.js";
 export { createWebFetchTool } from "./tools/web_fetch.js";
 export { loadTools, findTool } from "./tools/registry.js";

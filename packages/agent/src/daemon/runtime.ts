@@ -1207,6 +1207,7 @@ export class DaemonRuntime {
         else log.info(msg);
       },
       model: this.model,
+      modelSupportsVision: this.configDefaultModel?.supportsVision,
       callbacks: {
         submitTurn: async (sessionId, text, imageBlocks) => {
           return this.submitWhatsAppTurn(sessionId, text, imageBlocks);
@@ -1288,6 +1289,7 @@ export class DaemonRuntime {
         threshold: DEFAULT_COMPACTION_THRESHOLD,
       },
       mailbox: entry.mailbox,
+      channelFileSender: this.channelFileSender,
     });
 
     entry.turnsCompleted++;
@@ -1380,6 +1382,7 @@ export class DaemonRuntime {
           const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
           this.sessions.set(session.id, entry);
           this.whatsappSessions.set(source, session.id);
+          this.whatsappSessionToSource.set(session.id, source);
           return session.id;
         }
       }
@@ -1394,6 +1397,7 @@ export class DaemonRuntime {
     const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
     this.sessions.set(session.id, entry);
     this.whatsappSessions.set(source, session.id);
+    this.whatsappSessionToSource.set(session.id, source);
     return session.id;
   }
 
@@ -1423,6 +1427,42 @@ export class DaemonRuntime {
 
   /** Per-session tool-executed flag for WhatsApp turns. */
   private readonly whatsappToolExecuted = new Map<string, boolean>();
+
+  /**
+   * Channel file sender callback for the `send_file` tool.
+   * Looks up the channel plugin and source JID for the session,
+   * then sends the file via the plugin's sendMessage method.
+   */
+  private readonly channelFileSender = async (
+    sessionId: string,
+    file: { path: string; mimeType: string; caption?: string },
+  ): Promise<{ ok: boolean; error?: string }> => {
+    // Find the source (phone number) for this session
+    const source = this.whatsappSessionToSource.get(sessionId);
+    if (!source) {
+      return { ok: false, error: "Kein Channel-Kontext für diese Session (kein WhatsApp-Chat aktiv)." };
+    }
+
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (!plugin) {
+      return { ok: false, error: "Kein WhatsApp-Plugin aktiv." };
+    }
+
+    try {
+      const { formatJid } = await import("../whatsapp/whitelist.js");
+      const target = formatJid(source);
+      await plugin.sendMessage(target, {
+        files: [{ path: file.path, mimeType: file.mimeType, caption: file.caption }],
+      });
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  };
+
+  /** Reverse map: session ID → source phone number. */
+  private readonly whatsappSessionToSource = new Map<string, string>();
 
   /**
    * Applies a profile's tool policy to the full tool set: an explicit

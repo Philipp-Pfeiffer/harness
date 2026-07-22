@@ -117,12 +117,25 @@ export class MediaTooLargeError extends Error {
 
 /**
  * Checks whether a model supports vision (image content blocks).
- * Checks known vision-capable model name patterns.
+ *
+ * Priority: explicit `supportsVision` config flag wins over name heuristics.
+ * When `supportsVision` is undefined (not configured), falls back to
+ * name-based heuristics.
+ *
+ * @param model Model info with name, provider, and optional supportsVision flag.
+ * @returns true if the model can process image content blocks.
  */
-export function isVisionCapableModel(model: { name: string; provider: string }): boolean {
+export function isVisionCapableModel(
+  model: { name: string; provider: string; supportsVision?: boolean },
+): boolean {
+  // Config flag wins — explicit true or false
+  if (model.supportsVision !== undefined) {
+    return model.supportsVision;
+  }
+
+  // Fallback: name-based heuristics
   const name = model.name.toLowerCase();
   const provider = model.provider.toLowerCase();
-  // Known vision-capable providers/models
   if (provider === "anthropic") return true; // Claude models support vision
   if (provider === "openai" && (name.includes("gpt-4") || name.includes("gpt-4o"))) return true;
   if (provider === "google" || provider === "gemini") return true;

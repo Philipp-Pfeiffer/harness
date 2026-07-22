@@ -117,6 +117,11 @@ export interface RunOptions {
   /** Optional metrics recorder for turn/tool/error events. */
   metricsRecorder?: MetricsRecorder;
   /**
+   * Optional channel file sender. When present, enables the `send_file` tool.
+   * Injected by the daemon when a channel plugin is active for the session.
+   */
+  channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
+  /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
    * per-agent-instance default. Never a process-global scope.
@@ -330,7 +335,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender } = options;
       let effectiveSystemPrompt = systemPrompt;
 
       // Session scope for per-session tool state (read-before-edit guard).
@@ -340,6 +345,7 @@ export function createAgent(config: AgentConfig): Agent {
       const toolContext: ToolCallContext = {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
         logger: logger,
+        channelFileSender,
       };
 
       if (memoryBackend) {
