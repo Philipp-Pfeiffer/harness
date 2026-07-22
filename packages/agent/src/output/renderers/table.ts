@@ -296,47 +296,49 @@ function buildTableElement(
  *
  * Each column gets at least enough width to fit its longest single word
  * (header included), so headers like "Owner" never break mid-word.
- * Remaining width is distributed proportionally to total cell content length.
+ * The table is only as wide as the content requires, capped at maxWidth.
+ * Narrow tables stay narrow instead of being stretched to the full canvas.
  */
 function calculateColWidths(rows: string[][], maxWidth: number): number[] {
   const colCount = rows[0]?.length ?? 0;
+  if (colCount === 0) return [];
 
   // Min width per column = longest single word across all rows (incl. header)
   const minWordLens: number[] = new Array(colCount).fill(1);
+  // Preferred width per column = longest total cell content
+  const contentLens: number[] = new Array(colCount).fill(1);
+
   for (const row of rows) {
     for (let c = 0; c < colCount; c++) {
-      const words = (row[c] ?? '').split(/\s+/);
+      const cell = row[c] ?? '';
+      const words = cell.split(/\s+/);
       for (const word of words) {
         // Approximate rendering width: char count × ~7px at 13px font
         const wordWidth = word.length;
         if (wordWidth > minWordLens[c]!) minWordLens[c] = wordWidth;
       }
+      if (cell.length > contentLens[c]!) contentLens[c] = cell.length;
     }
   }
 
-  // Convert word lengths to pixel widths (7px per char + 20px padding)
-  const minWidths = minWordLens.map((len) => len * 7 + 20);
+  const pxPerChar = 7;
+  const cellPadding = 20;
+  const minWidths = minWordLens.map((len) => len * pxPerChar + cellPadding);
+  const preferredWidths = contentLens.map((len) => len * pxPerChar + cellPadding);
 
-  // Total cell content lengths for proportional distribution
-  const contentLens: number[] = new Array(colCount).fill(1);
-  for (const row of rows) {
-    for (let c = 0; c < colCount; c++) {
-      const len = (row[c] ?? '').length;
-      if (len > contentLens[c]!) contentLens[c] = len;
-    }
-  }
+  // Natural width = at least min width, at most preferred content width
+  let widths = preferredWidths.map((w, i) => Math.max(w, minWidths[i]!));
+  const naturalWidth = widths.reduce((a, b) => a + b, 0);
 
-  const totalChars = contentLens.reduce((a, b) => a + b, 0) || 1;
-
-  // Start with proportional widths
-  let widths = contentLens.map((len) =>
-    Math.round((len / totalChars) * maxWidth),
-  );
-
-  // Ensure each column meets its minimum word width
-  for (let c = 0; c < colCount; c++) {
-    if (widths[c]! < minWidths[c]!) {
-      widths[c] = minWidths[c]!;
+  if (naturalWidth > maxWidth) {
+    // Content is too wide — scale down proportionally, but never below min width
+    const excess = naturalWidth - maxWidth;
+    const shrinkable = widths.map((w, i) => w - minWidths[i]!).reduce((a, b) => a + b, 0);
+    if (shrinkable > 0) {
+      widths = widths.map((w, i) => {
+        const shrink = Math.round((w - minWidths[i]!) / shrinkable * excess);
+        return Math.max(minWidths[i]!, w - shrink);
+      });
     }
   }
 

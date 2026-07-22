@@ -47,8 +47,14 @@
 ### `packages/agent/src/output/capabilities.ts`
 - WhatsApp-Capabilities `maxMonospaceWidth` und `maxTableColumns` auf `0` gesetzt, damit Tabellen **immer** als PNG-Bild gerendert werden.
 
+### `packages/agent/src/output/renderers/table.ts`
+- `calculateColWidths` berechnet jetzt inhaltsbasierte Breiten. Schmale Tabellen bleiben schmal (anstatt auf 700px aufgeblasen zu werden), breite Tabellen nutzen weiterhin die maximale Canvas-Breite.
+
 ### `packages/agent/src/whatsapp/outbound.ts`
 - Attachments werden ohne `caption` versandt (keine "table.png"-Unterschrift mehr).
+
+### `.env.example`
+- Dokumentation für `OPENROUTER_API_KEY` und `OPENROUTER_IMAGE_API_KEY` hinzugefügt.
 
 ## Tests
 - `pnpm -r typecheck` clean.
