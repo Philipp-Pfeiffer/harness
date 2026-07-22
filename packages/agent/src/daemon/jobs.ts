@@ -253,7 +253,7 @@ export async function loadCronJobs(dir: string): Promise<CronJobsLoadResult> {
   return { jobs, errors };
 }
 
-const ENABLED_RE = /^(\s*)(enabled\s*:\s*)(\w+)/im;
+const ENABLED_RE = /^(\s*)(enabled\s*:\s*)(["']?)(\w+)\3/im;
 
 /**
  * Disables a job file on disk by setting `enabled: false` in its
@@ -271,7 +271,7 @@ export async function disableJobFile(
   }
 
   const updated = content.match(ENABLED_RE)
-    ? content.replace(ENABLED_RE, (_m, p1: string, p2: string, _p3: string) => `${p1}${p2}false`)
+    ? content.replace(ENABLED_RE, (_m, p1: string, p2: string, _p3: string, _p4: string) => `${p1}${p2}false`)
     : content.replace(/^---\r?\n/, "---\nenabled: false\n");
 
   try {

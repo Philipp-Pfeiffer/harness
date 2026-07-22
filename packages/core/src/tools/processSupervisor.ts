@@ -41,6 +41,7 @@ class ProcessSupervisor {
     this.gcTimer = setInterval(() => {
       this.gc();
     }, GC_INTERVAL_MS);
+    this.gcTimer.unref();
   }
 
   register(session: Session): void {
