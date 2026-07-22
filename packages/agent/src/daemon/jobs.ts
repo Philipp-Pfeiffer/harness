@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { CronPattern } from "croner";
@@ -26,6 +26,9 @@ import { CronPattern } from "croner";
  * - agent    (optional, type=agent only) agent profile name — the job's
  *            session runs with that profile's prompt, model and tools.
  *            Default: "default".
+ * - once     (optional, default false) "true" | "false" — when true, the
+ *            job is disabled (enabled set to false) after its first
+ *            successful run.
  *
  * Body: prompt text for type=agent, registry function name for type=script.
  */
@@ -45,6 +48,8 @@ export interface CronJob {
   body: string;
   /** Path of the job file this job was loaded from. */
   filePath: string;
+  /** When true, the job disables itself after its first successful run. */
+  once?: boolean;
 }
 
 export class CronJobParseError extends Error {
@@ -125,6 +130,14 @@ function parseEnabled(filePath: string, raw: string | undefined): boolean {
   throw new CronJobParseError(filePath, `invalid enabled value "${raw}" — expected true|false`);
 }
 
+function parseOnce(filePath: string, raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new CronJobParseError(filePath, `invalid once value "${raw}" — expected true|false`);
+}
+
 /**
  * Parses a single cron job file. Validates required fields, the cron
  * schedule (via croner) and the optional jitter duration.
@@ -167,6 +180,8 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
 
   const enabled = parseEnabled(filePath, fields.get("enabled"));
 
+  const once = parseOnce(filePath, fields.get("once"));
+
   const agent = fields.get("agent");
   if (agent !== undefined && !PROFILE_NAME_RE.test(agent)) {
     throw new CronJobParseError(
@@ -197,7 +212,7 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
     );
   }
 
-  return { name, schedule, enabled, type, jitterMs, agent, body, filePath };
+  return { name, schedule, enabled, type, jitterMs, agent, body, filePath, once };
 }
 
 export interface CronJobsLoadResult {
@@ -236,4 +251,33 @@ export async function loadCronJobs(dir: string): Promise<CronJobsLoadResult> {
   }
 
   return { jobs, errors };
+}
+
+const ENABLED_RE = /^(\s*)(enabled\s*:\s*)(\w+)/im;
+
+/**
+ * Disables a job file on disk by setting `enabled: false` in its
+ * frontmatter. Used for `once: true` jobs after their first successful run.
+ * Never throws — errors are reported via the return value.
+ */
+export async function disableJobFile(
+  filePath: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let content: string;
+  try {
+    content = await readFile(filePath, "utf-8");
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const updated = content.match(ENABLED_RE)
+    ? content.replace(ENABLED_RE, (_m, p1: string, p2: string, _p3: string) => `${p1}${p2}false`)
+    : content.replace(/^---\r?\n/, "---\nenabled: false\n");
+
+  try {
+    await writeFile(filePath, updated);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }

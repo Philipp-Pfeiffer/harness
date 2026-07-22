@@ -2,7 +2,7 @@ import { watch, type FSWatcher } from "node:fs";
 
 import { Cron } from "croner";
 
-import { loadCronJobs, type CronJob } from "./jobs.js";
+import { loadCronJobs, disableJobFile, type CronJob } from "./jobs.js";
 import { getScriptJob, type ScriptJobContext } from "./scripts.js";
 import type { ComponentLogger } from "./logger.js";
 
@@ -191,6 +191,10 @@ export class CronScheduler {
         type: job.type,
         latencyMs: Date.now() - startedMs,
       });
+
+      if (job.once) {
+        await this.disableOneShot(job);
+      }
     } catch (err) {
       this.logger.error("job run failed", {
         name: job.name,
@@ -227,6 +231,29 @@ export class CronScheduler {
         });
       });
     }, RELOAD_DEBOUNCE_MS);
+  }
+
+  /**
+   * Stops the cron and disables the job file on disk for a `once: true`
+   * job that just ran successfully. Never throws — file errors are logged.
+   */
+  private async disableOneShot(job: CronJob): Promise<void> {
+    const entry = this.scheduled.get(job.filePath);
+    if (entry) {
+      entry.cron.stop();
+      this.scheduled.delete(job.filePath);
+    }
+    const result = await disableJobFile(job.filePath);
+    if (result.ok) {
+      this.logger.info("one-shot job disabled after successful run", {
+        name: job.name,
+      });
+    } else {
+      this.logger.error("failed to disable one-shot job file", {
+        name: job.name,
+        error: result.error,
+      });
+    }
   }
 }
 

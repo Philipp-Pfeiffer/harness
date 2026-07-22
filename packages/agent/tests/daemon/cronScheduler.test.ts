@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -250,5 +250,58 @@ describe("CronScheduler", () => {
       scriptCtx: { paths, logger: logger.child("cron-test-script"), retentionDays: 14 },
     });
     await scheduler.start(); // must not throw
+  });
+
+  it("disables a once: true job after its first successful run", async () => {
+    let calls = 0;
+    registerScriptJob("test-once", async () => {
+      calls++;
+    });
+    await writeJob(
+      "once.md",
+      `name: once\nschedule: ${EVERY_SECOND}\ntype: script\nonce: true`,
+      "test-once",
+    );
+
+    const s = makeScheduler(async () => {});
+    await s.start();
+
+    await waitFor(() => calls >= 1);
+    // Give disableOneShot time to write the file after the script succeeds
+    await sleep(200);
+
+    // After the successful run, the file should have enabled: false
+    const updated = await readFile(join(jobsDir(), "once.md"), "utf-8");
+    expect(updated).toMatch(/enabled:\s*false/);
+
+    // Wait another schedule cycle — the job should not fire again
+    const callsAfterDisable = calls;
+    await sleep(2_000);
+    expect(calls).toBe(callsAfterDisable);
+  });
+
+  it("does not disable a once: true job when the run fails", async () => {
+    let calls = 0;
+    registerScriptJob("test-once-fail", async () => {
+      calls++;
+      throw new Error("boom");
+    });
+    await writeJob(
+      "once-fail.md",
+      `name: once-fail\nschedule: ${EVERY_SECOND}\ntype: script\nonce: true`,
+      "test-once-fail",
+    );
+
+    const s = makeScheduler(async () => {});
+    await s.start();
+
+    await waitFor(() => calls >= 1);
+
+    // Failing run should NOT disable the job
+    const updated = await readFile(join(jobsDir(), "once-fail.md"), "utf-8");
+    expect(updated).not.toMatch(/enabled:\s*false/);
+
+    // Should fire again
+    await waitFor(() => calls >= 2);
   });
 });

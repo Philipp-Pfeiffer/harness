@@ -182,6 +182,39 @@ describe("parseCronJobFile", () => {
       ),
     ).toThrow(/invalid agent/);
   });
+
+  it("parses once: true", () => {
+    const job = parseCronJobFile(
+      "/jobs/once.md",
+      jobFile("name: once\nschedule: 0 0 * * *\ntype: agent\nonce: true", "prompt"),
+    );
+    expect(job.once).toBe(true);
+  });
+
+  it("parses once: false", () => {
+    const job = parseCronJobFile(
+      "/jobs/once-false.md",
+      jobFile("name: once-false\nschedule: 0 0 * * *\ntype: agent\nonce: false", "prompt"),
+    );
+    expect(job.once).toBe(false);
+  });
+
+  it("defaults once to undefined when absent", () => {
+    const job = parseCronJobFile(
+      "/jobs/no-once.md",
+      jobFile("name: no-once\nschedule: 0 0 * * *\ntype: agent", "prompt"),
+    );
+    expect(job.once).toBeUndefined();
+  });
+
+  it("rejects an invalid once value", () => {
+    expect(() =>
+      parseCronJobFile(
+        "/jobs/bad-once.md",
+        jobFile("name: bad\nschedule: 0 0 * * *\ntype: agent\nonce: maybe", "x"),
+      ),
+    ).toThrow(/once/);
+  });
 });
 
 describe("loadCronJobs", () => {
