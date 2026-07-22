@@ -119,9 +119,11 @@ if [[ "${1:-}" == "--reset-whatsapp-auth" ]]; then
 fi
 
 # Source environment (WHATSAPP_WHITELIST_NUMBER, ASSEMBLYAI_API_KEY, OPENROUTER_API_KEY, etc.)
+# ~/.bashrc exits early in non-interactive shells, so we load the dedicated
+# Harness env file directly.
 # shellcheck source=/dev/null
-if [[ -f "$HOME/.bashrc" ]]; then
-  source "$HOME/.bashrc"
+if [[ -f "$HOME/.harness_env" ]]; then
+  source "$HOME/.harness_env"
 fi
 
 echo "[restart-daemon] Starting daemon..."
