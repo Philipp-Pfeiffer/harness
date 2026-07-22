@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { join } from "node:path";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 import type { SkillRecord } from "../skills/types.js";
 import { recordSkillUse, telemetryPathFor } from "../skills/telemetry.js";
 
@@ -38,7 +39,7 @@ export function createLoadSkillTool(
 
       if (!skill) {
         const available = skills.map((s) => s.name).join(", ");
-        return `Skill not found: "${args.name}". Available skills: ${available}`;
+        return err(`Skill not found: "${args.name}". Available skills: ${available}`);
       }
 
       // Update telemetry (best-effort)
@@ -48,7 +49,7 @@ export function createLoadSkillTool(
       // Check token size
       const bodyTokens = estimateTokens(skill.body);
       if (bodyTokens > MAX_SKILL_BODY_TOKENS) {
-        return (
+        return ok(
           `Skill "${skill.name}" body is ~${bodyTokens} tokens (max: ${MAX_SKILL_BODY_TOKENS}). ` +
           `Consider reading it directly from ${skill.filePath} with line ranges.`
         );
@@ -71,7 +72,7 @@ export function createLoadSkillTool(
         result += `\n\n--- Additional Resources ---\n${hints.join("\n")}`;
       }
 
-      return result;
+      return ok(result);
     },
   };
 }

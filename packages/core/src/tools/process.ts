@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { Value } from "typebox/value";
 import type { Tool } from "./types.js";
+import type { ToolResult } from "./types.js";
 import { processSupervisor } from "./processSupervisor.js";
 import { SYNC_OUTPUT_CAP } from "./limits.js";
 
@@ -75,10 +76,7 @@ function formatTimestamp(date: Date): string {
   return date.toISOString();
 }
 
-export interface ProcessToolResult {
-  isError: boolean;
-  content: string;
-}
+export interface ProcessToolResult extends ToolResult {}
 
 export async function executeProcess(args: ProcessArgsType): Promise<ProcessToolResult> {
   if (!Value.Check(ProcessArgs, args)) {
@@ -257,7 +255,6 @@ export const processTool: Tool<typeof ProcessArgs> = {
     "Manage background processes started by exec. Actions: list all sessions, poll current state, kill running session, read paginated output log, wait for completion.",
   parameters: ProcessArgs,
   async execute(args) {
-    const result = await executeProcess(args);
-    return result.content;
+    return executeProcess(args);
   },
 };

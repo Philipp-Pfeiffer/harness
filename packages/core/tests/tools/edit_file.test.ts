@@ -32,8 +32,8 @@ describe("edit tool", () => {
       const path = resolve(testDir, "unread.txt");
       await executeExecSync({ command: `echo "hello" > ${path}` });
       const result = await editTool.execute({ path, edits: [{ oldText: "hello", newText: "world" }] });
-      expect(result).toContain("READ_REQUIRED");
-      expect(result).toContain("file must be read before editing");
+      expect(result.content).toContain("READ_REQUIRED");
+      expect(result.content).toContain("file must be read before editing");
     });
 
     it("2. unique replace: exact 1 match → ok, edit applied", async () => {
@@ -41,7 +41,7 @@ describe("edit tool", () => {
       await writeTool.execute({ path, content: "hello world" });
       markRead(TEST_SESSION, resolve(path));
       const result = await editTool.execute({ path, edits: [{ oldText: "hello", newText: "bye" }] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("ok: 1");
+      expect(result.content).toContain("ok: 1");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("bye world");
       expect(bashResult.content).not.toContain("hello");
@@ -58,7 +58,7 @@ describe("edit tool", () => {
         },
         { sessionId: TEST_SESSION }
       );
-      expect(result).toContain("ok: 1");
+      expect(result.content).toContain("ok: 1");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("QUX bar QUX baz QUX");
     });
@@ -68,8 +68,8 @@ describe("edit tool", () => {
       await writeTool.execute({ path, content: "hello world" });
       markRead(TEST_SESSION, resolve(path));
       const result = await editTool.execute({ path, edits: [{ oldText: "notexist", newText: "bad" }] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("NOT_UNIQUE");
-      expect(result).toContain("found 0 matches");
+      expect(result.content).toContain("NOT_UNIQUE");
+      expect(result.content).toContain("found 0 matches");
     });
 
     it("5. not-unique error: multiple matches without replaceAll → NOT_UNIQUE error", async () => {
@@ -77,8 +77,8 @@ describe("edit tool", () => {
       await writeTool.execute({ path, content: "foo bar foo" });
       markRead(TEST_SESSION, resolve(path));
       const result = await editTool.execute({ path, edits: [{ oldText: "foo", newText: "QUX" }] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("NOT_UNIQUE");
-      expect(result).toContain("found 2 matches");
+      expect(result.content).toContain("NOT_UNIQUE");
+      expect(result.content).toContain("found 2 matches");
     });
 
     it("6. sequential application: two dependent edits → both applied", async () => {
@@ -95,7 +95,7 @@ describe("edit tool", () => {
         },
         { sessionId: TEST_SESSION }
       );
-      expect(result).toContain("ok: 2");
+      expect(result.content).toContain("ok: 2");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("hi there");
     });
@@ -105,8 +105,8 @@ describe("edit tool", () => {
       await writeTool.execute({ path, content: "hello world" });
       markRead(TEST_SESSION, resolve(path));
       const result = await editTool.execute({ path, edits: [{ oldText: "hello", newText: "hello" }] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("NOOP_EDIT");
-      expect(result).toContain("identical oldText and newText");
+      expect(result.content).toContain("NOOP_EDIT");
+      expect(result.content).toContain("identical oldText and newText");
     });
 
     it("8. empty-edits error: empty edits array → EMPTY_EDITS error", async () => {
@@ -114,13 +114,13 @@ describe("edit tool", () => {
       await writeTool.execute({ path, content: "hello world" });
       markRead(TEST_SESSION, resolve(path));
       const result = await editTool.execute({ path, edits: [] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("EMPTY_EDITS");
-      expect(result).toContain("at least one edit is required");
+      expect(result.content).toContain("EMPTY_EDITS");
+      expect(result.content).toContain("at least one edit is required");
     });
 
     it("9. sensitive path: /etc/file → SENSITIVE_PATH error", async () => {
       const result = await editTool.execute({ path: "/etc/passwd", edits: [{ oldText: "x", newText: "y" }] });
-      expect(result).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("SENSITIVE_PATH");
     });
 
     it("10. markRead after successful edit: file stays marked as read", async () => {
@@ -134,8 +134,8 @@ describe("edit tool", () => {
     it("11. blocks editing a PDF with BINARY_FILE error", async () => {
       markRead(TEST_SESSION, resolve(samplePdf));
       const result = await editTool.execute({ path: samplePdf, edits: [{ oldText: "Hello", newText: "World" }] }, { sessionId: TEST_SESSION });
-      expect(result).toContain("BINARY_FILE");
-      expect(result).toContain("PDF detected");
+      expect(result.content).toContain("BINARY_FILE");
+      expect(result.content).toContain("PDF detected");
     });
 
     it("12. session isolation: file read by session A is not editable by session B", async () => {
@@ -144,21 +144,21 @@ describe("edit tool", () => {
 
       // Session A reads the file.
       const readResult = await readFileTool.execute({ path }, { sessionId: "session-a" });
-      expect(readResult).toContain("hello");
+      expect(readResult.content).toContain("hello");
 
       // Session B must NOT edit the file without its own read.
       const denied = await editTool.execute(
         { path, edits: [{ oldText: "hello", newText: "world" }] },
         { sessionId: "session-b" }
       );
-      expect(denied).toContain("READ_REQUIRED");
+      expect(denied.content).toContain("READ_REQUIRED");
 
       // Session A still can edit it.
       const allowed = await editTool.execute(
         { path, edits: [{ oldText: "hello", newText: "world" }] },
         { sessionId: "session-a" }
       );
-      expect(allowed).toContain("ok: 1");
+      expect(allowed.content).toContain("ok: 1");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("world");
     });

@@ -26,9 +26,15 @@ export type Session = {
 class ProcessSupervisor {
   private sessions = new Map<string, Session>();
   private gcTimer?: NodeJS.Timeout;
+  private logger?: (msg: string, level?: "warn" | "debug") => void;
 
   constructor() {
     this.startGc();
+  }
+
+  /** Inject a logger so warnings go to the agent loop instead of console. */
+  setLogger(fn: (msg: string, level?: "warn" | "debug") => void): void {
+    this.logger = fn;
   }
 
   private startGc(): void {
@@ -137,7 +143,12 @@ class ProcessSupervisor {
 
       const maxTimeoutId = setTimeout(() => {
         clearTimeout(graceTimeoutId);
-        console.warn(`[processSupervisor] kill timeout after ${KILL_MAX_WAIT_MS}ms for session ${handle} (pid: ${session.pid})`);
+        const msg = `[processSupervisor] kill timeout after ${KILL_MAX_WAIT_MS}ms for session ${handle} (pid: ${session.pid})`;
+        if (this.logger) {
+          this.logger(msg, "warn");
+        } else {
+          console.warn(msg);
+        }
         resolve({ killed: false, reason: "timeout", pid: session.pid });
       }, KILL_MAX_WAIT_MS);
 

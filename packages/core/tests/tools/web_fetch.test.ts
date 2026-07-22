@@ -35,9 +35,9 @@ describe("web_fetch tool", () => {
     const tool = createWebFetchTool(undefined);
     const result = await tool.execute({ url: "https://example.com/" });
 
-    expect(result).toContain('<web_content url="https://example.com/" untrusted="true">');
-    expect(result).toContain("Hello world");
-    expect(result).toContain("</web_content>");
+    expect(result.content).toContain('<web_content url="https://example.com/" untrusted="true">');
+    expect(result.content).toContain("Hello world");
+    expect(result.content).toContain("</web_content>");
   });
 
   it("paginates via line_start", async () => {
@@ -51,9 +51,9 @@ describe("web_fetch tool", () => {
 
     const tool = createWebFetchTool(undefined);
     const first = await tool.execute({ url: "https://example.com/" });
-    expect(first).toContain("--- Lines 1-");
+    expect(first.content).toContain("--- Lines 1-");
 
-    const match = first.match(/--- Lines 1-(\d+) of (\d+) ---/);
+    const match = first.content.match(/--- Lines 1-(\d+) of (\d+) ---/);
     expect(match).toBeTruthy();
     const endLine = parseInt(match![1], 10);
     const total = parseInt(match![2], 10);
@@ -67,8 +67,8 @@ describe("web_fetch tool", () => {
       })
     );
     const second = await tool.execute({ url: "https://example.com/", line_start: endLine + 1 });
-    expect(second).toMatch(/--- Lines \d+-\d+ of \d+ ---/);
-    expect(second).not.toContain("\nLine 1\n");
+    expect(second.content).toMatch(/--- Lines \d+-\d+ of \d+ ---/);
+    expect(second.content).not.toContain("\nLine 1\n");
   });
 
   it("never exceeds output cap", async () => {
@@ -77,16 +77,16 @@ describe("web_fetch tool", () => {
 
     const tool = createWebFetchTool(undefined);
     const result = await tool.execute({ url: "https://example.com/" });
-    const content = result.replace(/<web_content[^>]*>/, "").replace("</web_content>", "");
+    const content = result.content.replace(/<web_content[^>]*>/, "").replace("</web_content>", "");
     expect(content.length).toBeLessThanOrEqual(6_500);
   });
 
   it("blocks private URLs", async () => {
     const tool = createWebFetchTool(undefined);
     const result = await tool.execute({ url: "http://127.0.0.1/secret" });
-    expect(result).toContain('<web_content url="http://127.0.0.1/secret" untrusted="true">');
-    expect(result).toContain("web_fetch failed");
-    expect(result).toContain("127.0.0.1");
+    expect(result.content).toContain('<web_content url="http://127.0.0.1/secret" untrusted="true">');
+    expect(result.content).toContain("web_fetch failed");
+    expect(result.content).toContain("127.0.0.1");
   });
 
   it("blocks redirects to private IP", async () => {
@@ -101,8 +101,8 @@ describe("web_fetch tool", () => {
 
     const tool = createWebFetchTool(undefined);
     const result = await tool.execute({ url: "https://example.com/redirect" });
-    expect(result).toContain("web_fetch failed");
-    expect(result).toContain("127.0.0.1");
+    expect(result.content).toContain("web_fetch failed");
+    expect(result.content).toContain("127.0.0.1");
   });
 
   it("returns error inside wrapper when line_start is out of range", async () => {
@@ -112,7 +112,7 @@ describe("web_fetch tool", () => {
 
     const tool = createWebFetchTool(undefined);
     const result = await tool.execute({ url: "https://example.com/", line_start: 100 });
-    expect(result).toContain("line_start out of range");
-    expect(result).toContain("</web_content>");
+    expect(result.content).toContain("line_start out of range");
+    expect(result.content).toContain("</web_content>");
   });
 });

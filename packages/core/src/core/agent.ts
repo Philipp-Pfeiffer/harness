@@ -317,6 +317,7 @@ export function createAgent(config: AgentConfig): Agent {
       // own scope. Never a process-global scope.
       const toolContext: ToolCallContext = {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
+        logger: logger ? (msg: string, _level?: "warn" | "debug") => logger(msg) : undefined,
       };
 
       if (memoryBackend) {
@@ -591,10 +592,12 @@ export function createAgent(config: AgentConfig): Agent {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
                     toolCallCount++;
-                    result = await Promise.resolve(tool.execute(toolCall.arguments, toolContext));
+                    const toolResult = await Promise.resolve(tool.execute(toolCall.arguments, toolContext));
+                    result = toolResult.content;
+                    if (toolResult.isError) isError = true;
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
                     logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
-                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: "ok" });
+                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: isError ? "error" : "ok" });
                   } catch (err) {
                     result = err instanceof Error ? err.message : String(err);
                     isError = true;

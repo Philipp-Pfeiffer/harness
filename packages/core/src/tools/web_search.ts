@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 import type { WebConfig } from "../config.js";
 import { buildSearchProviders, fallbackSearch, applySearchBudgets } from "./webSearch/fallbackSearch.js";
 
@@ -31,10 +32,10 @@ export function createWebSearchTool(webConfig: WebConfig | undefined): Tool<type
       try {
         const { hits, providerName } = await fallbackSearch(providers, args.query, { k });
         const budgeted = applySearchBudgets(hits, webConfig, k);
-        return formatHits(args.query, providerName, budgeted);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return `<web_content url="web_search://${encodeURIComponent(args.query)}" untrusted="true">\nweb_search failed: ${message}\n</web_content>`;
+        return ok(formatHits(args.query, providerName, budgeted));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return err(`<web_content url="web_search://${encodeURIComponent(args.query)}" untrusted="true">\nweb_search failed: ${message}\n</web_content>`);
       }
     },
   };

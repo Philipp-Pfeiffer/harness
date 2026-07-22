@@ -56,8 +56,8 @@ describe("search_memory tool", () => {
 
       expect(backend.query).toHaveBeenCalledOnce();
       expect(backend.query).toHaveBeenCalledWith("phase 2 memory", 8);
-      expect(result).toContain("arch.md");
-      expect(result).toContain("tools.md");
+      expect(result.content).toContain("arch.md");
+      expect(result.content).toContain("tools.md");
     });
   });
 
@@ -77,8 +77,8 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "nonexistent topic" });
 
-      expect(result).toContain("0 strong results");
-      expect(result).not.toContain("error");
+      expect(result.content).toContain("0 strong results");
+      expect(result.content).not.toContain("error");
     });
   });
 
@@ -87,8 +87,8 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(undefined);
       const result = await tool.execute({ query: "anything" });
 
-      expect(result).toContain("unavailable");
-      expect(result).toContain("No memory backend configured");
+      expect(result.content).toContain("unavailable");
+      expect(result.content).toContain("No memory backend configured");
     });
 
     it("does not throw in degraded mode", async () => {
@@ -105,8 +105,8 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "anything" });
 
-      expect(result).toContain("error");
-      expect(result).toContain("QMD store corrupted");
+      expect(result.content).toContain("error");
+      expect(result.content).toContain("QMD store corrupted");
     });
   });
 
@@ -128,11 +128,11 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "query term" });
 
-      expect(result).toContain("Title: Daily Tape");
-      expect(result).toContain("Path: /proj/memory/daily.md");
-      expect(result).toContain("Score:");
-      expect(result).toContain("Snippet:");
-      expect(result).not.toContain("Line five");
+      expect(result.content).toContain("Title: Daily Tape");
+      expect(result.content).toContain("Path: /proj/memory/daily.md");
+      expect(result.content).toContain("Score:");
+      expect(result.content).toContain("Snippet:");
+      expect(result.content).not.toContain("Line five");
     });
 
     it("advises lazy loading via read_file(path)", async () => {
@@ -140,7 +140,7 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "architecture" });
 
-      expect(result).toContain("read_file(path)");
+      expect(result.content).toContain("read_file(path)");
     });
   });
 
@@ -153,8 +153,8 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "relevant" });
 
-      expect(result).toContain("strong.md");
-      expect(result).not.toContain("weak.md");
+      expect(result.content).toContain("strong.md");
+      expect(result.content).not.toContain("weak.md");
     });
 
     it("returns 'no strong results' when all hits are below threshold", async () => {
@@ -164,8 +164,8 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "anything" });
 
-      expect(result).toContain("0 strong results");
-      expect(result).toContain("No strongly relevant notes found");
+      expect(result.content).toContain("0 strong results");
+      expect(result.content).toContain("No strongly relevant notes found");
     });
   });
 
@@ -178,9 +178,9 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "daily entry" });
 
-      expect(result.length).toBeLessThan(6000);
-      expect(result).toContain("Snippet:");
-      expect(result).not.toContain(hugeBody);
+      expect(result.content.length).toBeLessThan(6000);
+      expect(result.content).toContain("Snippet:");
+      expect(result.content).not.toContain(hugeBody);
     });
 
     it("caps each snippet to roughly 500 characters", async () => {
@@ -191,7 +191,7 @@ describe("search_memory tool", () => {
       const tool = createSearchMemoryTool(backend);
       const result = await tool.execute({ query: "word" });
 
-      const snippetMatch = result.match(/Snippet:\n([\s\S]*?)(?=\n\n|\n\[|$)/);
+      const snippetMatch = result.content.match(/Snippet:\n([\s\S]*?)(?=\n\n|\n\[|$)/);
       expect(snippetMatch).toBeTruthy();
       const snippet = snippetMatch![1]!;
       expect(snippet.length).toBeLessThanOrEqual(520);

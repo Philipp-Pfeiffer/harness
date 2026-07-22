@@ -32,7 +32,7 @@ describe("write tool", () => {
     it("1. happy path: write to new file → ok", async () => {
       const path = resolve(testDir, "new_file.txt");
       const result = await writeTool.execute({ path, content: "hello world" });
-      expect(result).toBe("ok");
+      expect(result.content).toBe("ok");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("hello world");
     });
@@ -41,56 +41,56 @@ describe("write tool", () => {
       const path = resolve(testDir, "existing.txt");
       await executeExecSync({ command: `echo "original" > ${path}` });
       const result = await writeTool.execute({ path, content: "overwritten" });
-      expect(result).toBe("ok");
+      expect(result.content).toBe("ok");
       const bashResult = await executeExecSync({ command: `cat ${path}` });
       expect(bashResult.content).toContain("overwritten");
     });
 
     it("3. sensitive path: /etc/test.txt → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/etc/test.txt", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /etc/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /etc/ is blocked");
     });
 
     it("4. sensitive path: /boot/test.txt → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/boot/test.txt", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /boot/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /boot/ is blocked");
     });
 
     it("5. sensitive path: /usr/lib/systemd/test → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/usr/lib/systemd/test", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /usr/lib/systemd/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /usr/lib/systemd/ is blocked");
     });
 
     it("6. sensitive path: /proc/test → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/proc/test", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /proc/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /proc/ is blocked");
     });
 
     it("7. sensitive path: /sys/test → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/sys/test", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /sys/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /sys/ is blocked");
     });
 
     it("8. sensitive path: /dev/urandom → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/dev/urandom", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("Writing to /dev/ is blocked");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("Writing to /dev/ is blocked");
     });
 
     it("9. sensitive path: docker.sock → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/var/run/docker.sock", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
-      expect(result).toContain("docker.sock");
+      expect(result.content).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("docker.sock");
     });
 
     it("10. sensitive path: relative path targeting /etc → SENSITIVE_PATH error", async () => {
       const result = await writeTool.execute({ path: "/etc/passwd", content: "bad" });
-      expect(result).toContain("SENSITIVE_PATH");
+      expect(result.content).toContain("SENSITIVE_PATH");
     });
 
     it("11. atomic rename: writes to tmp then renames to target", async () => {

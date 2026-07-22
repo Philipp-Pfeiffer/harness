@@ -565,14 +565,14 @@ describe("load_skill tool", () => {
     ];
     const tool = createLoadSkillTool(skills, skillsDir);
     const result = await tool.execute({ name: "test-skill" });
-    expect(result).toContain("This is the skill body.");
-    expect(result).toContain("test-skill");
+    expect(result.content).toContain("This is the skill body.");
+    expect(result.content).toContain("test-skill");
   });
 
   it("returns error for unknown skill", async () => {
     const tool = createLoadSkillTool([], skillsDir);
     const result = await tool.execute({ name: "nonexistent" });
-    expect(result).toContain("not found");
+    expect(result.content).toContain("not found");
   });
 
   it("updates telemetry after load", async () => {
@@ -639,8 +639,8 @@ describe("find_skill tool", () => {
     ];
     const tool = createFindSkillTool(skills);
     const result = await tool.execute({ query: "cron scheduling" });
-    expect(result).toContain("cron-jobs");
-    expect(result).not.toContain("memory-search");
+    expect(result.content).toContain("cron-jobs");
+    expect(result.content).not.toContain("memory-search");
   });
 
   it("excludes non-routable skills (atoms with incoming requires)", async () => {
@@ -691,13 +691,13 @@ describe("find_skill tool", () => {
     // child has incoming requires → not routable → not in results
     // But "sub-task" matches child's description. Since child is not routable,
     // it should not appear. The parent's description doesn't mention "sub-task".
-    expect(result).toContain("0 results");
+    expect(result.content).toContain("0 results");
   });
 
   it("returns empty result message for no matches", async () => {
     const skills = [makeSkill("cron", "Manage cron. Use when: scheduling.")];
     const tool = createFindSkillTool(skills);
     const result = await tool.execute({ query: "xyzzy-nothing-matches" });
-    expect(result).toContain("0 results");
+    expect(result.content).toContain("0 results");
   });
 });

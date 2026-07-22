@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Tool } from "./types.js";
+import { ok } from "./types.js";
 import type { SkillRecord } from "../skills/types.js";
 import { computeRoutableSkills } from "../skills/loader.js";
 
@@ -142,13 +143,13 @@ export function createFindSkillTool(
     async execute(args) {
       const query = args.query.trim();
       if (!query) {
-        return "--- skill search: 0 results ---\nQuery was empty after trimming.";
+        return ok("--- skill search: 0 results ---\nQuery was empty after trimming.");
       }
 
       const results = await searchSkills(query, skills, routableSet, opts?.store, DEFAULT_K);
 
       if (results.length === 0) {
-        return `--- skill search: 0 results ---\nNo skills found for "${query}".`;
+        return ok(`--- skill search: 0 results ---\nNo skills found for "${query}".`);
       }
 
       const lines = [`--- skill search: ${results.length} result${results.length === 1 ? "" : "s"} ---`];
@@ -164,7 +165,7 @@ export function createFindSkillTool(
         );
       }
       lines.push(`\nUse load_skill(name) to load the full skill.`);
-      return lines.join("\n");
+      return ok(lines.join("\n"));
     },
   };
 }
@@ -205,8 +206,10 @@ async function searchSkills(
       if (mappedResults.length > 0) {
         return mappedResults.slice(0, k);
       }
-    } catch {
-      // Fall through to keyword search
+    } catch (storeErr) {
+      // QMD search failed — log and fall through to keyword search
+      const msg = storeErr instanceof Error ? storeErr.message : String(storeErr);
+      console.warn(`[findSkill] QMD search failed, falling back to keyword search: ${msg}`);
     }
   }
 

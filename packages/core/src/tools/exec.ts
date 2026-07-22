@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "typebox/value";
 import { spawn } from "node:child_process";
 import type { Tool } from "./types.js";
+import type { ToolResult } from "./types.js";
 import { checkNoFly, resolveCwd } from "./path_util.js";
 import { executeExecPty } from "./execPty.js";
 import { executeExecBackground } from "./execBackground.js";
@@ -89,10 +90,7 @@ const KILL_GRACE_MS = 5_000;
 
 export { EXEC_NO_FLY_PATTERNS } from "./path_util.js";
 
-export interface ExecToolResult {
-  isError: boolean;
-  content: string;
-}
+export interface ExecToolResult extends ToolResult {}
 
 function formatOutput(
   stdout: string,
@@ -458,7 +456,7 @@ export async function executeExecSyncWithYield(args: {
   });
 }
 
-export async function executeExec(args: ExecArgsType): Promise<ExecToolResult> {
+export async function executeExec(args: ExecArgsType, logger?: (msg: string, level?: "warn" | "debug") => void): Promise<ExecToolResult> {
   if (!Value.Check(ExecArgs, args)) {
     const errors = Array.from(Value.Errors(ExecArgs, args));
     const msg = errors
@@ -487,7 +485,7 @@ export async function executeExec(args: ExecArgsType): Promise<ExecToolResult> {
 
   if (args.yieldMs !== undefined) {
     if (args.pty) {
-      return executeExecPty({ ...args, yieldMs: args.yieldMs });
+      return executeExecPty({ ...args, yieldMs: args.yieldMs }, logger);
     }
     return executeExecSyncWithYield({ ...args, yieldMs: args.yieldMs });
   }
@@ -499,7 +497,7 @@ export async function executeExec(args: ExecArgsType): Promise<ExecToolResult> {
       env: args.env,
       timeout: args.timeout,
       elevated: args.elevated,
-    });
+    }, logger);
   }
 
   return executeExecSync(args);
@@ -510,8 +508,7 @@ export const execTool: Tool<typeof ExecArgs> = {
   description:
     "Execute a CLI command. Supports pipes, redirects, globs, environment overrides, stdin, configurable timeout, PTY mode for interactive CLIs (vim, htop, claude, gemini, codex), and elevated execution via passwordless sudo. Returns combined output with exit code. Default timeout 30s, output capped at 64 KB. With yieldMs (default 10000), processes running longer than the yield threshold transition to background and return a handle for later polling. Some destructive commands (e.g. rm -rf /) are blocked.",
   parameters: ExecArgs,
-  async execute(args) {
-    const result = await executeExec(args);
-    return result.content;
+  async execute(args, context) {
+    return executeExec(args, context?.logger);
   },
 };

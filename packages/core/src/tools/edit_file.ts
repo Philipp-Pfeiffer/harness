@@ -5,6 +5,7 @@ import { atomicWrite } from "./atomic_write.js";
 import { markRead, wasRead } from "./file_state.js";
 import { isSensitivePath } from "./write_file.js";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 
 export const EditArgs = Type.Object({
   path: Type.String({ description: "Absolute or relative path. Supports ~ for home directory." }),
@@ -30,23 +31,23 @@ export const editTool: Tool<typeof EditArgs> = {
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {
-      return `SENSITIVE_PATH: ${sensitiveCheck.reason}`;
+      return err(`SENSITIVE_PATH: ${sensitiveCheck.reason}`);
     }
 
     const sessionId = context?.sessionId;
     if (!sessionId || !wasRead(sessionId, absolutePath)) {
-      return `READ_REQUIRED: file must be read before editing`;
+      return err(`READ_REQUIRED: file must be read before editing`);
     }
 
     if (!args.edits || args.edits.length === 0) {
-      return `EMPTY_EDITS: at least one edit is required`;
+      return err(`EMPTY_EDITS: at least one edit is required`);
     }
 
     let buffer: Buffer;
     try {
       buffer = await readFile(absolutePath);
-    } catch (err) {
-      return `READ_FAILED: ${err instanceof Error ? err.message : String(err)}`;
+    } catch (err_) {
+      return err(`READ_FAILED: ${err_ instanceof Error ? err_.message : String(err_)}`);
     }
 
     if (
@@ -57,7 +58,7 @@ export const editTool: Tool<typeof EditArgs> = {
       buffer[3] === 0x46 &&
       buffer[4] === 0x2d
     ) {
-      return "BINARY_FILE: Cannot edit binary file: PDF detected. The edit tool only supports plain-text files. Use a PDF library (e.g. pdf-lib) for PDF modifications.";
+      return err("BINARY_FILE: Cannot edit binary file: PDF detected. The edit tool only supports plain-text files. Use a PDF library (e.g. pdf-lib) for PDF modifications.");
     }
 
     const content = buffer.toString("utf-8");
@@ -67,7 +68,7 @@ export const editTool: Tool<typeof EditArgs> = {
       const edit = args.edits[i];
 
       if (edit.oldText === edit.newText) {
-        return `NOOP_EDIT: edit ${i} has identical oldText and newText`;
+        return err(`NOOP_EDIT: edit ${i} has identical oldText and newText`);
       }
 
       const matches = countOccurrences(working, edit.oldText);
@@ -76,7 +77,7 @@ export const editTool: Tool<typeof EditArgs> = {
         working = working.split(edit.oldText).join(edit.newText);
       } else {
         if (matches !== 1) {
-          return `NOT_UNIQUE: edit ${i} found ${matches} matches (expected exactly 1)`;
+          return err(`NOT_UNIQUE: edit ${i} found ${matches} matches (expected exactly 1)`);
         }
         working = working.replace(edit.oldText, edit.newText);
       }
@@ -84,11 +85,11 @@ export const editTool: Tool<typeof EditArgs> = {
 
     const result = await atomicWrite(absolutePath, working);
     if (!result.ok) {
-      return `${result.code}: ${result.message}`;
+      return err(`${result.code}: ${result.message}`);
     }
 
     markRead(sessionId, absolutePath);
-    return `ok: ${args.edits.length}`;
+    return ok(`ok: ${args.edits.length}`);
   },
 };
 

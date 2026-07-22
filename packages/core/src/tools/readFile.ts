@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { cwd } from "node:process";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { Tool, ToolCallContext } from "./types.js";
+import { ok, err } from "./types.js";
 import { markRead } from "./file_state.js";
 import { TEXT_EXTRACT_CAP, BINARY_SCAN_SAMPLE_SIZE } from "./limits.js";
 
@@ -111,18 +112,18 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
     let buffer: Buffer;
     try {
       buffer = await readFile(resolvedPath);
-    } catch (err) {
-      if (err instanceof Error && "code" in err) {
-        switch (err.code) {
+    } catch (err_) {
+      if (err_ instanceof Error && "code" in err_) {
+        switch (err_.code) {
           case "ENOENT":
-            return `File not found: ${resolvedPath}`;
+            return err(`File not found: ${resolvedPath}`);
           case "EACCES":
-            return `Permission denied: ${resolvedPath}`;
+            return err(`Permission denied: ${resolvedPath}`);
           case "EISDIR":
-            return `Path is a directory, not a file: ${resolvedPath}`;
+            return err(`Path is a directory, not a file: ${resolvedPath}`);
         }
       }
-      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+      return err(`Error: ${err_ instanceof Error ? err_.message : String(err_)}`);
     }
 
     if (isPdf(buffer)) {
@@ -138,28 +139,28 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
 
         if (args.lineStart !== undefined || args.lineEnd !== undefined) {
           text = sliceLines(text, args.lineStart, args.lineEnd);
-          if (text.startsWith("Error:")) return text;
+          if (text.startsWith("Error:")) return err(text);
         }
 
         const sizeError = checkSize(text);
-        if (sizeError) return sizeError;
+        if (sizeError) return err(sizeError);
 
         markSessionRead(context, resolvedPath);
-        return `--- PDF, ${doc.numPages} pages ---\n${text}`;
-      } catch (err) {
-        return `Failed to parse PDF: ${err instanceof Error ? err.message : String(err)}`;
+        return ok(`--- PDF, ${doc.numPages} pages ---\n${text}`);
+      } catch (err_) {
+        return err(`Failed to parse PDF: ${err_ instanceof Error ? err_.message : String(err_)}`);
       }
     }
 
     if (isBinary(buffer)) {
-      return "Unsupported binary format detected. Only UTF-8 text and PDF are supported.";
+      return err("Unsupported binary format detected. Only UTF-8 text and PDF are supported.");
     }
 
     let content: string;
     try {
       content = await readFile(resolvedPath, "utf-8");
-    } catch (err) {
-      return `Error: ${err instanceof Error ? err.message : String(err)}`;
+    } catch (err_) {
+      return err(`Error: ${err_ instanceof Error ? err_.message : String(err_)}`);
     }
 
     if (args.lineStart !== undefined || args.lineEnd !== undefined) {
@@ -167,15 +168,15 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
       const totalLines = allLines.length;
       const clampedEnd = Math.min(args.lineEnd ?? totalLines, totalLines);
       content = sliceLines(content, args.lineStart, clampedEnd);
-      if (content.startsWith("Error:")) return content;
+      if (content.startsWith("Error:")) return err(content);
       const start = args.lineStart ?? 1;
       markSessionRead(context, resolvedPath);
-      return `--- Lines ${start}-${clampedEnd} of ${totalLines} ---\n${content}`;
+      return ok(`--- Lines ${start}-${clampedEnd} of ${totalLines} ---\n${content}`);
     }
 
     const sizeError = checkSize(content);
-    if (sizeError) return sizeError;
+    if (sizeError) return err(sizeError);
     markSessionRead(context, resolvedPath);
-    return content;
+    return ok(content);
   },
 };

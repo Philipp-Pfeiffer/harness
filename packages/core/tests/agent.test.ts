@@ -4,6 +4,7 @@ import { createAgent } from "../src/core/agent.js";
 import { createMailbox } from "../src/core/mailbox.js";
 import { complete, stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../src/tools/types.js";
+import { ok } from "../src/tools/types.js";
 import type { AssistantMessageEventStream, Message } from "@mariozechner/pi-ai";
 import type { MemoryBackend, AmbientHint } from "../src/core/memoryBackend.js";
 
@@ -110,7 +111,7 @@ describe("Agent", () => {
       name: "echo",
       description: "Echo for tests",
       parameters: echoArgs,
-      execute(args) { return args.text; },
+      execute(args) { return ok(args.text); },
     };
     const agent = createAgent({ tools: [echoTool], model });
 
@@ -136,7 +137,7 @@ describe("Agent", () => {
       name: "echo",
       description: "Probe for tool context",
       parameters: echoArgs,
-      execute(args, ctx) { capturedSession = ctx?.sessionId; return args.text; },
+      execute(args, ctx) { capturedSession = ctx?.sessionId; return ok(args.text); },
     };
     const agent = createAgent({ tools: [probeTool], model });
 
@@ -151,7 +152,7 @@ describe("Agent", () => {
       name: "echo",
       description: "Probe for tool context",
       parameters: echoArgs,
-      execute(args, ctx) { capturedSession = ctx?.sessionId; return args.text; },
+      execute(args, ctx) { capturedSession = ctx?.sessionId; return ok(args.text); },
     };
     const agent = createAgent({ tools: [probeTool], model });
 
@@ -242,7 +243,7 @@ describe("Agent", () => {
       name: "echo",
       description: "Echo for tests",
       parameters: echoArgs,
-      execute(args) { return args.text; },
+      execute(args) { return ok(args.text); },
     };
     const agent = createAgent({ tools: [echoTool], model });
 
@@ -273,7 +274,7 @@ describe("Agent", () => {
       name: "echo",
       description: "Echo for tests",
       parameters: echoArgs,
-      execute(args) { return args.text; },
+      execute(args) { return ok(args.text); },
     };
     const agent = createAgent({ tools: [echoTool], model, maxIterations: 2 });
 
@@ -311,7 +312,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute() { return "should-not-run"; },
+        execute() { return ok("should-not-run"); },
       };
       const agent = createAgent({ tools: [echoTool], model });
       const result = await agent.run([makeUserMessage("Call echo")], { signal: controller.signal });
@@ -341,7 +342,7 @@ describe("Agent", () => {
           if (toolRuns === 1) {
             controller.abort();
           }
-          return "done";
+          return ok("done");
         },
       };
 
@@ -404,7 +405,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute(args) { return args.text; },
+        execute(args) { return ok(args.text); },
       };
       const agent = createAgent({ tools: [echoTool], model });
 
@@ -463,7 +464,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute(args) { return args.text; },
+        execute(args) { return ok(args.text); },
       };
       const agent = createAgent({ tools: [echoTool], model });
 
@@ -494,7 +495,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute(args) { return args.text; },
+        execute(args) { return ok(args.text); },
       };
       const agent = createAgent({ tools: [echoTool], model });
 
@@ -618,7 +619,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute() { return "done"; },
+        execute() { return ok("done"); },
       };
 
       const agent = createAgent({ tools: [echoTool], model });
@@ -649,7 +650,7 @@ describe("Agent", () => {
         execute() {
           toolExecuted = true;
           controller.abort();
-          return "done";
+          return ok("done");
         },
       };
 
@@ -724,7 +725,7 @@ describe("Agent", () => {
         name: "echo",
         description: "Echo for tests",
         parameters: echoArgs,
-        execute() { return "done"; },
+        execute() { return ok("done"); },
       };
 
       const agent = createAgent({ tools: [echoTool], model });
@@ -760,7 +761,7 @@ describe("Agent", () => {
           if (toolRuns === 1) {
             controller.abort();
           }
-          return "done";
+          return ok("done");
         },
       };
 
@@ -807,7 +808,7 @@ describe("Agent", () => {
         description: "Echo for tests",
         parameters: echoArgs,
         execute(args) {
-          return args.text;
+          return ok(args.text);
         },
       };
       const agent = createAgent({ tools: [echoTool], model });
@@ -852,7 +853,7 @@ describe("Agent", () => {
         description: "Echo for tests",
         parameters: echoArgs,
         execute(args) {
-          return args.text;
+          return ok(args.text);
         },
       };
       const agent = createAgent({ tools: [echoTool], model });
@@ -886,7 +887,7 @@ describe("Agent", () => {
         description: "Echo for tests",
         parameters: echoArgs,
         execute() {
-          return "done";
+          return ok("done");
         },
       };
       const agent = createAgent({ tools: [echoTool], model });
@@ -935,7 +936,7 @@ describe("Agent", () => {
         description: "Echo for tests",
         parameters: echoArgs,
         execute(args) {
-          return args.text;
+          return ok(args.text);
         },
       };
       const agent = createAgent({ tools: [echoTool], model });
@@ -1055,7 +1056,7 @@ describe("Agent", () => {
         description: "Echo for tests",
         parameters: echoArgs,
         execute(args) {
-          return args.text;
+          return ok(args.text);
         },
       };
       const agent = createAgent({ tools: [echoTool], model });
@@ -1094,7 +1095,7 @@ describe("Agent", () => {
         execute() {
           toolExecuted = true;
           controller.abort();
-          return "done";
+          return ok("done");
         },
       };
 

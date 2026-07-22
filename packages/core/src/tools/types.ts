@@ -1,22 +1,51 @@
 import type { Static, TSchema } from "@mariozechner/pi-ai";
 
 /**
+ * Unified result type returned by every tool's `execute()`.
+ *
+ * - `content` is the human/LLM-visible text (stdout, file contents, error message, …).
+ * - `isError` tells the agent loop to flag the tool result as an error for the LLM.
+ *
+ * Tools should return `ok(content)` for success and `err(content)` for expected
+ * failures (file not found, validation, blocked path, …). Unexpected errors
+ * may be thrown — the agent loop catches them and treats them as errors.
+ */
+export interface ToolResult {
+  content: string;
+  isError: boolean;
+}
+
+/** Success helper: `return ok("file contents…")` */
+export function ok(content: string): ToolResult {
+  return { content, isError: false };
+}
+
+/** Error helper: `return err("File not found: /path")` */
+export function err(content: string): ToolResult {
+  return { content, isError: true };
+}
+
+/**
  * Per-call execution context passed by the agent loop.
  *
  * `sessionId` scopes per-session tool state (e.g. the read-before-edit
  * guard in `file_state.ts`). The agent always provides a scope: either the
  * run's sessionId or a per-agent-instance default. Direct tool callers that
  * omit the context get strict behavior (every file counts as unread).
+ *
+ * `logger` is an optional diagnostic logger. When present, tools should use
+ * it instead of `console.warn` for non-critical warnings.
  */
 export interface ToolCallContext {
   sessionId?: string;
+  logger?: (msg: string, level?: "warn" | "debug") => void;
 }
 
 export interface Tool<TParameters extends TSchema = TSchema> {
   name: string;
   description: string;
   parameters: TParameters;
-  execute(args: Static<TParameters>, context?: ToolCallContext): Promise<string> | string;
+  execute(args: Static<TParameters>, context?: ToolCallContext): Promise<ToolResult> | ToolResult;
   /**
    * Optional: returns a string key that determines which tool calls
    * must run serially with respect to each other. Tool calls with the

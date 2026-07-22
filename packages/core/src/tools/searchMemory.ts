@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 import type { MemoryBackend, MemoryHit } from "../core/memoryBackend.js";
 
 const SearchMemoryArgs = Type.Object({
@@ -117,20 +118,20 @@ export function createSearchMemoryTool(memoryBackend?: MemoryBackend): Tool<type
       const query = args.query.trim();
 
       if (!query) {
-        return "--- memory search: 0 strong results ---\nQuery was empty after trimming.";
+        return ok("--- memory search: 0 strong results ---\nQuery was empty after trimming.");
       }
 
       if (!memoryBackend) {
-        return "--- memory search: unavailable ---\nNo memory backend configured. Memory search is not available.";
+        return ok("--- memory search: unavailable ---\nNo memory backend configured. Memory search is not available.");
       }
 
       try {
         const hits = await memoryBackend.query(query, DEFAULT_K);
         const strong = hits.filter((h) => h.score >= MIN_SCORE);
-        return formatResults(query, strong);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return `--- memory search: error ---\nFailed to search memory: ${message}`;
+        return ok(formatResults(query, strong));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return err(`--- memory search: error ---\nFailed to search memory: ${message}`);
       }
     },
   };

@@ -3,6 +3,7 @@ import { resolveExpandedPath } from "./path_util.js";
 import { atomicWrite } from "./atomic_write.js";
 import { markRead } from "./file_state.js";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 
 export const WriteArgs = Type.Object({
   path: Type.String({ description: "Absolute or relative path. Supports ~ for home directory." }),
@@ -40,15 +41,15 @@ export const writeTool: Tool<typeof WriteArgs> = {
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {
-      return `SENSITIVE_PATH: ${sensitiveCheck.reason}`;
+      return err(`SENSITIVE_PATH: ${sensitiveCheck.reason}`);
     }
 
     const result = await atomicWrite(absolutePath, args.content);
     if (!result.ok) {
-      return `${result.code}: ${result.message}`;
+      return err(`${result.code}: ${result.message}`);
     }
 
     if (context?.sessionId) markRead(context.sessionId, absolutePath);
-    return "ok";
+    return ok("ok");
   },
 };

@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import TurndownService from "turndown";
 import type { Tool } from "./types.js";
+import { ok, err } from "./types.js";
 import type { WebConfig } from "../config.js";
 import { validateUrl, WebSecurityError, createSecureDispatcher } from "./webSecurity.js";
 import type { Dispatcher } from "undici";
@@ -186,12 +187,12 @@ export function createWebFetchTool(webConfig: WebConfig | undefined): Tool<typeo
         const { text } = await fetchWithSecurity(args.url, webConfig, dispatcher);
         const page = paginate(text, args.line_start, outputCap);
         if (page.startsWith("Error:")) {
-          return `<web_content url="${args.url}" untrusted="true">\n${page}\n</web_content>`;
+          return err(`<web_content url="${args.url}" untrusted="true">\n${page}\n</web_content>`);
         }
-        return `<web_content url="${args.url}" untrusted="true">\n${page}\n</web_content>`;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return `<web_content url="${args.url}" untrusted="true">\nweb_fetch failed: ${message}\n</web_content>`;
+        return ok(`<web_content url="${args.url}" untrusted="true">\n${page}\n</web_content>`);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return err(`<web_content url="${args.url}" untrusted="true">\nweb_fetch failed: ${message}\n</web_content>`);
       }
     },
   };

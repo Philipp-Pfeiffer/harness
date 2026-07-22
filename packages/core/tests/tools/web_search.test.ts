@@ -170,8 +170,8 @@ describe("createWebSearchTool", () => {
   it("wraps results and errors in web_content tag", async () => {
     const tool = createWebSearchTool(undefined);
     const result = await tool.execute({ query: "test" });
-    expect(result).toContain('<web_content url="web_search://test" untrusted="true">');
-    expect(result).toContain("web_search failed");
-    expect(result).toContain("</web_content>");
+    expect(result.content).toContain('<web_content url="web_search://test" untrusted="true">');
+    expect(result.content).toContain("web_search failed");
+    expect(result.content).toContain("</web_content>");
   });
 });

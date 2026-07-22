@@ -50,7 +50,7 @@ export async function executeExecPty(args: {
   elevated?: boolean;
   timeout?: number;
   yieldMs?: number;
-}): Promise<ExecToolResult> {
+}, logger?: (msg: string, level?: "warn" | "debug") => void): Promise<ExecToolResult> {
   const resolvedCwdResult = await resolveCwd(args.cwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
     return { isError: true, content: "cwd does not exist or is not a directory" };
@@ -73,7 +73,12 @@ export async function executeExecPty(args: {
   const timeoutMs = args.timeout ?? 30_000;
 
   if (shellPath === "/bin/sh") {
-    console.warn("[execPty] Warning: falling back to /bin/sh. Bash-specific syntax may fail.");
+    const msg = "[execPty] Warning: falling back to /bin/sh. Bash-specific syntax may fail.";
+    if (logger) {
+      logger(msg, "warn");
+    } else {
+      console.warn(msg);
+    }
   }
 
   const ptyProc = pty.spawn(shellPath, ["-c", finalCommand], {

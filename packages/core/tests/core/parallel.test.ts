@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { createAgent } from "../../src/core/agent.js";
 import { stream, getModel } from "@mariozechner/pi-ai";
 import type { Tool } from "../../src/tools/types.js";
+import { ok } from "../../src/tools/types.js";
 import { writeTool } from "../../src/tools/write_file.js";
 import { editTool } from "../../src/tools/edit_file.js";
 import { resolveExpandedPath } from "../../src/tools/path_util.js";
@@ -90,7 +91,7 @@ const delayTool: Tool<typeof delayArgs> = {
   parameters: delayArgs,
   async execute(args) {
     await sleep(args.ms);
-    return `done ${args.id}`;
+    return ok(`done ${args.id}`);
   },
 };
 
@@ -104,7 +105,7 @@ const serialTool: Tool<typeof serialArgs> = {
   },
   async execute(args) {
     await sleep(args.ms);
-    return `done ${args.id}`;
+    return ok(`done ${args.id}`);
   },
 };
 
@@ -116,7 +117,7 @@ const failTool: Tool<typeof failArgs> = {
   async execute(args) {
     await sleep(args.ms);
     if (args.shouldFail) throw new Error(`fail ${args.id}`);
-    return `ok ${args.id}`;
+    return ok(`ok ${args.id}`);
   },
 };
 
@@ -127,7 +128,7 @@ const orderTool: Tool<typeof orderArgs> = {
   parameters: orderArgs,
   async execute(args) {
     await sleep(args.ms);
-    return `result ${args.id}`;
+    return ok(`result ${args.id}`);
   },
 };
 
@@ -172,7 +173,7 @@ describe("Parallel tool execution", () => {
         await sleep(args.ms);
         const end = Date.now();
         timestamps.push({ id: args.id, start, end });
-        return `done ${args.id}`;
+        return ok(`done ${args.id}`);
       },
     };
 
@@ -208,7 +209,7 @@ describe("Parallel tool execution", () => {
         await sleep(args.ms);
         const end = Date.now();
         timestamps.push({ id: args.id, start, end });
-        return `done ${args.id}`;
+        return ok(`done ${args.id}`);
       },
     };
 
