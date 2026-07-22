@@ -444,7 +444,7 @@ export async function harnessChat(sessionId?: string): Promise<CliResult> {
       );
       if (resp.type === "session-created") {
         activeSessionId = resp.sessionId;
-        console.log(`Session: ${activeSessionId}`);
+        process.stdout.write(`Session: ${activeSessionId}\n`);
       } else {
         return { stdout: `Failed to create session: ${JSON.stringify(resp)}`, exitCode: 1 };
       }
@@ -463,7 +463,7 @@ export async function harnessChat(sessionId?: string): Promise<CliResult> {
         10_000,
       );
       if (resp.type === "session-resumed") {
-        console.log(`Resumed session: ${activeSessionId} (${resp.messageCount} messages)`);
+        process.stdout.write(`Resumed session: ${activeSessionId} (${resp.messageCount} messages)\n`);
       } else if (resp.type === "error") {
         return { stdout: `Failed to resume session: ${resp.message}`, exitCode: 1 };
       }
@@ -475,7 +475,7 @@ export async function harnessChat(sessionId?: string): Promise<CliResult> {
     }
   }
 
-  console.log(`Type your message. Ctrl+C to exit.\n`);
+  process.stdout.write(`Type your message. Ctrl+C to exit.\n\n`);
 
   const rl = createInterface({
     input: process.stdin,
