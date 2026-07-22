@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { Agent, type Dispatcher } from "undici";
 
 export class WebSecurityError extends Error {
   constructor(message: string) {
@@ -10,6 +11,82 @@ export class WebSecurityError extends Error {
 
 export interface WebFetchSecurityConfig {
   allowlist?: string[];
+}
+
+/**
+ * Lookup function signature compatible with Node's `net`/`tls` connect options.
+ */
+type ConnectLookup = (
+  hostname: string,
+  options: { all?: boolean; family?: number },
+  callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+) => void;
+
+/**
+ * Creates a DNS lookup function that validates resolved IPs at connection
+ * time, closing the TOCTOU gap between validateUrl() and the actual fetch().
+ *
+ * When the hostname is already an IP, it is validated directly. Otherwise DNS
+ * is resolved and every returned address is checked against the private-IP
+ * blocklist (unless the host is on the allowlist). The callback returns the
+ * first validated address — the same one undici connects to.
+ */
+function createSecureLookup(config?: WebFetchSecurityConfig): ConnectLookup {
+  return (hostname, opts, callback) => {
+    // Direct IP in URL — validate immediately
+    const directIp = isIP(hostname);
+    if (directIp) {
+      if (!isAllowedHost(hostname, config?.allowlist) && isPrivateIp(hostname)) {
+        callback(toErrno(`Private IP address is blocked: ${hostname}`), "", 0);
+        return;
+      }
+      callback(null, hostname, directIp);
+      return;
+    }
+
+    // Hostname — resolve at connection time (single source of truth)
+    lookup(hostname, { all: true, family: opts.family })
+      .then((addrs) => {
+        if (addrs.length === 0) {
+          callback(toErrno(`DNS lookup returned no addresses for ${hostname}`), "", 0);
+          return;
+        }
+        if (!isAllowedHost(hostname, config?.allowlist)) {
+          for (const addr of addrs) {
+            if (isPrivateIp(addr.address)) {
+              callback(toErrno(`Hostname ${hostname} resolves to private IP ${addr.address}`), "", 0);
+              return;
+            }
+          }
+        }
+        callback(null, addrs[0].address, addrs[0].family);
+      })
+      .catch((err) => {
+        callback(toErrno(`DNS lookup failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`), "", 0);
+      });
+  };
+}
+
+function toErrno(message: string): NodeJS.ErrnoException {
+  const err = new Error(message) as NodeJS.ErrnoException;
+  err.code = "ESECURITY";
+  return err;
+}
+
+/**
+ * Creates an undici Dispatcher that validates DNS at connection time.
+ *
+ * Pass the returned dispatcher to `fetch(url, { dispatcher })` to ensure the
+ * IP validated during DNS resolution is the same IP that receives the
+ * connection — eliminating DNS-rebinding / SSRF TOCTOU.
+ */
+export function createSecureDispatcher(config?: WebFetchSecurityConfig): Dispatcher {
+  return new Agent({
+    connect: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      lookup: createSecureLookup(config) as any,
+    },
+  });
 }
 
 function isPrivateIp(ip: string): boolean {

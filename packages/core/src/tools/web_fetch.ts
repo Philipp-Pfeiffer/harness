@@ -2,7 +2,8 @@ import { Type } from "@sinclair/typebox";
 import TurndownService from "turndown";
 import type { Tool } from "./types.js";
 import type { WebConfig } from "../config.js";
-import { validateUrl, WebSecurityError } from "./webSecurity.js";
+import { validateUrl, WebSecurityError, createSecureDispatcher } from "./webSecurity.js";
+import type { Dispatcher } from "undici";
 
 const WebFetchArgs = Type.Object({
   url: Type.String({ minLength: 1, description: "URL to fetch. Only http/https allowed." }),
@@ -31,6 +32,7 @@ interface FetchResult {
 async function fetchWithSecurity(
   rawUrl: string,
   webConfig: WebConfig | undefined,
+  dispatcher: Dispatcher,
   redirectCount = 0,
 ): Promise<FetchResult> {
   const timeoutMs = webConfig?.web_fetch?.timeout ?? DEFAULT_TIMEOUT_MS;
@@ -56,7 +58,9 @@ async function fetchWithSecurity(
       },
       redirect: "manual",
       signal: controller.signal,
-    });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      dispatcher,
+    } as any);
   } catch (err) {
     clearTimeout(timeoutId);
     if (err instanceof Error && err.name === "AbortError") {
@@ -72,7 +76,7 @@ async function fetchWithSecurity(
       throw new WebSecurityError(`Redirect ${response.status} without Location header`);
     }
     const nextUrl = new URL(location, rawUrl).toString();
-    return fetchWithSecurity(nextUrl, webConfig, redirectCount + 1);
+    return fetchWithSecurity(nextUrl, webConfig, dispatcher, redirectCount + 1);
   }
 
   if (!response.ok) {
@@ -170,6 +174,7 @@ function paginate(text: string, lineStart: number | undefined, cap: number): str
 
 export function createWebFetchTool(webConfig: WebConfig | undefined): Tool<typeof WebFetchArgs> {
   const outputCap = webConfig?.web_fetch?.outputCap ?? DEFAULT_OUTPUT_CAP;
+  const dispatcher = createSecureDispatcher({ allowlist: webConfig?.web_fetch?.allowlist });
 
   return {
     name: "web_fetch",
@@ -178,7 +183,7 @@ export function createWebFetchTool(webConfig: WebConfig | undefined): Tool<typeo
     parameters: WebFetchArgs,
     async execute(args) {
       try {
-        const { text } = await fetchWithSecurity(args.url, webConfig);
+        const { text } = await fetchWithSecurity(args.url, webConfig, dispatcher);
         const page = paginate(text, args.line_start, outputCap);
         if (page.startsWith("Error:")) {
           return `<web_content url="${args.url}" untrusted="true">\n${page}\n</web_content>`;

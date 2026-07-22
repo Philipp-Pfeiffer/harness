@@ -961,6 +961,10 @@ export class DaemonRuntime {
     const result = await loadConfig({ harnessHome: this.paths.home });
     this.configDefaultModel = result.defaultModel;
 
+    if (result.warning) {
+      this.logger.child("config").warn(result.warning);
+    }
+
     // Load daemon-specific config from config.json if present
     // (The existing config format is extended with an optional "daemon" key)
     // Merge: constructor overrides take precedence over config.json daemon key,

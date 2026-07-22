@@ -245,4 +245,82 @@ describe("loadConfig", () => {
     expect(result.defaultModel?.provider).toBe("neuralwatt");
     expect(result.defaultModel?.apiKey).toBe("sk-test");
   });
+
+  it("warns when plaintext API key is in a Git-tracked directory", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+    // Simulate Git repo
+    mkdirSync(path.join(cwd, ".git"));
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "sk-plaintext-secret",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.warning).toBeDefined();
+    expect(result.warning).toContain("plaintext API keys");
+    expect(result.warning).toContain("Git");
+  });
+
+  it("does not warn when API keys use env: references in a Git repo", async () => {
+    process.env.HARNESS_TEST_KEY = "sk-from-env";
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+    mkdirSync(path.join(cwd, ".git"));
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "env:HARNESS_TEST_KEY",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.warning).toBeUndefined();
+
+    delete process.env.HARNESS_TEST_KEY;
+  });
+
+  it("does not warn when plaintext API key is outside a Git repo", async () => {
+    const cwd = path.join(tmpBase, "project");
+    mkdirSync(cwd, { recursive: true });
+    // No .git directory
+
+    const config = {
+      providers: {
+        neuralwatt: {
+          type: "openai",
+          baseUrl: "https://api.neuralwatt.com/v1",
+          apiKey: "sk-plaintext-secret",
+        },
+      },
+      models: [
+        { provider: "neuralwatt", model: "kimi-k2.7-code", alias: "Kimi K2.7 Code" },
+      ],
+    };
+    writeFileSync(path.join(cwd, "harness.config.json"), JSON.stringify(config));
+
+    const result = await loadConfig({ cwd, harnessHome: tmpBase });
+
+    expect(result.warning).toBeUndefined();
+  });
 });

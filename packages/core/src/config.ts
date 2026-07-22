@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveHarnessPaths } from "./config/paths.js";
@@ -65,6 +65,54 @@ const DEFAULT_MODELS: ConfigModel[] = [
 ];
 
 const DEFAULT_PROVIDERS: Record<string, ConfigProvider> = {};
+
+/**
+ * Returns true if the value is an environment-variable reference
+ * (either `env:VAR_NAME` or contains `${VAR}` substitution),
+ * meaning it is NOT stored in plaintext.
+ */
+function isEnvRef(value: string): boolean {
+  return value.startsWith("env:") || value.includes("${");
+}
+
+/**
+ * Checks whether the raw (pre-resolution) config contains any API keys
+ * stored as plaintext literals rather than environment-variable references.
+ */
+function hasPlaintextApiKeys(config: Config): boolean {
+  if (config.providers) {
+    for (const provider of Object.values(config.providers)) {
+      if (provider.apiKey && !isEnvRef(provider.apiKey)) return true;
+    }
+  }
+  if (config.models) {
+    for (const model of config.models) {
+      if (model.apiKey && !isEnvRef(model.apiKey)) return true;
+    }
+  }
+  if (config.defaultModel?.apiKey && !isEnvRef(config.defaultModel.apiKey)) {
+    return true;
+  }
+  if (config.web_search?.providers) {
+    for (const p of config.web_search.providers) {
+      if ("apiKey" in p && p.apiKey && !isEnvRef(p.apiKey)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Checks whether the given directory is inside a Git repository
+ * by looking for a `.git` entry (directory or file for worktrees).
+ */
+async function isGitRepo(dir: string): Promise<boolean> {
+  try {
+    await stat(path.join(dir, ".git"));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function resolveConfigString(value: string): string {
   // Explicit env-reference: the entire value must be "env:VAR_NAME".
@@ -149,6 +197,7 @@ export async function loadConfig(options?: {
   defaultModel?: ConfigModel;
   webConfig: WebConfig;
   error?: string;
+  warning?: string;
   source?: string;
 }> {
   const cwd = options?.cwd ?? process.cwd();
@@ -206,6 +255,16 @@ export async function loadConfig(options?: {
       };
     }
 
+    // Check for plaintext API keys in a Git-tracked directory (security warning).
+    // Must be done before resolveConfigValues, since afterwards env: references
+    // are indistinguishable from literal values.
+    let warning: string | undefined;
+    if (hasPlaintextApiKeys(parsed) && await isGitRepo(path.dirname(candidate.path))) {
+      warning =
+        "Config contains plaintext API keys and is in a Git-tracked directory. " +
+        "Use env:VAR_NAME references to avoid committing secrets.";
+    }
+
     // resolveConfigValues may throw for missing env-var references — propagate.
     const config = resolveConfigValues(parsed) as Config;
 
@@ -225,6 +284,7 @@ export async function loadConfig(options?: {
         providers: DEFAULT_PROVIDERS,
         webConfig,
         error: "Config has no models, using default",
+        warning,
         source: candidate.source,
       };
     }
@@ -233,7 +293,7 @@ export async function loadConfig(options?: {
       ? mergeProviderDefaults([config.defaultModel], providers)[0]
       : undefined;
 
-    return { models, providers, defaultModel, webConfig, source: candidate.source };
+    return { models, providers, defaultModel, webConfig, warning, source: candidate.source };
   }
 
   return {
