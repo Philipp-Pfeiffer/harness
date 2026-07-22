@@ -82,6 +82,7 @@ import type {
 import { DEFAULT_DAEMON_CONFIG } from "./types.js";
 
 import { createWhatsAppPlugin } from "../whatsapp/plugin.js";
+import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import type { ChannelPlugin } from "./types.js";
 
 /**
@@ -1356,8 +1357,12 @@ export class DaemonRuntime {
 
   /**
    * Resolves or creates a persistent WhatsApp session for a phone number.
+   * On daemon restart: searches the session index for an existing WhatsApp
+   * session matching this source. Resumes if found and <8h inactive,
+   * otherwise creates a new session (with notification in chat).
    */
   private async resolveWhatsAppSession(source: string): Promise<string> {
+    // 1. Check in-memory map first
     const existing = this.whatsappSessions.get(source);
     if (existing) {
       // Resume from disk if not in memory
@@ -1389,15 +1394,64 @@ export class DaemonRuntime {
       return existing;
     }
 
-    // Create new session for this phone number
+    // 2. Map is empty → search session index for existing WhatsApp session
+    const expectedTitle = `WhatsApp: ${source}`;
+    try {
+      const index = await listSessions(this.paths);
+      // Find most recent WhatsApp session for this source that's not ended
+      const matches = index
+        .filter((e) => e.title === expectedTitle && e.status !== "ended")
+        .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+
+      if (matches.length > 0) {
+        const match = matches[0]!;
+        const lastActivityMs = new Date(match.lastActivity).getTime();
+        const inactiveMs = Date.now() - lastActivityMs;
+
+        if (inactiveMs < SESSION_INACTIVITY_THRESHOLD_MS) {
+          // Resume existing session
+          const loaded = await loadSession(match.sessionId, this.paths);
+          if (loaded) {
+            const entry = this.createSessionEntry(
+              loaded.session,
+              "whatsapp" as SessionOrigin,
+              expectedTitle,
+              loaded.session.profile ?? "default",
+            );
+            entry.session = { ...entry.session, status: "active" };
+            entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
+            this.sessions.set(match.sessionId, entry);
+            this.whatsappSessions.set(source, match.sessionId);
+            this.whatsappSessionToSource.set(match.sessionId, source);
+            return match.sessionId;
+          }
+        }
+        // Session is too old (>8h) — create new one, notify in chat
+      }
+    } catch {
+      // Index read failed — fall through to new session creation
+    }
+
+    // 3. Create new session
     const session = await createSession(this.paths, {
       model: this.model?.name ?? "unknown",
-      title: `WhatsApp: ${source}`,
+      title: expectedTitle,
     });
-    const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
+    const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, expectedTitle);
     this.sessions.set(session.id, entry);
     this.whatsappSessions.set(source, session.id);
     this.whatsappSessionToSource.set(session.id, source);
+
+    // Notify in chat that a new session was started
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (plugin) {
+      try {
+        await plugin.sendMessage(source, { text: "[Neue Session gestartet — vorheriger Kontext wurde zurückgesetzt.]" });
+      } catch {
+        // Non-critical
+      }
+    }
+
     return session.id;
   }
 

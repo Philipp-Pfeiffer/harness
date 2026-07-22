@@ -74,7 +74,9 @@ export function getMimeTypeExtension(mimeType: string): string {
     "application/octet-stream": "bin",
     "text/plain": "txt",
   };
-  return map[mimeType] ?? "bin";
+  // Strip parameters like "; codecs=opus" for lookup
+  const baseMime = mimeType.split(";")[0].trim().toLowerCase();
+  return map[baseMime] ?? "bin";
 }
 
 /**

@@ -119,7 +119,14 @@ export class WhatsAppInboundProcessor {
     );
 
     // Echo to whitelisted senders only
-    const echoText = event.media && event.media.length > 0
+    // Voice transcripts: show the transcript text
+    // Stickers: echo sticker file name
+    // Other media: echo file name
+    const echoText = msgType === "sticker"
+      ? `[test] Sticker gespeichert: ${event.media?.map((m) => m.filePath.split("/").pop()).join(", ") ?? "kein Download"}`
+      : event.isVoiceTranscript && event.text
+      ? `[test] Voice transkribiert: ${event.text}`
+      : event.media && event.media.length > 0
       ? `[test] Media gespeichert: ${event.media.map((m) => m.filePath.split("/").pop()).join(", ")}`
       : `[test] empfangen: ${msgType}, ${textLen} Zeichen`;
 
@@ -220,8 +227,14 @@ export class WhatsAppInboundProcessor {
           .then((result) => {
             this.handleTurnComplete(event.source, state!, result.finalResponse);
           })
-          .catch((err) => {
-            this.log(`Turn failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+          .catch(async (err) => {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            this.log(`Turn failed: ${errMsg}`, "error");
+            try {
+              await this.callbacks.sendOutbound(event.source, `[Fehler] Agent-Turn fehlgeschlagen: ${errMsg}`);
+            } catch {
+              // Can't even send error
+            }
             this.handleTurnComplete(event.source, state!, null);
           });
         return;
@@ -269,6 +282,12 @@ export class WhatsAppInboundProcessor {
       ? `${combinedText}\n\n${combinedAnnotations.join("\n")}`
       : combinedText;
 
+    // Skip empty turns (e.g., sticker-only with no text)
+    if (!fullText) {
+      this.log(`Skipping empty turn for ${source} (media-only, no text)`, "info");
+      return;
+    }
+
     // Start the turn
     state.turnRunning = true;
     state.turnStartMs = Date.now();
@@ -288,7 +307,14 @@ export class WhatsAppInboundProcessor {
       );
       this.handleTurnComplete(source, state, result.finalResponse);
     } catch (err) {
-      this.log(`Turn failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log(`Turn failed: ${errMsg}`, "error");
+      // Send error feedback to the chat
+      try {
+        await this.callbacks.sendOutbound(source, `[Fehler] Agent-Turn fehlgeschlagen: ${errMsg}`);
+      } catch {
+        // Can't even send error — nothing more to do
+      }
       this.handleTurnComplete(source, state, null);
     }
   }

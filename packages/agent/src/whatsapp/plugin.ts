@@ -26,6 +26,8 @@ import {
   type BaileysMessage,
   type WAMessage,
 } from "./client.js";
+import { downloadContentFromMessage } from "baileys";
+import type { DownloadableMessage } from "baileys";
 import { isWhitelisted, extractPhoneNumber } from "./whitelist.js";
 import {
   downloadMedia,
@@ -116,7 +118,7 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         authDir,
         phoneNumber: opts.phoneNumber,
         log: opts.log,
-        onMessage: (msg) => handleInboundMessage(msg, opts, processor),
+        onMessage: (msg) => handleInboundMessage(msg, opts, processor, client),
         onConnectionUpdate: (update) => {
           if (update.status === "open") {
             opts.log("WhatsApp connected", "info");
@@ -187,16 +189,67 @@ async function handleInboundMessage(
   msg: BaileysMessage,
   opts: WhatsAppPluginOptions,
   processor: WhatsAppInboundProcessor | null,
+  client: { resolveLidToPn: (lid: string) => Promise<string | null>; markAsRead: (jid: string, messageKeys: string[]) => Promise<void>; sendTyping: (jid: string) => Promise<void> } | null,
 ): Promise<void> {
   if (!processor) return;
 
-  const jid = msg.key.remoteJid ?? "";
-  const source = extractPhoneNumber(jid);
+  const jid = msg.rawJid || msg.key.remoteJid || "";
+  let source = extractPhoneNumber(jid);
+
+  // For group messages (@g.us), the real sender is in key.participant
+  let effectiveJid = jid;
+  if (jid.includes("@g.us") && msg.key.participant) {
+    effectiveJid = msg.key.participant;
+    source = extractPhoneNumber(effectiveJid);
+  }
+
+  // Baileys 7.x uses @lid JIDs (Linked Identity) instead of @s.whatsapp.net
+  // Resolve LID → phone number JID for whitelist check
+  if (effectiveJid.includes("@lid")) {
+    // Try participant first (for group messages with LID)
+    if (msg.key.participant && msg.key.participant.includes("@lid")) {
+      effectiveJid = msg.key.participant;
+      source = extractPhoneNumber(effectiveJid);
+    }
+
+    // Use Baileys' LID mapping store to resolve to PN
+    if (effectiveJid.includes("@lid") && client) {
+      const pn = await client.resolveLidToPn(effectiveJid);
+      if (pn) {
+        opts.log(`LID resolved: ${effectiveJid} → ${pn}`, "info");
+        effectiveJid = pn;
+        source = extractPhoneNumber(effectiveJid);
+      } else {
+        opts.log(`LID resolution failed for ${effectiveJid} (pushName: ${msg.pushName})`, "warn");
+      }
+    }
+  }
+
+  const isGroup = jid.includes("@g.us");
+  opts.log(`Inbound: JID=${jid}${isGroup ? " (group)" : ""}, effective=${effectiveJid}, source=${source}, pushName=${msg.pushName}`, "info");
 
   // Whitelist check — silent drop for non-whitelisted
-  if (!isWhitelisted(jid)) {
-    opts.log(`Silent drop: non-whitelisted message from ${source}`, "info");
+  if (!isWhitelisted(effectiveJid)) {
+    opts.log(`Silent drop: non-whitelisted message from ${source} (JID: ${jid}, effective: ${effectiveJid})`, "info");
     return;
+  }
+
+  // Mark message as read immediately (before processing, so it's fast)
+  if (client && msg.key.id) {
+    try {
+      await client.markAsRead(jid, [msg.key.id]);
+    } catch {
+      // Non-critical — don't fail the turn
+    }
+  }
+
+  // Send typing indicator immediately (before media download / transcription)
+  if (client) {
+    try {
+      await client.sendTyping(jid);
+    } catch {
+      // Non-critical
+    }
   }
 
   const waMessage = msg.message;
@@ -206,7 +259,9 @@ async function handleInboundMessage(
   }
 
   const timestamp = new Date(msg.messageTimestamp * 1000).toISOString();
-  const event = await parseBaileysMessage(waMessage, source, timestamp, opts, msg);
+  // Use effectiveJid as source — outbound replies go to this JID
+  // (LID for LID chats, PN for PN chats)
+  const event = await parseBaileysMessage(waMessage, effectiveJid, timestamp, opts, msg);
 
   if (event) {
     await processor.processInbound(event);
@@ -242,7 +297,7 @@ async function parseBaileysMessage(
   // ─── Image message ───
   if (message.imageMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.imageMessage, rawMsg);
+      const buffer = await downloadFromBaileys(message.imageMessage, rawMsg, "image");
       const media = await downloadMedia(buffer, message.imageMessage.mimetype ?? "image/jpeg", "image", mediaDir);
       mediaArray.push(media);
 
@@ -263,7 +318,7 @@ async function parseBaileysMessage(
   // ─── Video message ───
   if (message.videoMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.videoMessage, rawMsg);
+      const buffer = await downloadFromBaileys(message.videoMessage, rawMsg, "video");
       const media = await downloadMedia(buffer, message.videoMessage.mimetype ?? "video/mp4", "video", mediaDir);
       mediaArray.push(media);
     } catch (err) {
@@ -277,24 +332,35 @@ async function parseBaileysMessage(
 
   // ─── Audio message (voice note or audio file) ───
   if (message.audioMessage) {
-    const ptt = message.audioMessage.ptt ?? false;
+    // Baileys 7.x: ptt flag may be unreliable. Treat all audio messages as
+    // potential voice notes and attempt transcription. The mimeType (audio/ogg)
+    // is the most reliable indicator for WhatsApp voice notes.
+    const isOgg = (message.audioMessage.mimetype ?? "").includes("ogg");
+    const ptt = message.audioMessage.ptt === true || isOgg;
+    log(`Audio message: ptt=${message.audioMessage.ptt} isOgg=${isOgg} → treatingAsVoice=${ptt} mimeType=${message.audioMessage.mimetype} seconds=${message.audioMessage.seconds}`, "info");
     try {
-      const buffer = await downloadFromBaileys(message.audioMessage, rawMsg);
+      const buffer = await downloadFromBaileys(message.audioMessage, rawMsg, "audio");
       const mediaType = ptt ? "voice" : "audio";
       const media = await downloadMedia(buffer, message.audioMessage.mimetype ?? "audio/ogg", mediaType as InboundMedia["type"], mediaDir);
-      mediaArray.push(media);
 
       if (ptt) {
         // Voice note → transcribe
         const transcript = await transcribeVoice(media.filePath);
         if (transcript) {
+          // Transkript als Text liefern, Media NICHT zu mediaArray hinzufügen
+          // (Agent bekommt den Text, nicht die Datei-Annotation)
           text = `[Voice-Nachricht] ${transcript}`;
           isVoiceTranscript = true;
         } else {
+          // Transkription fehlgeschlagen → Datei-Annotation
+          mediaArray.push(media);
           annotations.push(
             `Voice-Nachricht empfangen, Transkription nicht verfügbar. Datei: ${media.filePath}`,
           );
         }
+      } else {
+        // Audio-Datei (kein Voice-Note) → normale Media-Behandlung
+        mediaArray.push(media);
       }
     } catch (err) {
       if (err instanceof MediaTooLargeError) {
@@ -308,7 +374,7 @@ async function parseBaileysMessage(
   // ─── Document message ───
   if (message.documentMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.documentMessage, rawMsg);
+      const buffer = await downloadFromBaileys(message.documentMessage, rawMsg, "document");
       const media = await downloadMedia(buffer, message.documentMessage.mimetype ?? "application/octet-stream", "document", mediaDir);
       mediaArray.push(media);
     } catch (err) {
@@ -323,12 +389,21 @@ async function parseBaileysMessage(
   // ─── Sticker message ───
   if (message.stickerMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.stickerMessage, rawMsg);
+      const buffer = await downloadFromBaileys(message.stickerMessage, rawMsg, "sticker");
       const media = await downloadMedia(buffer, message.stickerMessage.mimetype ?? "image/webp", "sticker", mediaDir);
       mediaArray.push(media);
-      // v1: log + save, no turn
       log(`Sticker received from ${source}: ${media.filePath}`, "info");
-      return null; // No turn for stickers
+      // Return event with media but no text — test mode echoes, normal mode ignores
+      return {
+        channel: "whatsapp",
+        source,
+        text: "",
+        timestamp,
+        media: mediaArray,
+        imageBlocks: [],
+        annotations: undefined,
+        isVoiceTranscript: false,
+      };
     } catch (err) {
       if (err instanceof MediaTooLargeError) {
         log(`Sticker too large: ${err.actualSize} bytes`, "warn");
@@ -336,7 +411,7 @@ async function parseBaileysMessage(
         log(`Sticker download failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
     }
-    return null; // No turn for stickers even on download failure
+    return null;
   }
 
   // Build media annotations for non-sticker media
@@ -367,16 +442,18 @@ async function parseBaileysMessage(
 
 /**
  * Downloads media content from a Baileys message component.
- * Uses the download() method available on Baileys proto messages.
+ * Uses Baileys' downloadContentFromMessage which doesn't need socket context.
+ * @param mediaType - "image" | "video" | "audio" | "sticker" | "document"
  */
 async function downloadFromBaileys(
-  proto: { download?: () => Promise<Buffer> } | unknown,
+  proto: DownloadableMessage | Record<string, unknown>,
   _rawMsg: BaileysMessage,
+  mediaType: "image" | "video" | "audio" | "sticker" | "document",
 ): Promise<Buffer> {
-  // Baileys proto messages have a download() method
-  const downloadFn = (proto as { download?: () => Promise<Buffer> }).download;
-  if (!downloadFn) {
-    throw new Error("Media has no download function — Baileys socket not available");
+  const stream = await downloadContentFromMessage(proto as DownloadableMessage, mediaType);
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.from(chunk));
   }
-  return downloadFn.call(proto);
+  return Buffer.concat(chunks);
 }

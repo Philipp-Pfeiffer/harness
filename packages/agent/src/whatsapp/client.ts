@@ -18,7 +18,9 @@ import {
   type DisconnectReason,
 } from "baileys";
 import pino from "pino";
+import QRCode from "qrcode";
 import { readFile } from "node:fs/promises";
+import { join, basename } from "node:path";
 import {
   RECONNECT_BACKOFF_BASE_MS,
   RECONNECT_BACKOFF_MAX_MS,
@@ -27,12 +29,31 @@ import {
 /** Re-export WAMessage as the message type (Baileys' WebMessageInfo equivalent). */
 export type { WAMessage, DisconnectReason };
 
+/** Prints a QR code to the terminal as ANSI art and saves PNG to ~/Downloads. */
+function printQRCode(qr: string): void {
+  const ascii = QRCode.toString(qr, { type: "terminal", small: true });
+  ascii.then((code) => {
+    console.log("\n" + code + "\n");
+  }).catch(() => {
+    console.log(`\nQR raw: ${qr}\n`);
+  });
+  // Also save as PNG for easy scanning
+  const outPath = join(process.env.HOME ?? "/tmp", "Downloads", "whatsapp-qr.png");
+  QRCode.toFile(outPath, qr, { width: 400, margin: 2 }).then(() => {
+    console.log(`\nQR code saved to ${outPath}\n`);
+  }).catch((err) => {
+    console.log(`\nFailed to save QR PNG: ${err}\n`);
+  });
+}
+
 /** Simplified inbound message from Baileys. */
 export interface BaileysMessage {
   key: WAMessage["key"];
   message: WAMessage["message"];
   messageTimestamp: number;
   pushName: string;
+  /** Raw remoteJid for LID resolution. */
+  rawJid: string;
 }
 
 /** Connection status update from the client. */
@@ -59,6 +80,12 @@ export interface WhatsAppClient {
   sendFile(jid: string, file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void>;
   getPairingCode(): string | null;
   isConnected(): boolean;
+  /** Resolves a LID JID to a phone-number JID (s.whatsapp.net). */
+  resolveLidToPn(lid: string): Promise<string | null>;
+  /** Marks messages as read (blue ticks). */
+  markAsRead(jid: string, messageKeys: string[]): Promise<void>;
+  /** Shows typing indicator ("composing") in a chat. */
+  sendTyping(jid: string): Promise<void>;
 }
 
 /**
@@ -89,7 +116,13 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
     sock.ev.on("creds.update", saveCreds);
 
     sock.ev.on("connection.update", (update) => {
-      const { connection, lastDisconnect } = update;
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        // Print QR code to terminal for scanning
+        opts.log(`QR code received — scan with WhatsApp`, "info");
+        printQRCode(qr);
+      }
 
       if (connection === "connecting") {
         opts.onConnectionUpdate({ status: "connecting" });
@@ -97,6 +130,7 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
         connected = true;
         reconnectAttempts = 0;
         opts.onConnectionUpdate({ status: "open" });
+        opts.log("WhatsApp connected", "info");
       } else if (connection === "close") {
         connected = false;
         const error = lastDisconnect?.error as { output?: { statusCode?: number } } | undefined;
@@ -121,39 +155,15 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
             ? msg.messageTimestamp
             : Date.now(),
           pushName: msg.pushName ?? "",
+          rawJid: msg.key.remoteJid ?? "",
         });
       }
     });
 
-    // If not yet authenticated, request pairing code
+    // QR code is printed to terminal by Baileys (printQRInTerminal: true).
+    // No pairing code request needed.
     if (!state.creds.registered) {
-      try {
-        // Wait for socket to be ready for pairing
-        await new Promise<void>((resolve) => {
-          const checkReady = setInterval(() => {
-            if (sock?.user) {
-              clearInterval(checkReady);
-              resolve();
-            }
-          }, 500);
-          // Timeout after 30s
-          setTimeout(() => {
-            clearInterval(checkReady);
-            resolve();
-          }, 30_000);
-        });
-
-        if (sock && !sock.user) {
-          const code = await sock.requestPairingCode(opts.phoneNumber);
-          pairingCode = code ?? null;
-          if (code) {
-            opts.log(`Pairing code: ${code}`, "info");
-            opts.onConnectionUpdate({ status: "connecting", pairingCode: code });
-          }
-        }
-      } catch (err) {
-        opts.log(`Failed to request pairing code: ${err instanceof Error ? err.message : String(err)}`, "warn");
-      }
+      opts.log("Waiting for QR scan…", "info");
     }
   }
 
@@ -200,17 +210,26 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
 
     async sendFile(jid: string, file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void> {
       if (!sock) throw new Error("WhatsApp client not started");
-      const buffer = file.buffer ?? (file.path ? await readFile(file.path) : undefined);
-      if (!buffer) throw new Error("sendFile requires either buffer or path");
+      const rawBuffer = file.buffer ?? (file.path ? await readFile(file.path) : undefined);
+      if (!rawBuffer) throw new Error("sendFile requires either buffer or path");
+      // Ensure it's a proper Buffer (Baileys expects Buffer, not Uint8Array)
+      const buffer = Buffer.isBuffer(rawBuffer) ? rawBuffer : Buffer.from(rawBuffer);
 
       const messageType = baileysMessageType(file.mimeType, file.asSticker ?? false);
-      const content: Record<string, unknown> = { mimetype: file.mimeType, data: buffer };
-
+      // Baileys expects the media on the message type key, not nested under `data`.
+      // For documents we must also provide mimetype and fileName at top level.
+      const message: Record<string, unknown> = {
+        [messageType]: buffer,
+      };
+      if (messageType === "document") {
+        message.mimetype = file.mimeType;
+        message.fileName = file.path ? basename(file.path) : "file";
+      }
       if (file.caption && !file.asSticker) {
-        content.caption = file.caption;
+        message.caption = file.caption;
       }
 
-      await sock.sendMessage(jid, { [messageType]: content } as never);
+      await sock.sendMessage(jid, message as never);
     },
 
     getPairingCode(): string | null {
@@ -219,6 +238,41 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
 
     isConnected(): boolean {
       return connected;
+    },
+
+    async resolveLidToPn(lid: string): Promise<string | null> {
+      if (!sock) return null;
+      try {
+        // Baileys exposes signalRepository.lidMapping on the socket
+        const repo = (sock as unknown as { signalRepository?: { lidMapping?: { getPNForLID: (lid: string) => Promise<string | null> } } }).signalRepository;
+        if (!repo?.lidMapping) {
+          opts.log("LID mapping store not available on socket", "warn");
+          return null;
+        }
+        const pn = await repo.lidMapping.getPNForLID(lid);
+        return pn ?? null;
+      } catch (err) {
+        opts.log(`LID resolution failed for ${lid}: ${err instanceof Error ? err.message : String(err)}`, "warn");
+        return null;
+      }
+    },
+
+    async markAsRead(jid: string, _messageKeys: string[]): Promise<void> {
+      if (!sock) return;
+      try {
+        await sock.readMessages([{ remoteJid: jid, id: _messageKeys[0], fromMe: false }]);
+      } catch (err) {
+        opts.log(`Failed to mark as read: ${err instanceof Error ? err.message : String(err)}`, "warn");
+      }
+    },
+
+    async sendTyping(jid: string): Promise<void> {
+      if (!sock) return;
+      try {
+        await sock.sendPresenceUpdate("composing", jid);
+      } catch (err) {
+        opts.log(`Failed to send typing: ${err instanceof Error ? err.message : String(err)}`, "warn");
+      }
     },
   };
 }
@@ -239,6 +293,11 @@ export function createMockWhatsAppClient(): WhatsAppClient {
     isConnected(): boolean {
       return false;
     },
+    async resolveLidToPn(_lid: string): Promise<string | null> {
+      return null;
+    },
+    async markAsRead(_jid: string, _messageKeys: string[]): Promise<void> {},
+    async sendTyping(_jid: string): Promise<void> {},
   };
 }
 
