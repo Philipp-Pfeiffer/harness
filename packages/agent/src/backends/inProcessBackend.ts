@@ -185,8 +185,12 @@ export class InProcessBackend implements AgentBackend {
     }
 
     const messages = entry.messages;
-    const messagesBeforeTurn = messages.length;
-    messages.push({ role: "user", content: text, timestamp: Date.now() } as Message);
+    // Track the user message by reference instead of a numeric index.
+    // Mid-turn compaction replaces the messages array in-place
+    // (agent.ts: messages.length = 0; messages.push(...compacted)),
+    // which invalidates any numeric "before turn" index.
+    const userMessage: Message = { role: "user", content: text, timestamp: Date.now() } as Message;
+    messages.push(userMessage);
 
     const mailbox = createMailbox();
     const abortCommandRef = { current: undefined as string | undefined };
@@ -214,7 +218,7 @@ export class InProcessBackend implements AgentBackend {
     });
 
     entry.session = await this.persistTurn(
-      entry, result, text, messagesBeforeTurn, messages, runStartMs,
+      entry, result, text, userMessage, messages, runStartMs,
     );
 
     return {
@@ -235,12 +239,16 @@ export class InProcessBackend implements AgentBackend {
     entry: { session: Session; messages: Message[]; metricsRecorder: MetricsRecorder },
     result: RunResult,
     userText: string,
-    messagesBeforeTurn: number,
+    userMessage: Message,
     messages: Message[],
     runStartMs: number,
   ): Promise<Session> {
     const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
-    const turnSlice = messages.slice(messagesBeforeTurn);
+    // Compaction may have replaced the messages array in-place during the
+    // turn, invalidating any numeric "before turn" index. Find the user
+    // message by reference to get the correct slice start.
+    const turnStartIndex = Math.max(0, messages.indexOf(userMessage));
+    const turnSlice = messages.slice(turnStartIndex);
     const { tool_calls, tool_results } = extractToolData(turnSlice);
     const sessionTurn: SessionTurn = {
       id: randomUUID(),
@@ -272,7 +280,7 @@ export class InProcessBackend implements AgentBackend {
       },
       model: this.modelRef.current.name,
       timestamp: new Date().toISOString(),
-      messages: messages.slice(messagesBeforeTurn),
+      messages: turnSlice,
     };
     return recordTurn(entry.session, sessionTurn, this.paths);
   }

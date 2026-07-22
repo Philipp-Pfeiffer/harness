@@ -317,6 +317,30 @@ describe("session", () => {
       expect(loaded!.turns).toHaveLength(1);
       expect(loaded!.turns[0].id).toBe("good");
     });
+
+    it("reconstructs index entry from transcript when index is corrupt", async () => {
+      // Simulate a corrupt sessions.json that yields an empty index.
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1", content: "First" }), paths);
+      await recordTurn(
+        { ...session, tokenTotals: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cacheRead: 0, cacheWrite: 0 } },
+        baseTurn({ id: "t2", content: "Second" }),
+        paths,
+      );
+      await writeFile(join(paths.sessions, "sessions.json"), "{ not valid json", "utf-8");
+
+      const loaded = await readSession(session.id, paths);
+      expect(loaded).not.toBeNull();
+      // Index entry reconstructed from transcript, not from the corrupt index.
+      expect(loaded!.session.sessionId).toBe(session.id);
+      expect(loaded!.session.model).toBe("minimax-m2.7");
+      expect(loaded!.session.status).toBe("idle");
+      // Token totals reconstructed from turns.
+      expect(loaded!.session.tokenTotals.inputTokens).toBe(20);
+      expect(loaded!.session.tokenTotals.outputTokens).toBe(10);
+      // Turns still readable.
+      expect(loaded!.turns).toHaveLength(2);
+    });
   });
 
   describe("listSessions", () => {

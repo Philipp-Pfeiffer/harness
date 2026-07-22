@@ -766,17 +766,20 @@ export class DaemonRuntime {
             // the queue. A queued turn never sees a later turn's user
             // message: no interleaves on entry.messages.
             let messages: Message[];
-            const messagesBeforeTurn = req.text
-              ? entry.messages.length
-              : 0;
+            // Track the user message by reference instead of a numeric index.
+            // Mid-turn compaction replaces the messages array in-place
+            // (agent.ts: messages.length = 0; messages.push(...compacted)),
+            // which invalidates any numeric "before turn" index.
+            let userMessage: Message | undefined;
             if (req.text) {
               // New-style: daemon manages context
               messages = entry.messages;
-              messages.push({
+              userMessage = {
                 role: "user",
                 content: req.text,
                 timestamp: Date.now(),
-              } as Message);
+              } as Message;
+              messages.push(userMessage);
             } else {
               // Old-style: caller provides full message array
               messages = req.messages as Message[];
@@ -837,7 +840,13 @@ export class DaemonRuntime {
             const finalMessage = result.aborted
               ? "Aborted"
               : result.finalMessage;
-            const turnSlice = messages.slice(messagesBeforeTurn);
+            // Compaction may have replaced the messages array in-place during
+            // the turn, invalidating any numeric "before turn" index. Find the
+            // user message by reference, or fall back to 0 for old-style calls.
+            const turnStartIndex = userMessage
+              ? Math.max(0, messages.indexOf(userMessage))
+              : 0;
+            const turnSlice = messages.slice(turnStartIndex);
             const { tool_calls, tool_results } = extractToolData(turnSlice);
             const turn = {
               id: crypto.randomUUID(),

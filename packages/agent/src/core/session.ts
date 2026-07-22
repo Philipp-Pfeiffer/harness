@@ -548,8 +548,7 @@ export async function readSession(
   paths: HarnessPaths
 ): Promise<{ session: SessionIndexEntry; turns: SessionTurn[] } | null> {
   const index = await loadIndex(paths);
-  const entry = index.find((e) => e.sessionId === sessionId);
-  if (!entry) return null;
+  let entry = index.find((e) => e.sessionId === sessionId);
 
   const tPath = await findTranscriptPath(paths, sessionId);
   if (!tPath) return null;
@@ -577,7 +576,69 @@ export async function readSession(
     }
   }
 
+  // Fallback: if the session is not in the index (e.g. the index file is
+  // corrupt or the entry was lost), reconstruct a minimal index entry from
+  // the transcript so the session remains visible.
+  if (!entry) {
+    entry = reconstructIndexEntry(sessionId, turns);
+  }
+
   return { session: entry, turns };
+}
+
+/**
+ * Rebuilds a `SessionIndexEntry` from transcript data when the session is
+ * missing from the index file. Uses the first and last turns to derive
+ * `created`/`lastActivity`/`model` and reconstructs token totals from all
+ * turns. Falls back to epoch timestamps when no turns exist.
+ */
+function reconstructIndexEntry(
+  sessionId: string,
+  turns: SessionTurn[]
+): SessionIndexEntry {
+  const totals: SessionTokenTotals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  let lastActivity = "";
+  let model = "unknown";
+  for (const turn of turns) {
+    totals.inputTokens += turn.tokens.input;
+    totals.outputTokens += turn.tokens.output;
+    totals.totalTokens += turn.tokens.total;
+    totals.cacheRead += turn.tokens.cacheRead;
+    totals.cacheWrite += turn.tokens.cacheWrite;
+    if (turn.cost) {
+      totals.costInput = (totals.costInput ?? 0) + turn.cost.input;
+      totals.costOutput = (totals.costOutput ?? 0) + turn.cost.output;
+      totals.costCacheRead = (totals.costCacheRead ?? 0) + turn.cost.cacheRead;
+      totals.costCacheWrite = (totals.costCacheWrite ?? 0) + turn.cost.cacheWrite;
+      totals.costTotal = (totals.costTotal ?? 0) + turn.cost.total;
+    }
+    if (!lastActivity) lastActivity = turn.timing?.startedAt ?? turn.timestamp;
+    const stamp = turn.timestamp;
+    if (stamp > lastActivity) lastActivity = stamp;
+    if (turn.model) model = turn.model;
+  }
+  if (!lastActivity) {
+    // No turns: fall back to file mtime.
+    lastActivity = new Date(0).toISOString();
+  }
+  const created = turns[0]?.timing?.startedAt
+    ?? turns[0]?.timestamp
+    ?? lastActivity;
+  return {
+    sessionId,
+    created,
+    lastActivity,
+    model,
+    tokenTotals: totals,
+    title: `Recovered Session ${sessionId.slice(-6)}`,
+    status: "idle",
+  };
 }
 
 /**
