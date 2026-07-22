@@ -117,6 +117,9 @@ function isPrivateIp(ip: string): boolean {
   if (v6) {
     const lower = ip.toLowerCase();
     if (lower === "::1") return true;
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d) — delegate to IPv4 check
+    const mapped = lower.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped) return isPrivateIp(mapped[1]!);
     // fc00::/7 unique local
     if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
     // fe80::/10 link-local

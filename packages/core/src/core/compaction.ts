@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { complete, type Context as PiContext } from "@mariozechner/pi-ai";
 import { prompt } from "../prompts.js";
@@ -221,16 +221,16 @@ function messagesToMarkdown(messages: Message[]): string {
  * Writes the alt-context file to $HARNESS_STATE.
  * Returns the path to the written file.
  */
-function writeAltContext(
+async function writeAltContext(
   paths: HarnessPaths,
   sessionId: string,
   messages: Message[],
-): string {
+): Promise<string> {
   const dir = path.join(paths.state, "compaction");
-  mkdirSync(dir, { recursive: true });
+  await mkdir(dir, { recursive: true });
   const filePath = path.join(dir, `${sessionId}.md`);
   const content = `# Alt-Context for Session ${sessionId}\n\nThis file contains the full, uncompacted conversation history that was compacted to save context window space.\nThe agent can use readFile to retrieve details from this file.\n\n---\n\n${messagesToMarkdown(messages)}`;
-  writeFileSync(filePath, content, "utf8");
+  await writeFile(filePath, content, "utf8");
   return filePath;
 }
 
@@ -311,7 +311,7 @@ export async function compactSession(
   const messagesToKeep = messages.slice(splitIndex);
 
   // Write alt-context file.
-  const altContextPath = writeAltContext(paths, sessionId, messagesToCompress);
+  const altContextPath = await writeAltContext(paths, sessionId, messagesToCompress);
 
   // Generate the summary via LLM.
   let summary: string;

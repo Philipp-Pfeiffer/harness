@@ -346,26 +346,23 @@ export async function executeExecSyncWithYield(args: {
   let killed = false;
   let yielded = false;
   let childPid = child.pid ?? -1;
+  // Holds the background session after yield transition, so the data
+  // handlers can append directly to its ring buffers.
+  let bgSession: Session | null = null;
 
   child.stdout?.on("data", (chunk: Buffer) => {
     if (!yielded) {
       stdoutChunks.push(chunk);
-    } else {
-      const session = processSupervisor.get(`bg_${childPid.toString(16).padStart(8, "0").slice(0, 8)}`);
-      if (session) {
-        session.stdoutRing.append(chunk);
-      }
+    } else if (bgSession) {
+      bgSession.stdoutRing.append(chunk);
     }
   });
 
   child.stderr?.on("data", (chunk: Buffer) => {
     if (!yielded) {
       stderrChunks.push(chunk);
-    } else {
-      const session = processSupervisor.get(`bg_${childPid.toString(16).padStart(8, "0").slice(0, 8)}`);
-      if (session) {
-        session.stderrRing.append(chunk);
-      }
+    } else if (bgSession) {
+      bgSession.stderrRing.append(chunk);
     }
   });
 
@@ -443,6 +440,7 @@ export async function executeExecSyncWithYield(args: {
         args.elevated ?? false,
         child
       );
+      bgSession = session;
       const msg = transitionToBackground(session, stdoutChunks, stderrChunks);
       resolvePromise({
         isError: false,
