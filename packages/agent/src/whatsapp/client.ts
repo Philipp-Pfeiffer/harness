@@ -17,6 +17,7 @@ import {
   type WAMessage,
   type DisconnectReason,
 } from "baileys";
+import pino from "pino";
 import { readFile } from "node:fs/promises";
 import {
   RECONNECT_BACKOFF_BASE_MS,
@@ -82,7 +83,7 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
       auth: { creds: state.creds as AuthenticationCreds, keys: state.keys },
       printQRInTerminal: false,
       browser: ["Harness", "Chrome", "1.0.0"],
-      logger: undefined, // Baileys default Pino logger — too noisy, suppressed
+      logger: pino({ level: "warn" }),
     });
 
     sock.ev.on("creds.update", saveCreds);
