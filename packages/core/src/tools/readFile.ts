@@ -6,6 +6,7 @@ import { cwd } from "node:process";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { Tool, ToolCallContext } from "./types.js";
 import { markRead } from "./file_state.js";
+import { TEXT_EXTRACT_CAP, BINARY_SCAN_SAMPLE_SIZE } from "./limits.js";
 
 const ReadFileArgs = Type.Object({
   path: Type.String({ description: "Absolute or relative path. Supports ~ for home directory." }),
@@ -13,7 +14,7 @@ const ReadFileArgs = Type.Object({
   lineEnd: Type.Optional(Type.Integer({ minimum: 1, description: "1-indexed end line, inclusive." })),
 });
 
-const MAX_EXTRACTED_BYTES = 64 * 1024;
+const MAX_EXTRACTED_BYTES = TEXT_EXTRACT_CAP;
 
 function expandTilde(path: string): string {
   if (path.startsWith("~/") || path === "~") {
@@ -31,7 +32,7 @@ function isPdf(buffer: Buffer): boolean {
     buffer[4] === 0x2d;
 }
 
-const BINARY_SAMPLE_SIZE = 64 * 1024;
+const BINARY_SAMPLE_SIZE = BINARY_SCAN_SAMPLE_SIZE;
 
 const MAGIC_NUMBERS: { magic: Buffer; offset: number }[] = [
   { magic: Buffer.from([0x89, 0x50, 0x4E, 0x47]), offset: 0 }, // PNG

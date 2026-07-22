@@ -1,4 +1,5 @@
 import { writeFile, rename, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 
 export interface AtomicWriteResult {
   ok: true;
@@ -14,7 +15,7 @@ export async function atomicWrite(
   absolutePath: string,
   content: string
 ): Promise<AtomicWriteResult | AtomicWriteError> {
-  const tmpPath = `${absolutePath}.harness.tmp`;
+  const tmpPath = `${absolutePath}.harness.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   try {
     await writeFile(tmpPath, content, "utf-8");
   } catch (err) {

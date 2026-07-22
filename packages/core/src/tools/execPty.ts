@@ -1,9 +1,7 @@
 import * as pty from "node-pty";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
-import { cwd } from "node:process";
 import { existsSync, statSync } from "node:fs";
-import { EXEC_NO_FLY_PATTERNS, type ExecToolResult } from "./exec.js";
+import type { ExecToolResult } from "./exec.js";
+import { checkNoFly, resolveCwd } from "./path_util.js";
 import { processSupervisor } from "./processSupervisor.js";
 import { RingBuffer, generateHandle } from "./ringBuffer.js";
 import { BG_OUTPUT_CAP } from "./limits.js";
@@ -43,42 +41,6 @@ function getShellPath(): { ok: true; path: string } | { ok: false; error: string
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `Failed to resolve shell: ${message}` };
   }
-}
-
-function expandTilde(pathStr: string): string {
-  if (pathStr.startsWith("~/") || pathStr === "~") {
-    return pathStr.replace(/^~/, homedir());
-  }
-  return pathStr;
-}
-
-function checkNoFly(command: string): { blocked: true; message: string } | { blocked: false } {
-  for (const { pattern, reason, hint } of EXEC_NO_FLY_PATTERNS) {
-    if (pattern.test(command)) {
-      const msg = hint
-        ? `Blocked destructive command: ${reason}. ${hint}`
-        : `Blocked destructive command: ${reason}.`;
-      return { blocked: true, message: `${msg}\nIf you really need this, the user must run it manually.` };
-    }
-  }
-  return { blocked: false };
-}
-
-async function resolveCwd(cwdArg?: string): Promise<string> {
-  let resolvedCwd = cwd();
-  if (cwdArg) {
-    const expanded = expandTilde(cwdArg);
-    resolvedCwd = resolve(cwd(), expanded);
-    try {
-      const statResult = await import("node:fs/promises").then((fs) => fs.stat(resolvedCwd));
-      if (!statResult.isDirectory()) {
-        return "cwd does not exist or is not a directory";
-      }
-    } catch {
-      return "cwd does not exist or is not a directory";
-    }
-  }
-  return resolvedCwd;
 }
 
 export async function executeExecPty(args: {

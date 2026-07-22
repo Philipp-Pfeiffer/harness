@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "typebox/value";
 import type { Tool } from "./types.js";
 import { processSupervisor } from "./processSupervisor.js";
+import { SYNC_OUTPUT_CAP } from "./limits.js";
 
 export const ProcessArgs = Type.Object({
   action: Type.Union([
@@ -242,7 +243,7 @@ async function handleWait(sessionId: string, timeoutMs: number): Promise<Process
     };
   }
 
-  const { stdout, stderr } = processSupervisor.pollOutput(sessionId, 64 * 1024);
+  const { stdout, stderr } = processSupervisor.pollOutput(sessionId, SYNC_OUTPUT_CAP);
 
   return {
     isError: false,
