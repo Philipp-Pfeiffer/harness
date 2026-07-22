@@ -140,13 +140,13 @@ export function createFindSkillTool(
     description:
       "Discover skills by natural-language query. Searches skill names and descriptions. Returns ranked results with name, description, and level. Use load_skill(name) to load the full skill content.",
     parameters: FindSkillArgs,
-    async execute(args) {
+    async execute(args, _context) {
       const query = args.query.trim();
       if (!query) {
         return ok("--- skill search: 0 results ---\nQuery was empty after trimming.");
       }
 
-      const results = await searchSkills(query, skills, routableSet, opts?.store, DEFAULT_K);
+      const results = await searchSkills(query, skills, routableSet, opts?.store, DEFAULT_K, _context?.logger);
 
       if (results.length === 0) {
         return ok(`--- skill search: 0 results ---\nNo skills found for "${query}".`);
@@ -176,6 +176,7 @@ async function searchSkills(
   routableSet: Set<string>,
   store: FindSkillToolOptions["store"],
   k: number,
+  logger?: (msg: string, level?: "warn" | "debug") => void,
 ): Promise<{ skill: SkillRecord; score: number }[]> {
   // Build a filepath → skill name map for QMD result mapping
   const pathToName = new Map<string, string>();
@@ -209,7 +210,12 @@ async function searchSkills(
     } catch (storeErr) {
       // QMD search failed — log and fall through to keyword search
       const msg = storeErr instanceof Error ? storeErr.message : String(storeErr);
-      console.warn(`[findSkill] QMD search failed, falling back to keyword search: ${msg}`);
+      const warnMsg = `[findSkill] QMD search failed, falling back to keyword search: ${msg}`;
+      if (logger) {
+        logger(warnMsg, "warn");
+      } else {
+        console.warn(warnMsg);
+      }
     }
   }
 
