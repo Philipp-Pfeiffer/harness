@@ -127,6 +127,9 @@ if [[ -f "$HOME/.harness_env" ]]; then
 fi
 
 echo "[restart-daemon] Starting daemon..."
+# Release the restart lock BEFORE exec — otherwise the daemon inherits fd 200
+# and holds restart.lock for its entire lifetime, blocking every future restart.
+exec 200>&-
 # Replace this shell with the daemon. This ensures the daemon is the only
 # long-running process and avoids accidental double-starts from the parent shell.
 exec node packages/agent/dist/index.js daemon run
