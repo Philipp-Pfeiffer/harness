@@ -12,10 +12,10 @@ import {
   makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  DisconnectReason,
   type WASocket,
   type AuthenticationCreds,
   type WAMessage,
-  type DisconnectReason,
 } from "baileys";
 import pino from "pino";
 import QRCode from "qrcode";
@@ -76,6 +76,8 @@ export interface WhatsAppClientOptions {
 export interface WhatsAppClient {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /** Explicitly unlinks the device from the WhatsApp account (invalidates the session server-side). Requires re-pairing afterwards. */
+  logout(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
   sendFile(jid: string, file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void>;
   getPairingCode(): string | null;
@@ -137,7 +139,11 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
         const statusCode = error?.output?.statusCode;
         opts.onConnectionUpdate({ status: "close", disconnectReason: statusCode });
 
-        if (!stopped) {
+        if (statusCode === DisconnectReason.loggedOut) {
+          // Session invalidated server-side — reconnecting is pointless,
+          // a new pairing (QR scan) is required.
+          opts.log("WhatsApp session invalidated (logged out) — re-pairing required", "error");
+        } else if (!stopped) {
           // Reconnect with backoff
           scheduleReconnect();
         }
@@ -190,6 +196,17 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
     },
 
     async stop(): Promise<void> {
+      stopped = true;
+      if (sock) {
+        // Close the connection WITHOUT logout — logout() would invalidate the
+        // session server-side and force a QR re-scan on the next start.
+        sock.end(undefined);
+        sock = null;
+      }
+      connected = false;
+    },
+
+    async logout(): Promise<void> {
       stopped = true;
       if (sock) {
         try {
@@ -285,6 +302,7 @@ export function createMockWhatsAppClient(): WhatsAppClient {
   return {
     async start(): Promise<void> {},
     async stop(): Promise<void> {},
+    async logout(): Promise<void> {},
     async sendMessage(_jid: string, _text: string): Promise<void> {},
     async sendFile(_jid: string, _file: { buffer?: Buffer; path?: string; mimeType: string; caption?: string; asSticker?: boolean }): Promise<void> {},
     getPairingCode(): string | null {
