@@ -222,6 +222,28 @@ async function fileExists(path: string): Promise<boolean> {
 }
 
 /**
+ * Returns true if the sessions directory contains at least one transcript
+ * file, either in the legacy flat layout or in a dated subdirectory.
+ * The `deleted/` subdirectory is ignored.
+ */
+async function hasTranscripts(paths: HarnessPaths): Promise<boolean> {
+  try {
+    const entries = await readdir(paths.sessions, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === "deleted") continue;
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) return true;
+      if (entry.isDirectory()) {
+        const files = await readdir(join(paths.sessions, entry.name));
+        if (files.some((f) => f.endsWith(".jsonl"))) return true;
+      }
+    }
+  } catch {
+    // Directory may not exist yet.
+  }
+  return false;
+}
+
+/**
  * Resolves the transcript path for a session id.
  * Prefers the dated layout (`YYYY-MM-DD/{id}.jsonl`), falls back to the
  * legacy flat layout (`{id}.jsonl`), and finally scans all dated folders.
@@ -917,8 +939,10 @@ export async function countTurnsInTranscript(
  * today is included in a "today" range.
  *
  * If the index file is corrupt, it is backed up and rebuilt from transcripts
- * so sessions remain visible. A missing or empty index is treated as a fresh
- * installation and does not trigger a full transcript scan.
+ * so sessions remain visible. If the index file is missing but transcripts
+ * exist (e.g. after `sessions.json` was removed), the index is rebuilt from
+ * transcripts without emitting a warning. A missing index with no transcripts
+ * is treated as a fresh installation and does not trigger a scan.
  *
  * @param paths  Harness paths.
  * @param range  Optional `{ from?, to? }` inclusive ISO date/time bounds on `lastActivity`.
@@ -943,6 +967,9 @@ export async function listSessions(
       }
     }
     sessions = [...byId.values()];
+    await saveIndex(paths, sessions);
+  } else if (index.length === 0 && !(await fileExists(sessionsIndexPath(paths))) && (await hasTranscripts(paths))) {
+    sessions = await reconstructSessionsFromTranscripts(paths);
     await saveIndex(paths, sessions);
   }
 

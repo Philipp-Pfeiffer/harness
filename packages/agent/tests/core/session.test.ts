@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir, unlink } from "node:fs/promises";
 import { HarnessPaths, resolveHarnessPaths } from "@harness/core";
 import {
   createSession,
@@ -848,6 +848,28 @@ describe("session", () => {
       const listed = await listSessions(paths);
       expect(listed).toHaveLength(1);
       expect(listed[0].sessionId).toBe(s1.id);
+    });
+  });
+
+  describe("missing index rebuilds from transcripts", () => {
+    it("rebuilds the index when sessions.json is gone", async () => {
+      const s1 = await createSession(paths, { model: "a", title: "" });
+      const s2 = await createSession(paths, { model: "b", title: "Two" });
+      await recordTurn(s1, baseTurn({ id: "t1" }), paths);
+      await recordTurn(s2, baseTurn({ id: "t2" }), paths);
+
+      await unlink(join(paths.sessions, "sessions.json"));
+
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(2);
+      expect(listed.map((s) => s.sessionId).sort()).toEqual([s1.id, s2.id].sort());
+    });
+
+    it("returns an empty list for a fresh directory without transcripts", async () => {
+      await mkdir(paths.sessions, { recursive: true });
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(0);
+      expect(await readFile(join(paths.sessions, "sessions.json"), "utf-8").then(() => true, () => false)).toBe(false);
     });
   });
 
