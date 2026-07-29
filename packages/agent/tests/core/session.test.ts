@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { HarnessPaths } from "@harness/core";
+import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { HarnessPaths, resolveHarnessPaths } from "@harness/core";
 import {
   createSession,
   createSubAgentSession,
@@ -11,6 +11,8 @@ import {
   recordTurn,
   endSession,
   suspendSession,
+  renameSession,
+  deleteSession,
   readSession,
   listSessions,
   listSessionsWithDetails,
@@ -694,4 +696,173 @@ describe("session", () => {
       expect(count).toBe(2);
     });
   });
+
+  describe("renameSession", () => {
+    it("updates the title in the index and the transcript", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7", title: "Old Title" });
+      const renamed = await renameSession(session, "New Title", paths);
+
+      expect(renamed.title).toBe("New Title");
+
+      const listed = await listSessions(paths);
+      expect(listed[0].title).toBe("New Title");
+
+      const raw = await readFile(session.transcriptPath, "utf-8");
+      const lines = raw.trim().split("\n");
+      const lastLine = JSON.parse(lines[lines.length - 1]!) as { type?: string; title?: string };
+      expect(lastLine.type).toBe("session-meta");
+      expect(lastLine.title).toBe("New Title");
+    });
+
+    it("title survives an index rebuild", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7", title: "Original" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+      await renameSession(session, "Renamed", paths);
+
+      // Corrupt the index.
+      await writeFile(join(paths.sessions, "sessions.json"), "{ broken", "utf-8");
+
+      const listed = await listSessions(paths);
+      const rebuilt = listed.find((s) => s.sessionId === session.id);
+      expect(rebuilt).toBeDefined();
+      expect(rebuilt!.title).toBe("Renamed");
+    });
+  });
+
+  describe("deleteSession", () => {
+    it("soft-deletes by moving the transcript to deleted/", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+
+      await deleteSession(session.id, paths);
+
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(0);
+
+      const deletedFiles = await readdir(join(paths.sessions, "deleted"));
+      expect(deletedFiles.length).toBeGreaterThan(0);
+      expect(deletedFiles[0]).toBe(`${session.id}.jsonl`);
+    });
+
+    it("permanently deletes when requested", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await deleteSession(session.id, paths, { permanent: true });
+
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(0);
+      expect(await readFile(session.transcriptPath, "utf-8").then(() => true, () => false)).toBe(false);
+    });
+  });
+
+  describe("foreign consumer with custom state root", () => {
+    it("ignores HARNESS_STATE and XDG_STATE_HOME when state is passed explicitly", () => {
+      const originalState = process.env.HARNESS_STATE;
+      const originalXdg = process.env.XDG_STATE_HOME;
+      try {
+        process.env.HARNESS_STATE = "/env/state";
+        process.env.XDG_STATE_HOME = "/xdg/state";
+
+        const paths = resolveHarnessPaths({ home: "/opt/home", state: "/opt/state" });
+        expect(paths.state).toBe("/opt/state");
+        expect(paths.sessions).toBe("/opt/state/sessions");
+      } finally {
+        if (originalState === undefined) delete process.env.HARNESS_STATE;
+        else process.env.HARNESS_STATE = originalState;
+        if (originalXdg === undefined) delete process.env.XDG_STATE_HOME;
+        else process.env.XDG_STATE_HOME = originalXdg;
+      }
+    });
+
+    it("writes and reads a turn with tool data like an external app", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7", title: "Study Session" });
+      const turn = baseTurn({
+        id: "t1",
+        content: "The answer is 42.",
+        userContent: "What is the answer?",
+        tool_calls: [{ id: "tc-1", name: "calculator", arguments: { expr: "6*7" } }],
+        tool_results: [{ toolCallId: "tc-1", name: "calculator", result: "42", isError: false }],
+      });
+      await recordTurn(session, turn, paths);
+
+      const loaded = await readSession(session.id, paths);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.turns).toHaveLength(1);
+      expect(loaded!.turns[0].tool_calls).toEqual([{ id: "tc-1", name: "calculator", arguments: { expr: "6*7" } }]);
+      expect(loaded!.turns[0].tool_results).toEqual([{ toolCallId: "tc-1", name: "calculator", result: "42", isError: false }]);
+    });
+  });
+
+  describe("two stores with different roots are isolated", () => {
+    it("keeps sessions in separate state directories", async () => {
+      const pathsA = makePaths(join(baseDir, "store-a"));
+      const pathsB = makePaths(join(baseDir, "store-b"));
+
+      const sessionA = await createSession(pathsA, { model: "a", title: "Store A" });
+      const sessionB = await createSession(pathsB, { model: "b", title: "Store B" });
+
+      const listedA = await listSessions(pathsA);
+      const listedB = await listSessions(pathsB);
+
+      expect(listedA.map((s) => s.sessionId)).toEqual([sessionA.id]);
+      expect(listedB.map((s) => s.sessionId)).toEqual([sessionB.id]);
+      expect(listedA[0].title).toBe("Store A");
+      expect(listedB[0].title).toBe("Store B");
+    });
+  });
+
+  describe("corrupt index keeps sessions findable", () => {
+    it("rebuilds the index from transcripts and keeps all sessions visible", async () => {
+      const s1 = await createSession(paths, { model: "a", title: "One" });
+      const s2 = await createSession(paths, { model: "b", title: "Two" });
+      await recordTurn(s1, baseTurn({ id: "t1" }), paths);
+      await recordTurn(s2, baseTurn({ id: "t2" }), paths);
+
+      await writeFile(join(paths.sessions, "sessions.json"), "{ not json", "utf-8");
+
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(2);
+      expect(listed.map((s) => s.title).sort()).toEqual(["One", "Two"]);
+
+      const backups = await readdir(paths.sessions);
+      expect(backups.some((f) => f.startsWith("sessions.json.corrupt-"))).toBe(true);
+    });
+
+    it("skips individual corrupt entries and keeps valid ones", async () => {
+      const s1 = await createSession(paths, { model: "a", title: "Valid" });
+      await recordTurn(s1, baseTurn({ id: "t1" }), paths);
+
+      const corruptEntry = { sessionId: "bad", notValid: true };
+      await writeFile(join(paths.sessions, "sessions.json"), JSON.stringify([sessionToIndexEntryForTest(s1), corruptEntry]), "utf-8");
+
+      const listed = await listSessions(paths);
+      expect(listed).toHaveLength(1);
+      expect(listed[0].sessionId).toBe(s1.id);
+    });
+  });
+
+  describe("resume after process restart", () => {
+    it("loads a session and its turns in a fresh process context", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1", content: "Remember BANANA" }), paths);
+
+      // Simulate a fresh process: loadSession uses only paths and disk.
+      const loaded = await loadSession(session.id, paths);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.session.id).toBe(session.id);
+      expect(loaded!.turns).toHaveLength(1);
+      expect(loaded!.turns[0].content).toBe("Remember BANANA");
+    });
+  });
 });
+
+function sessionToIndexEntryForTest(session: { id: string; title: string; createdAt: string; lastActivityAt: string; model: string; tokenTotals: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number; }; status: string; }): Record<string, unknown> {
+  return {
+    sessionId: session.id,
+    created: session.createdAt,
+    lastActivity: session.lastActivityAt,
+    model: session.model,
+    tokenTotals: session.tokenTotals,
+    title: session.title,
+    status: session.status,
+  };
+}
