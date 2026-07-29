@@ -9,7 +9,7 @@ import {
   readdir,
   stat,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import type { HarnessPaths } from "@harness/core";
 
@@ -275,11 +275,29 @@ function addCost(
 
 /* ─── Index Management ─── */
 
-// Serializes read-modify-write cycles on the sessions index. Turns on
-// DIFFERENT sessions run in parallel (per-session turn queues), so
-// concurrent upsertIndexEntry calls would otherwise interleave
+// Serializes read-modify-write cycles on the sessions index PER sessions
+// directory. Turns on DIFFERENT sessions run in parallel (per-session turn
+// queues), so concurrent upsertIndexEntry calls would otherwise interleave
 // load → modify → save and silently lose each other's updates.
-let indexUpdateQueue: Promise<void> = Promise.resolve();
+// The queue is keyed by the resolved sessions path so trailing slashes,
+// relative paths, or symlinks pointing to the same directory share one queue.
+const indexUpdateQueues = new Map<string, Promise<void>>();
+
+function normalizeSessionsDir(sessionsDir: string): string {
+  return resolve(sessionsDir);
+}
+
+function getIndexQueue(sessionsDir: string): Promise<void> {
+  const key = normalizeSessionsDir(sessionsDir);
+  if (!indexUpdateQueues.has(key)) {
+    indexUpdateQueues.set(key, Promise.resolve());
+  }
+  return indexUpdateQueues.get(key)!;
+}
+
+function setIndexQueue(sessionsDir: string, queue: Promise<void>): void {
+  indexUpdateQueues.set(normalizeSessionsDir(sessionsDir), queue);
+}
 
 async function loadIndex(paths: HarnessPaths): Promise<SessionIndexEntry[]> {
   try {
@@ -312,7 +330,8 @@ async function upsertIndexEntry(
   paths: HarnessPaths,
   entry: SessionIndexEntry
 ): Promise<void> {
-  const op = indexUpdateQueue.then(async () => {
+  const queue = getIndexQueue(paths.sessions);
+  const op = queue.then(async () => {
     const index = await loadIndex(paths);
     const idx = index.findIndex((e) => e.sessionId === entry.sessionId);
     if (idx === -1) {
@@ -323,7 +342,7 @@ async function upsertIndexEntry(
     await saveIndex(paths, index);
   });
   // Keep the queue alive even when this update failed.
-  indexUpdateQueue = op.catch(() => {});
+  setIndexQueue(paths.sessions, op.catch(() => {}));
   return op;
 }
 
