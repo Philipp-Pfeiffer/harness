@@ -225,6 +225,7 @@ async function fileExists(path: string): Promise<boolean> {
  * Resolves the transcript path for a session id.
  * Prefers the dated layout (`YYYY-MM-DD/{id}.jsonl`), falls back to the
  * legacy flat layout (`{id}.jsonl`), and finally scans all dated folders.
+ * Transcripts moved to `deleted/` are ignored — a deleted session is gone.
  */
 async function findTranscriptPath(
   paths: HarnessPaths,
@@ -240,6 +241,7 @@ async function findTranscriptPath(
     const entries = await readdir(paths.sessions, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
+      if (entry.name === "deleted") continue;
       const candidate = join(paths.sessions, entry.name, `${sessionId}.jsonl`);
       if (await fileExists(candidate)) return candidate;
     }
@@ -543,13 +545,18 @@ export async function renameSession(
  * Deletes a session. By default the transcript is moved to the `deleted/`
  * subdirectory and the index entry is removed. Pass `{ permanent: true }` to
  * remove the transcript file entirely.
+ *
+ * Returns `true` if a transcript existed and was moved or permanently deleted,
+ * `false` if the session did not exist or was already deleted. Removing the
+ * index entry is not an error for a non-existent session.
  */
 export async function deleteSession(
   sessionId: string,
   paths: HarnessPaths,
   options?: DeleteSessionOptions
-): Promise<void> {
+): Promise<boolean> {
   const tPath = await findTranscriptPath(paths, sessionId);
+  let deleted = false;
 
   if (tPath) {
     if (options?.permanent) {
@@ -566,6 +573,7 @@ export async function deleteSession(
       }
       await rename(tPath, destPath);
     }
+    deleted = true;
   }
 
   // Remove from index
@@ -577,6 +585,8 @@ export async function deleteSession(
   });
   setIndexQueue(paths.sessions, op.catch(() => {}));
   await op;
+
+  return deleted;
 }
 
 /**

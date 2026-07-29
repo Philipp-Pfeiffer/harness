@@ -752,6 +752,17 @@ describe("session", () => {
       expect(listed).toHaveLength(0);
       expect(await readFile(session.transcriptPath, "utf-8").then(() => true, () => false)).toBe(false);
     });
+
+    it("returns true on first delete and false when the session does not exist", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      await recordTurn(session, baseTurn({ id: "t1" }), paths);
+
+      const first = await deleteSession(session.id, paths);
+      expect(first).toBe(true);
+
+      const second = await deleteSession(session.id, paths);
+      expect(second).toBe(false);
+    });
   });
 
   describe("foreign consumer with custom state root", () => {
