@@ -9,8 +9,9 @@ import {
   readdir,
   stat,
   copyFile,
+  unlink,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import type { HarnessPaths } from "@harness/core";
 
@@ -135,6 +136,13 @@ interface SessionIndexLoadResult {
 export interface SessionEndMarker {
   type: "session-end";
   endedAt: string;
+}
+
+/** Session metadata record stored at the start of a transcript. */
+export interface SessionMetaRecord {
+  type: "session-meta";
+  title: string;
+  updatedAt: string;
 }
 
 export interface CreateSessionOptions {
@@ -460,7 +468,8 @@ export async function createSession(
   };
 
   await mkdir(dirname(transcriptPath), { recursive: true });
-  await writeFile(session.transcriptPath, "", "utf-8");
+  const meta: SessionMetaRecord = { type: "session-meta", title, updatedAt: now };
+  await writeFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
   await upsertIndexEntry(paths, sessionToIndexEntry(session));
 
   return session;
@@ -504,6 +513,70 @@ export async function suspendSession(
   const suspended: Session = { ...session, status: "suspended" };
   await upsertIndexEntry(paths, sessionToIndexEntry(suspended));
   return suspended;
+}
+
+export interface DeleteSessionOptions {
+  /** If true, permanently removes the transcript file. Default is soft-delete. */
+  permanent?: boolean;
+}
+
+/**
+ * Renames a session by writing a new meta-record to the transcript and
+ * updating the index entry. The title survives an index rebuild because it
+ * is stored in the transcript itself.
+ */
+export async function renameSession(
+  session: Session,
+  newTitle: string,
+  paths: HarnessPaths
+): Promise<Session> {
+  const updatedAt = new Date().toISOString();
+  const meta: SessionMetaRecord = { type: "session-meta", title: newTitle, updatedAt };
+  await appendFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
+
+  const renamed: Session = { ...session, title: newTitle };
+  await upsertIndexEntry(paths, sessionToIndexEntry(renamed));
+  return renamed;
+}
+
+/**
+ * Deletes a session. By default the transcript is moved to the `deleted/`
+ * subdirectory and the index entry is removed. Pass `{ permanent: true }` to
+ * remove the transcript file entirely.
+ */
+export async function deleteSession(
+  sessionId: string,
+  paths: HarnessPaths,
+  options?: DeleteSessionOptions
+): Promise<void> {
+  const tPath = await findTranscriptPath(paths, sessionId);
+
+  if (tPath) {
+    if (options?.permanent) {
+      await unlink(tPath);
+    } else {
+      const deletedDir = join(paths.sessions, "deleted");
+      await mkdir(deletedDir, { recursive: true });
+      const fileName = basename(tPath);
+      let destPath = join(deletedDir, fileName);
+      if (await fileExists(destPath)) {
+        const ext = ".jsonl";
+        const base = fileName.slice(0, -ext.length);
+        destPath = join(deletedDir, `${base}.${Date.now()}${ext}`);
+      }
+      await rename(tPath, destPath);
+    }
+  }
+
+  // Remove from index
+  const queue = getIndexQueue(paths.sessions);
+  const op = queue.then(async () => {
+    const { entries: index } = await loadIndex(paths);
+    const filtered = index.filter((e) => e.sessionId !== sessionId);
+    await saveIndex(paths, filtered);
+  });
+  setIndexQueue(paths.sessions, op.catch(() => {}));
+  await op;
 }
 
 /**
@@ -615,32 +688,45 @@ export function extractToolData(messages: Message[]): {
 /* ─── Read API ─── */
 
 /**
- * Reads turns from a JSONL transcript, skipping end markers and corrupt lines.
+ * Reads turns and the latest title from a JSONL transcript.
+ * Skips end markers, meta records, and corrupt lines.
  */
-async function readTranscriptTurns(tPath: string): Promise<SessionTurn[]> {
+async function readTranscript(
+  tPath: string
+): Promise<{ turns: SessionTurn[]; title?: string }> {
   let raw: string;
   try {
     raw = await readFile(tPath, "utf-8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return [];
+    if (code === "ENOENT") return { turns: [] };
     throw err;
   }
 
   const turns: SessionTurn[] = [];
+  let title: string | undefined;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const parsed = JSON.parse(trimmed) as { type?: string } & SessionTurn;
+      const parsed = JSON.parse(trimmed) as {
+        type?: string;
+        title?: string;
+      } & SessionTurn;
       // Skip end-marker and meta-record lines — they are not turns.
-      if (parsed.type === "session-end" || parsed.type === "session-meta") continue;
+      if (parsed.type === "session-end") continue;
+      if (parsed.type === "session-meta") {
+        if (typeof parsed.title === "string") {
+          title = parsed.title;
+        }
+        continue;
+      }
       turns.push(parsed as SessionTurn);
     } catch {
       // Skip corrupt lines silently.
     }
   }
-  return turns;
+  return { turns, title };
 }
 
 /**
@@ -651,7 +737,8 @@ async function readTranscriptTurns(tPath: string): Promise<SessionTurn[]> {
  */
 function reconstructIndexEntry(
   sessionId: string,
-  turns: SessionTurn[]
+  turns: SessionTurn[],
+  title?: string
 ): SessionIndexEntry {
   const totals: SessionTokenTotals = {
     inputTokens: 0,
@@ -693,7 +780,7 @@ function reconstructIndexEntry(
     lastActivity,
     model,
     tokenTotals: totals,
-    title: `Recovered Session ${sessionId.slice(-6)}`,
+    title: title ?? `Recovered Session ${sessionId.slice(-6)}`,
     status: "idle",
   };
 }
@@ -724,8 +811,8 @@ async function reconstructSessionsFromTranscripts(
         if (!file.endsWith(".jsonl")) continue;
         const sessionId = file.slice(0, -".jsonl".length);
         const tPath = join(dateDir, file);
-        const turns = await readTranscriptTurns(tPath);
-        entries.set(sessionId, reconstructIndexEntry(sessionId, turns));
+        const { turns, title } = await readTranscript(tPath);
+        entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
       }
     }
 
@@ -735,8 +822,8 @@ async function reconstructSessionsFromTranscripts(
       if (!file.name.endsWith(".jsonl")) continue;
       const sessionId = file.name.slice(0, -".jsonl".length);
       const tPath = join(paths.sessions, file.name);
-      const turns = await readTranscriptTurns(tPath);
-      entries.set(sessionId, reconstructIndexEntry(sessionId, turns));
+      const { turns, title } = await readTranscript(tPath);
+      entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
     }
   } catch {
     // Directory may not exist yet.
@@ -766,13 +853,13 @@ export async function readSession(
   const tPath = await findTranscriptPath(paths, sessionId);
   if (!tPath) return null;
 
-  const turns = await readTranscriptTurns(tPath);
+  const { turns, title } = await readTranscript(tPath);
 
   // Fallback: if the session is not in the index (e.g. the index file is
   // corrupt or the entry was lost), reconstruct a minimal index entry from
   // the transcript so the session remains visible.
   if (!entry) {
-    entry = reconstructIndexEntry(sessionId, turns);
+    entry = reconstructIndexEntry(sessionId, turns, title);
   }
 
   return { session: entry, turns };
@@ -792,7 +879,17 @@ export async function countTurnsInTranscript(
     const raw = await readFile(tPath, "utf-8");
     return raw.split("\n").filter((line) => {
       const trimmed = line.trim();
-      return trimmed && !trimmed.includes('"session-end"');
+      if (!trimmed) return false;
+      try {
+        const parsed = JSON.parse(trimmed) as { type?: string };
+        // Skip structural records; only count actual turns.
+        if (parsed.type === "session-end" || parsed.type === "session-meta") {
+          return false;
+        }
+        return true;
+      } catch {
+        return false;
+      }
     }).length;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;

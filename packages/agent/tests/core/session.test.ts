@@ -51,7 +51,9 @@ async function readJsonl(path: string): Promise<SessionTurn[]> {
       .trim()
       .split("\n")
       .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as SessionTurn);
+      .map((line) => JSON.parse(line) as { type?: string } & SessionTurn)
+      .filter((parsed) => parsed.type !== "session-end" && parsed.type !== "session-meta")
+      .map((parsed) => parsed as SessionTurn);
   } catch {
     return [];
   }
@@ -250,8 +252,11 @@ describe("session", () => {
 
       const raw = await readFile(session.transcriptPath, "utf-8");
       const lines = raw.trim().split("\n");
-      expect(lines).toHaveLength(2);
-      for (const line of lines) {
+      // session-meta + 2 turns
+      expect(lines).toHaveLength(3);
+      const meta = JSON.parse(lines[0]!) as { type?: string };
+      expect(meta.type).toBe("session-meta");
+      for (const line of lines.slice(1)) {
         expect(JSON.parse(line)).toBeDefined();
       }
     });
