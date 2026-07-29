@@ -86,6 +86,26 @@ describe("resolveHarnessPaths", () => {
     expect(paths.state).toBe(join(process.env.HOME ?? "/home/user", ".harness"));
   });
 
+  it("opts.state takes precedence over env", () => {
+    process.env.HARNESS_HOME = "/env/home";
+    process.env.HARNESS_STATE = "/env/state";
+    process.env.XDG_STATE_HOME = "/xdg/state";
+
+    const paths = resolveHarnessPaths({ state: "/opt/state" });
+    expect(paths.state).toBe("/opt/state");
+    // home still resolved independently
+    expect(paths.home).toBe("/env/home");
+  });
+
+  it("opts.state ignores HARNESS_STATE and XDG_STATE_HOME", () => {
+    process.env.HARNESS_STATE = "/env/state";
+    process.env.XDG_STATE_HOME = "/xdg/state";
+
+    const paths = resolveHarnessPaths({ home: "/opt/home", state: "/opt/state" });
+    expect(paths.state).toBe("/opt/state");
+    expect(paths.sessions).toBe("/opt/state/sessions");
+  });
+
   it("derives all subpaths correctly", () => {
     process.env.HARNESS_HOME = "/h";
     process.env.HARNESS_STATE = "/s";
