@@ -48,16 +48,17 @@ export interface HarnessPaths {
  *
  * Resolution order:
  * - home: opts.home → $HARNESS_HOME → default ~/harness
- * - state: $HARNESS_STATE → $XDG_STATE_HOME/harness → default ~/.harness
+ * - state: opts.state → $HARNESS_STATE → $XDG_STATE_HOME/harness → default ~/.harness
  *
  * Designed for dependency injection: create once at process startup and pass down.
- * Tests can inject a temp directory via `opts.home` to stay fully isolated.
+ * Tests can inject a temp directory via `opts.home`/`opts.state` to stay fully isolated.
  */
-export function resolveHarnessPaths(opts?: { home?: string }): HarnessPaths {
+export function resolveHarnessPaths(opts?: { home?: string; state?: string }): HarnessPaths {
   const home =
     opts?.home ?? process.env.HARNESS_HOME ?? path.join(os.homedir(), "harness");
 
   const state =
+    opts?.state ??
     process.env.HARNESS_STATE ??
     (process.env.XDG_STATE_HOME
       ? path.join(process.env.XDG_STATE_HOME, "harness")

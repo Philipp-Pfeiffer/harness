@@ -8,8 +8,10 @@ import {
   rename,
   readdir,
   stat,
+  copyFile,
+  unlink,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import type { HarnessPaths } from "@harness/core";
 
@@ -124,10 +126,23 @@ export interface SessionIndexEntry {
   profile?: string;
 }
 
+interface SessionIndexLoadResult {
+  entries: SessionIndexEntry[];
+  /** True when the index file is missing or structurally invalid. */
+  corrupt: boolean;
+}
+
 /** Marker appended to the transcript when a session is explicitly ended. */
 export interface SessionEndMarker {
   type: "session-end";
   endedAt: string;
+}
+
+/** Session metadata record stored at the start of a transcript. */
+export interface SessionMetaRecord {
+  type: "session-meta";
+  title: string;
+  updatedAt: string;
 }
 
 export interface CreateSessionOptions {
@@ -164,6 +179,13 @@ export const SESSION_LOAD_WARN_THRESHOLD = 50_000;
  * Sessions below this threshold are loaded without any confirmation prompt.
  */
 export const SESSION_LOAD_SILENT_MAX = 30_000;
+
+/* ─── Logging seam ─── */
+
+/** Single internal warning sink. Replace here if session.ts ever gets a logger. */
+function warn(message: string, context?: Record<string, unknown>): void {
+  console.warn(`[session] ${message}`, context ?? "");
+}
 
 /* ─── Paths ─── */
 
@@ -275,25 +297,82 @@ function addCost(
 
 /* ─── Index Management ─── */
 
-// Serializes read-modify-write cycles on the sessions index. Turns on
-// DIFFERENT sessions run in parallel (per-session turn queues), so
-// concurrent upsertIndexEntry calls would otherwise interleave
+// Serializes read-modify-write cycles on the sessions index PER sessions
+// directory. Turns on DIFFERENT sessions run in parallel (per-session turn
+// queues), so concurrent upsertIndexEntry calls would otherwise interleave
 // load → modify → save and silently lose each other's updates.
-let indexUpdateQueue: Promise<void> = Promise.resolve();
+// The queue is keyed by the resolved sessions path so trailing slashes,
+// relative paths, or symlinks pointing to the same directory share one queue.
+const indexUpdateQueues = new Map<string, Promise<void>>();
 
-async function loadIndex(paths: HarnessPaths): Promise<SessionIndexEntry[]> {
+function normalizeSessionsDir(sessionsDir: string): string {
+  return resolve(sessionsDir);
+}
+
+function getIndexQueue(sessionsDir: string): Promise<void> {
+  const key = normalizeSessionsDir(sessionsDir);
+  if (!indexUpdateQueues.has(key)) {
+    indexUpdateQueues.set(key, Promise.resolve());
+  }
+  return indexUpdateQueues.get(key)!;
+}
+
+function setIndexQueue(sessionsDir: string, queue: Promise<void>): void {
+  indexUpdateQueues.set(normalizeSessionsDir(sessionsDir), queue);
+}
+
+function isValidIndexEntry(item: unknown): item is SessionIndexEntry {
+  if (item === null || typeof item !== "object") return false;
+  const e = item as Record<string, unknown>;
+  return (
+    typeof e.sessionId === "string" &&
+    typeof e.created === "string" &&
+    typeof e.lastActivity === "string" &&
+    typeof e.model === "string" &&
+    typeof e.title === "string" &&
+    typeof e.status === "string" &&
+    e.tokenTotals !== null &&
+    typeof e.tokenTotals === "object"
+  );
+}
+
+async function loadIndex(paths: HarnessPaths): Promise<SessionIndexLoadResult> {
+  const idxPath = sessionsIndexPath(paths);
+  let raw: string;
   try {
-    const raw = await readFile(sessionsIndexPath(paths), "utf-8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) return parsed as SessionIndexEntry[];
-    return [];
+    raw = await readFile(idxPath, "utf-8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return [];
-    // Treat corrupt JSON as empty index; caller will rebuild it.
-    if (err instanceof SyntaxError) return [];
+    if (code === "ENOENT") {
+      // Fresh installation: no index file yet. Not corrupt.
+      return { entries: [], corrupt: false };
+    }
     throw err;
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { entries: [], corrupt: true };
+  }
+
+  if (!Array.isArray(parsed)) {
+    return { entries: [], corrupt: true };
+  }
+
+  const entries: SessionIndexEntry[] = [];
+  let corrupt = false;
+  for (const item of parsed) {
+    if (isValidIndexEntry(item)) {
+      entries.push(item);
+    } else {
+      corrupt = true;
+      warn("Skipping corrupt sessions.json entry", { item });
+    }
+  }
+
+  return { entries, corrupt };
 }
 
 async function saveIndex(
@@ -308,12 +387,23 @@ async function saveIndex(
   await rename(tmpPath, sessionsIndexPath(paths));
 }
 
+async function backupCorruptIndex(paths: HarnessPaths): Promise<void> {
+  const idxPath = sessionsIndexPath(paths);
+  const backupPath = `${idxPath}.corrupt-${Date.now()}`;
+  try {
+    await copyFile(idxPath, backupPath);
+  } catch (err) {
+    warn("Failed to backup corrupt sessions index", { idxPath, error: err });
+  }
+}
+
 async function upsertIndexEntry(
   paths: HarnessPaths,
   entry: SessionIndexEntry
 ): Promise<void> {
-  const op = indexUpdateQueue.then(async () => {
-    const index = await loadIndex(paths);
+  const queue = getIndexQueue(paths.sessions);
+  const op = queue.then(async () => {
+    const { entries: index } = await loadIndex(paths);
     const idx = index.findIndex((e) => e.sessionId === entry.sessionId);
     if (idx === -1) {
       index.push(entry);
@@ -323,7 +413,7 @@ async function upsertIndexEntry(
     await saveIndex(paths, index);
   });
   // Keep the queue alive even when this update failed.
-  indexUpdateQueue = op.catch(() => {});
+  setIndexQueue(paths.sessions, op.catch(() => {}));
   return op;
 }
 
@@ -378,7 +468,8 @@ export async function createSession(
   };
 
   await mkdir(dirname(transcriptPath), { recursive: true });
-  await writeFile(session.transcriptPath, "", "utf-8");
+  const meta: SessionMetaRecord = { type: "session-meta", title, updatedAt: now };
+  await writeFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
   await upsertIndexEntry(paths, sessionToIndexEntry(session));
 
   return session;
@@ -424,6 +515,70 @@ export async function suspendSession(
   return suspended;
 }
 
+export interface DeleteSessionOptions {
+  /** If true, permanently removes the transcript file. Default is soft-delete. */
+  permanent?: boolean;
+}
+
+/**
+ * Renames a session by writing a new meta-record to the transcript and
+ * updating the index entry. The title survives an index rebuild because it
+ * is stored in the transcript itself.
+ */
+export async function renameSession(
+  session: Session,
+  newTitle: string,
+  paths: HarnessPaths
+): Promise<Session> {
+  const updatedAt = new Date().toISOString();
+  const meta: SessionMetaRecord = { type: "session-meta", title: newTitle, updatedAt };
+  await appendFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
+
+  const renamed: Session = { ...session, title: newTitle };
+  await upsertIndexEntry(paths, sessionToIndexEntry(renamed));
+  return renamed;
+}
+
+/**
+ * Deletes a session. By default the transcript is moved to the `deleted/`
+ * subdirectory and the index entry is removed. Pass `{ permanent: true }` to
+ * remove the transcript file entirely.
+ */
+export async function deleteSession(
+  sessionId: string,
+  paths: HarnessPaths,
+  options?: DeleteSessionOptions
+): Promise<void> {
+  const tPath = await findTranscriptPath(paths, sessionId);
+
+  if (tPath) {
+    if (options?.permanent) {
+      await unlink(tPath);
+    } else {
+      const deletedDir = join(paths.sessions, "deleted");
+      await mkdir(deletedDir, { recursive: true });
+      const fileName = basename(tPath);
+      let destPath = join(deletedDir, fileName);
+      if (await fileExists(destPath)) {
+        const ext = ".jsonl";
+        const base = fileName.slice(0, -ext.length);
+        destPath = join(deletedDir, `${base}.${Date.now()}${ext}`);
+      }
+      await rename(tPath, destPath);
+    }
+  }
+
+  // Remove from index
+  const queue = getIndexQueue(paths.sessions);
+  const op = queue.then(async () => {
+    const { entries: index } = await loadIndex(paths);
+    const filtered = index.filter((e) => e.sessionId !== sessionId);
+    await saveIndex(paths, filtered);
+  });
+  setIndexQueue(paths.sessions, op.catch(() => {}));
+  await op;
+}
+
 /**
  * Marks all sessions currently in "active" status as "idle".
  * Called on daemon start to clean up orphaned active markers from
@@ -432,7 +587,7 @@ export async function suspendSession(
  * "suspended" (graceful shutdown, resumable), or "ended" (explicitly stopped).
  */
 export async function markActiveSessionsIdle(paths: HarnessPaths): Promise<number> {
-  const index = await loadIndex(paths);
+  const { entries: index } = await loadIndex(paths);
   let changed = 0;
   for (const entry of index) {
     if (entry.status === "active") {
@@ -533,57 +688,45 @@ export function extractToolData(messages: Message[]): {
 /* ─── Read API ─── */
 
 /**
- * Loads a session's index entry and all turns from disk.
- *
- * Reads the JSONL transcript file, skipping `session-end` markers.
- * Returns `null` if the session is not in the index or the transcript
- * file does not exist.
- *
- * @param sessionId  The session id to load.
- * @param paths      Harness paths (resolves `$HARNESS_STATE`).
- * @returns `{ session, turns }` or `null` if not found.
+ * Reads turns and the latest title from a JSONL transcript.
+ * Skips end markers, meta records, and corrupt lines.
  */
-export async function readSession(
-  sessionId: string,
-  paths: HarnessPaths
-): Promise<{ session: SessionIndexEntry; turns: SessionTurn[] } | null> {
-  const index = await loadIndex(paths);
-  let entry = index.find((e) => e.sessionId === sessionId);
-
-  const tPath = await findTranscriptPath(paths, sessionId);
-  if (!tPath) return null;
-
+async function readTranscript(
+  tPath: string
+): Promise<{ turns: SessionTurn[]; title?: string }> {
   let raw: string;
   try {
     raw = await readFile(tPath, "utf-8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return null;
+    if (code === "ENOENT") return { turns: [] };
     throw err;
   }
 
   const turns: SessionTurn[] = [];
+  let title: string | undefined;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      const parsed = JSON.parse(trimmed) as { type?: string } & SessionTurn;
-      // Skip end-marker lines — they are not turns.
+      const parsed = JSON.parse(trimmed) as {
+        type?: string;
+        title?: string;
+      } & SessionTurn;
+      // Skip end-marker and meta-record lines — they are not turns.
       if (parsed.type === "session-end") continue;
+      if (parsed.type === "session-meta") {
+        if (typeof parsed.title === "string") {
+          title = parsed.title;
+        }
+        continue;
+      }
       turns.push(parsed as SessionTurn);
     } catch {
       // Skip corrupt lines silently.
     }
   }
-
-  // Fallback: if the session is not in the index (e.g. the index file is
-  // corrupt or the entry was lost), reconstruct a minimal index entry from
-  // the transcript so the session remains visible.
-  if (!entry) {
-    entry = reconstructIndexEntry(sessionId, turns);
-  }
-
-  return { session: entry, turns };
+  return { turns, title };
 }
 
 /**
@@ -594,7 +737,8 @@ export async function readSession(
  */
 function reconstructIndexEntry(
   sessionId: string,
-  turns: SessionTurn[]
+  turns: SessionTurn[],
+  title?: string
 ): SessionIndexEntry {
   const totals: SessionTokenTotals = {
     inputTokens: 0,
@@ -624,7 +768,7 @@ function reconstructIndexEntry(
     if (turn.model) model = turn.model;
   }
   if (!lastActivity) {
-    // No turns: fall back to file mtime.
+    // No turns: fall back to epoch timestamps when the transcript is empty.
     lastActivity = new Date(0).toISOString();
   }
   const created = turns[0]?.timing?.startedAt
@@ -636,9 +780,89 @@ function reconstructIndexEntry(
     lastActivity,
     model,
     tokenTotals: totals,
-    title: `Recovered Session ${sessionId.slice(-6)}`,
+    title: title ?? `Recovered Session ${sessionId.slice(-6)}`,
     status: "idle",
   };
+}
+
+/**
+ * Scans the sessions directory for transcript files and rebuilds index entries.
+ * Checks dated folders first, then legacy flat files.
+ */
+async function reconstructSessionsFromTranscripts(
+  paths: HarnessPaths
+): Promise<SessionIndexEntry[]> {
+  const entries = new Map<string, SessionIndexEntry>();
+
+  try {
+    const dirEntries = await readdir(paths.sessions, { withFileTypes: true });
+
+    // 1. Dated folders: YYYY-MM-DD/<id>.jsonl
+    for (const dirEntry of dirEntries) {
+      if (!dirEntry.isDirectory()) continue;
+      const dateDir = join(paths.sessions, dirEntry.name);
+      let files: string[];
+      try {
+        files = await readdir(dateDir);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith(".jsonl")) continue;
+        const sessionId = file.slice(0, -".jsonl".length);
+        const tPath = join(dateDir, file);
+        const { turns, title } = await readTranscript(tPath);
+        entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
+      }
+    }
+
+    // 2. Legacy flat transcripts: <id>.jsonl directly in sessions root
+    for (const file of dirEntries) {
+      if (!file.isFile()) continue;
+      if (!file.name.endsWith(".jsonl")) continue;
+      const sessionId = file.name.slice(0, -".jsonl".length);
+      const tPath = join(paths.sessions, file.name);
+      const { turns, title } = await readTranscript(tPath);
+      entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
+    }
+  } catch {
+    // Directory may not exist yet.
+  }
+
+  return [...entries.values()];
+}
+
+/**
+ * Loads a session's index entry and all turns from disk.
+ *
+ * Reads the JSONL transcript file, skipping `session-end` markers.
+ * Returns `null` if the session is not in the index or the transcript
+ * file does not exist.
+ *
+ * @param sessionId  The session id to load.
+ * @param paths      Harness paths (resolves `$HARNESS_STATE`).
+ * @returns `{ session, turns }` or `null` if not found.
+ */
+export async function readSession(
+  sessionId: string,
+  paths: HarnessPaths
+): Promise<{ session: SessionIndexEntry; turns: SessionTurn[] } | null> {
+  const { entries: index } = await loadIndex(paths);
+  let entry = index.find((e) => e.sessionId === sessionId);
+
+  const tPath = await findTranscriptPath(paths, sessionId);
+  if (!tPath) return null;
+
+  const { turns, title } = await readTranscript(tPath);
+
+  // Fallback: if the session is not in the index (e.g. the index file is
+  // corrupt or the entry was lost), reconstruct a minimal index entry from
+  // the transcript so the session remains visible.
+  if (!entry) {
+    entry = reconstructIndexEntry(sessionId, turns, title);
+  }
+
+  return { session: entry, turns };
 }
 
 /**
@@ -655,7 +879,17 @@ export async function countTurnsInTranscript(
     const raw = await readFile(tPath, "utf-8");
     return raw.split("\n").filter((line) => {
       const trimmed = line.trim();
-      return trimmed && !trimmed.includes('"session-end"');
+      if (!trimmed) return false;
+      try {
+        const parsed = JSON.parse(trimmed) as { type?: string };
+        // Skip structural records; only count actual turns.
+        if (parsed.type === "session-end" || parsed.type === "session-meta") {
+          return false;
+        }
+        return true;
+      } catch {
+        return false;
+      }
     }).length;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
@@ -672,6 +906,10 @@ export async function countTurnsInTranscript(
  * not `createdAt`, so that a session started on a previous day but active
  * today is included in a "today" range.
  *
+ * If the index file is corrupt, it is backed up and rebuilt from transcripts
+ * so sessions remain visible. A missing or empty index is treated as a fresh
+ * installation and does not trigger a full transcript scan.
+ *
  * @param paths  Harness paths.
  * @param range  Optional `{ from?, to? }` inclusive ISO date/time bounds on `lastActivity`.
  */
@@ -679,10 +917,28 @@ export async function listSessions(
   paths: HarnessPaths,
   range?: ListSessionsRange
 ): Promise<SessionIndexEntry[]> {
-  const index = await loadIndex(paths);
-  if (!range) return index;
+  const { entries: index, corrupt } = await loadIndex(paths);
 
-  return index.filter((entry) => {
+  let sessions = index;
+  if (corrupt) {
+    warn("Sessions index is corrupt; backing up and rebuilding from transcripts", {
+      sessionsDir: paths.sessions,
+    });
+    await backupCorruptIndex(paths);
+    const reconstructed = await reconstructSessionsFromTranscripts(paths);
+    const byId = new Map(index.map((e) => [e.sessionId, e]));
+    for (const rec of reconstructed) {
+      if (!byId.has(rec.sessionId)) {
+        byId.set(rec.sessionId, rec);
+      }
+    }
+    sessions = [...byId.values()];
+    await saveIndex(paths, sessions);
+  }
+
+  if (!range) return sessions;
+
+  return sessions.filter((entry) => {
     if (range.from && entry.lastActivity < range.from) return false;
     if (range.to && entry.lastActivity > range.to) return false;
     return true;
