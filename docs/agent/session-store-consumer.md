@@ -44,6 +44,38 @@ const loaded = await readSession(session.id, paths);
 Siehe auch `examples/foreign-consumer/` im Repository für ein vollständiges
 Skript mit Write/Read-Modus und Tool-Daten.
 
+## Außerhalb des Workspaces konsumieren
+
+`examples/foreign-consumer/` liegt im pnpm-Workspace und löst `workspace:*`
+Dependencies nur deshalb auf. Um die Bibliothek in einer wirklich fremden App
+zu verwenden, müssen die Pakete gepackt und über `file:`-Referenzen installiert
+werden:
+
+```bash
+# Repo-Root
+scripts/pack-local.sh
+# → erzeugt dist-tarballs/harness-core-*.tgz und dist-tarballs/harness-agent-*.tgz
+```
+
+Die gepackte `package.json` von `@harness/agent` enthält dann eine echte
+Version für `@harness/core` (z.B. `"0.0.1"`) statt `workspace:*`.
+
+In der Fremd-App:
+
+```json
+{
+  "dependencies": {
+    "@harness/core": "file:/pfad/zu/harness/dist-tarballs/harness-core-0.0.1.tgz",
+    "@harness/agent": "file:/pfad/zu/harness/dist-tarballs/harness-agent-0.0.1.tgz"
+  }
+}
+```
+
+Ein vollständiger Durchlauf außerhalb jedes Workspaces wird von
+`scripts/verify-foreign-consumer.sh` geprüft: es legt ein temporäres
+Verzeichnis an, installiert die Tarballs mit `pnpm install`, schreibt eine
+Session in ein eigenes `state`-Verzeichnis und liest sie wieder zurück.
+
 ## State-Root explizit setzen
 
 Übergebe `state` immer explizit an `resolveHarnessPaths()`. Damit wird

@@ -7,6 +7,7 @@ pnpm-lock.yaml
 # Build output
 dist/
 *.tsbuildinfo
+dist-tarballs/
 
 # Environment
 .env
