@@ -1,11 +1,11 @@
-import { spawn, exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { resolve, join } from "node:path";
 import { readFile, readdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { resolveHarnessPaths } from "@harness/core";
+import dotenv from "dotenv";
 import { sendIpcRequest, sendIpcStreaming } from "./ipc.js";
 import {
   getRunningDaemonPid,
@@ -13,6 +13,8 @@ import {
   stopDaemon,
   removePidFile,
   isProcessAlive,
+  killDaemonRunProcesses,
+  waitUntilNoDaemonRunProcess,
 } from "./process.js";
 import { installSystemdUnit } from "./systemd.js";
 import { DaemonRuntime } from "./runtime.js";
@@ -20,6 +22,12 @@ import { DaemonRuntime } from "./runtime.js";
 export interface CliResult {
   stdout: string;
   exitCode: number;
+}
+
+/** Absolute path to the agent entry used by `daemon run`. */
+export function resolveDaemonEntryPath(): string {
+  const moduleDir = fileURLToPath(new URL(".", import.meta.url));
+  return resolve(moduleDir, "../index.js");
 }
 
 /* ─── daemon start ─── */
@@ -42,8 +50,7 @@ export async function daemonStart(): Promise<CliResult> {
   // entryPath resolves via import.meta.url so it works from any cwd.
   // cwd is set to paths.home so the daemon's workspace is HARNESS_HOME.
   const nodeBin = process.execPath;
-  const moduleDir = fileURLToPath(new URL(".", import.meta.url));
-  const entryPath = resolve(moduleDir, "../index.js");
+  const entryPath = resolveDaemonEntryPath();
   const daemonProc = spawn(nodeBin, [entryPath, "daemon", "run"], {
     detached: true,
     stdio: "ignore",
@@ -80,30 +87,33 @@ export async function daemonStart(): Promise<CliResult> {
 
 export async function daemonStop(): Promise<CliResult> {
   const paths = resolveHarnessPaths();
+  const entryPath = resolveDaemonEntryPath();
   const pid = await getRunningDaemonPid(paths.pidFile);
 
   if (pid === null) {
-    // Clean up any stale PID file
     await removePidFile(paths.pidFile);
+    await killDaemonRunProcesses(entryPath, "SIGKILL");
     return {
       stdout: "Daemon is not running.",
       exitCode: 0,
     };
   }
 
-  const signaled = await stopDaemon(paths.pidFile, "SIGTERM");
-  if (!signaled) {
-    await removePidFile(paths.pidFile);
-    return {
-      stdout: "Daemon was not running (stale PID file removed).",
-      exitCode: 0,
-    };
+  // Prefer graceful shutdown via IPC (WhatsApp/Baileys disconnect cleanly).
+  try {
+    await sendIpcRequest(paths.socketFile, { type: "shutdown" }, 5_000);
+  } catch {
+    // Fall back to signals below.
   }
 
-  // Wait for the process to exit (up to 15 seconds)
-  const exited = await waitForExit(pid, 15_000);
+  let exited = await waitForExit(pid, 12_000);
   if (!exited) {
-    // Force kill
+    const signaled = await stopDaemon(paths.pidFile, "SIGTERM");
+    if (signaled) {
+      exited = await waitForExit(pid, 8_000);
+    }
+  }
+  if (!exited) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -112,6 +122,7 @@ export async function daemonStop(): Promise<CliResult> {
     await sleep(500);
   }
 
+  await killDaemonRunProcesses(entryPath, "SIGKILL");
   await removePidFile(paths.pidFile);
   return {
     stdout: `Daemon stopped (PID ${pid}).`,
@@ -122,6 +133,7 @@ export async function daemonStop(): Promise<CliResult> {
 /* ─── daemon restart ─── */
 
 export async function daemonRestart(): Promise<CliResult> {
+  const entryPath = resolveDaemonEntryPath();
   const paths = resolveHarnessPaths();
   const pid = await getRunningDaemonPid(paths.pidFile);
 
@@ -135,7 +147,12 @@ export async function daemonRestart(): Promise<CliResult> {
   // Guarantee the old process is fully gone before we attempt to start a new
   // one. Two daemons running simultaneously corrupt the Baileys WhatsApp auth
   // state and force a fresh QR-code scan.
-  const stopped = await waitUntilNoDaemonProcess(20_000);
+  let stopped = await waitUntilNoDaemonRunProcess(entryPath, 15_000);
+  if (!stopped) {
+    await killDaemonRunProcesses(entryPath, "SIGKILL");
+    await sleep(500);
+    stopped = await waitUntilNoDaemonRunProcess(entryPath, 5_000);
+  }
   if (!stopped) {
     return {
       stdout: "Daemon restart failed: old daemon process did not exit in time.",
@@ -314,6 +331,8 @@ async function checkStaleDaemon(): Promise<string | null> {
 /* ─── daemon run (internal — the actual daemon process) ─── */
 
 export async function daemonRun(): Promise<void> {
+  const paths = resolveHarnessPaths();
+  dotenv.config({ path: resolve(paths.home, ".env"), quiet: true });
   const runtime = new DaemonRuntime();
   try {
     await runtime.start();
@@ -559,8 +578,6 @@ export async function harnessChat(sessionId?: string): Promise<CliResult> {
 
 /* ─── helpers ─── */
 
-const execAsync = promisify(exec);
-
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -570,22 +587,6 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   while (Date.now() - start < timeoutMs) {
     if (!isProcessAlive(pid)) return true;
     await sleep(200);
-  }
-  return false;
-}
-
-/**
- * Polls until no process matching the daemon command line is visible.
- * Returns true if all daemon processes disappeared within the timeout.
- */
-async function waitUntilNoDaemonProcess(timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const { stdout } = await execAsync(
-      "pgrep -f 'node packages/agent/dist/index.js daemon run' || true",
-    );
-    if (!stdout.trim()) return true;
-    await sleep(250);
   }
   return false;
 }

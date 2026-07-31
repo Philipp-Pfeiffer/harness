@@ -5,7 +5,7 @@ import { resolveModel, resolveModelFromConfig, type ResolvedModel } from "../cor
 import type { ConfigModel } from "../config.js";
 import { prompt } from "../prompts.js";
 import type { BrowserConfig } from "./config.js";
-import { parseModelRef, resolveBrowserConfig } from "./config.js";
+import { isOpenRouterPresetRef, parseModelRef, resolveBrowserConfig } from "./config.js";
 import { BrowserSubAgentContext } from "./context.js";
 import {
   BrowserConnectionError,
@@ -16,6 +16,7 @@ import {
 import { createBrowserSubAgentTools } from "./subAgentTools.js";
 import type { BrowserReport, BrowserSessionOptions, BrowserToolInput } from "./types.js";
 import { ensureDownloadDir } from "./sandbox.js";
+import { BrowserTraceWriter } from "./trace.js";
 
 export interface BrowserRunnerDeps {
   browserConfig?: BrowserConfig;
@@ -25,13 +26,26 @@ export interface BrowserRunnerDeps {
   engineFactory?: (options: BrowserSessionOptions) => BrowserEngine;
   /** Base directory for downloads/<session-id>/ */
   downloadsBaseDir: string;
+  /** Base directory for browser-runs/<session-id>/<run-id>.jsonl traces */
+  browserRunsDir: string;
+  toolCallId?: string;
   logger?: (msg: string, level?: "warn" | "debug") => void;
+  onStatus?: (status: string) => void;
 }
 
 function resolveBrowserModel(
   modelRef: string,
   models?: ConfigModel[],
 ): ResolvedModel {
+  if (isOpenRouterPresetRef(modelRef)) {
+    const fromConfig = models?.find((m) => m.model === modelRef);
+    if (!fromConfig) {
+      throw new Error(
+        `Unknown OpenRouter preset "${modelRef}". Add it to config.models in $HARNESS_HOME/config.json.`,
+      );
+    }
+    return resolveModelFromConfig(fromConfig);
+  }
   const { provider, model: modelId } = parseModelRef(modelRef);
   const fromConfig = models?.find((m) => m.provider === provider && m.model === modelId);
   if (fromConfig) {
@@ -98,14 +112,26 @@ function formatReportForMainAgent(
   return lines.join("\n");
 }
 
+function appendTraceFooter(content: string, tracePath?: string): string {
+  if (!tracePath) return content;
+  return `${content}\n\n---\n_Browser trace:_ \`${tracePath}\``;
+}
+
 export async function runBrowserSubAgent(
   sessionId: string,
   input: BrowserToolInput,
   deps: BrowserRunnerDeps,
-): Promise<{ content: string; isError: boolean; report: BrowserReport }> {
+): Promise<{ content: string; isError: boolean; report: BrowserReport; tracePath?: string }> {
   const resolved = resolveBrowserConfig(deps.browserConfig, deps.defaultModel);
   const downloadDir = path.join(deps.downloadsBaseDir, sessionId);
   await ensureDownloadDir(downloadDir);
+
+  const trace = await BrowserTraceWriter.create({
+    browserRunsDir: deps.browserRunsDir,
+    sessionId,
+    toolCallId: deps.toolCallId,
+    input,
+  });
 
   const sessionOptions: BrowserSessionOptions = {
     cdpUrl: resolved.cdpUrl,
@@ -119,7 +145,12 @@ export async function runBrowserSubAgent(
 
   const engine = deps.engineFactory
     ? deps.engineFactory(sessionOptions)
-    : new PlaywrightBrowserEngine(resolved.cdpUrl, sessionOptions);
+    : new PlaywrightBrowserEngine({
+        mode: resolved.mode,
+        cdpUrl: resolved.cdpUrl,
+        obscuraPath: resolved.obscuraPath,
+        obscuraStartupTimeoutMs: resolved.obscuraStartupTimeoutMs,
+      }, sessionOptions);
 
   const ctx = new BrowserSubAgentContext(sessionId, downloadDir, engine);
   const tools = createBrowserSubAgentTools(ctx, sessionOptions);
@@ -133,10 +164,13 @@ export async function runBrowserSubAgent(
     await engine.disconnect().catch(() => undefined);
     const message = err instanceof Error ? err.message : String(err);
     const report = synthesizeFailureReport(`Model resolution failed: ${message}`, [], []);
+    await trace.phase("model-resolution-failed");
+    await trace.runEnd({ goalAchieved: false, isError: true, failureReason: message });
     return {
-      content: formatReportForMainAgent(report, input.resultFormat),
+      content: appendTraceFooter(formatReportForMainAgent(report, input.resultFormat), trace.tracePath),
       isError: true,
       report,
+      tracePath: trace.tracePath,
     };
   }
 
@@ -156,8 +190,12 @@ export async function runBrowserSubAgent(
   } as Message];
 
   try {
+    deps.onStatus?.("browser: connecting");
+    await trace.phase("connecting");
     await engine.connect();
     if (input.startUrl) {
+      deps.onStatus?.(`browser: navigating to ${input.startUrl}`);
+      await trace.phase(`navigating:${input.startUrl}`);
       await engine.navigate(input.startUrl);
     }
   } catch (err) {
@@ -166,32 +204,62 @@ export async function runBrowserSubAgent(
       ? err.message
       : err instanceof Error ? err.message : String(err);
     const report = synthesizeFailureReport(reason, [], []);
+    await trace.phase("connection-failed");
+    await trace.runEnd({ goalAchieved: false, isError: true, failureReason: reason });
     return {
-      content: formatReportForMainAgent(report, input.resultFormat),
+      content: appendTraceFooter(formatReportForMainAgent(report, input.resultFormat), trace.tracePath),
       isError: true,
       report,
+      tracePath: trace.tracePath,
     };
   }
 
   let runResult;
   try {
+    deps.onStatus?.("browser: sub-agent running");
+    await trace.phase("sub-agent-running");
     runResult = await agent.run(messages, {
       sessionId,
       signal: abortController.signal,
+      onEvent: (event) => {
+        if (event.type === "turn_end") {
+          void trace.turnEnd();
+          deps.onStatus?.(`browser: turn ${event.turn}/${resolved.maxTurns}`);
+        } else if (event.type === "tool_call_start") {
+          void trace.toolCallStart(event.name, event.args);
+          deps.onStatus?.(`browser: ${event.name}`);
+        } else if (event.type === "tool_call_done") {
+          void trace.toolCallDone(event.name, event.result, false);
+        } else if (event.type === "tool_call_error") {
+          void trace.toolCallError(event.name, event.error);
+        }
+      },
     });
   } finally {
     await engine.disconnect().catch(() => undefined);
+    await trace.phase("disconnected");
   }
 
   const visited = engine.getVisitedUrls();
   const notes = [...ctx.notes];
+  const usage = runResult.usage;
+  const completedTurns = runResult.aborted ? runResult.completedTurns : runResult.turns;
+  const toolCallCount = runResult.toolCallCount;
 
   if (ctx.report) {
     const report = ctx.report;
+    await trace.runEnd({
+      goalAchieved: report.goalAchieved,
+      isError: !report.goalAchieved,
+      usage,
+      completedTurns,
+      toolCallCount,
+    });
     return {
-      content: formatReportForMainAgent(report, input.resultFormat),
+      content: appendTraceFooter(formatReportForMainAgent(report, input.resultFormat), trace.tracePath),
       isError: !report.goalAchieved,
       report,
+      tracePath: trace.tracePath,
     };
   }
 
@@ -211,10 +279,20 @@ export async function runBrowserSubAgent(
     report.notes = notes.join("\n");
   }
 
+  await trace.runEnd({
+    goalAchieved: false,
+    isError: true,
+    usage,
+    completedTurns,
+    toolCallCount,
+    failureReason,
+  });
+
   return {
-    content: formatReportForMainAgent(report, input.resultFormat),
+    content: appendTraceFooter(formatReportForMainAgent(report, input.resultFormat), trace.tracePath),
     isError: true,
     report,
+    tracePath: trace.tracePath,
   };
 }
 

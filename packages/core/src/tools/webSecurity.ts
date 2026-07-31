@@ -15,11 +15,12 @@ export interface WebFetchSecurityConfig {
 
 /**
  * Lookup function signature compatible with Node's `net`/`tls` connect options.
+ * Supports both `all: true` (address array) and single-address callbacks.
  */
 type ConnectLookup = (
   hostname: string,
   options: { all?: boolean; family?: number },
-  callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+  callback: (...args: unknown[]) => void,
 ) => void;
 
 /**
@@ -31,38 +32,61 @@ type ConnectLookup = (
  * blocklist (unless the host is on the allowlist). The callback returns the
  * first validated address — the same one undici connects to.
  */
+function normalizeLookupResult(
+  result: { address: string; family: number } | Array<{ address: string; family: number }>,
+): Array<{ address: string; family: number }> {
+  return Array.isArray(result) ? result : [result];
+}
+
 function createSecureLookup(config?: WebFetchSecurityConfig): ConnectLookup {
   return (hostname, opts, callback) => {
     // Direct IP in URL — validate immediately
     const directIp = isIP(hostname);
     if (directIp) {
       if (!isAllowedHost(hostname, config?.allowlist) && isPrivateIp(hostname)) {
-        callback(toErrno(`Private IP address is blocked: ${hostname}`), "", 0);
+        callback(toErrno(`Private IP address is blocked: ${hostname}`));
         return;
       }
-      callback(null, hostname, directIp);
+      if (opts.all) {
+        callback(null, [{ address: hostname, family: directIp }]);
+      } else {
+        callback(null, hostname, directIp);
+      }
       return;
     }
 
-    // Hostname — resolve at connection time (single source of truth)
-    lookup(hostname, { all: true, family: opts.family })
-      .then((addrs) => {
+    // Hostname — resolve at connection time (single source of truth).
+    // undici passes { all: true } — callback must return an address array then.
+    const lookupOptions = opts.all
+      ? { all: true as const, ...(opts.family !== undefined ? { family: opts.family } : {}) }
+      : { ...(opts.family !== undefined ? { family: opts.family } : {}) };
+
+    lookup(hostname, lookupOptions)
+      .then((result) => {
+        const addrs = normalizeLookupResult(result);
         if (addrs.length === 0) {
-          callback(toErrno(`DNS lookup returned no addresses for ${hostname}`), "", 0);
+          callback(toErrno(`DNS lookup returned no addresses for ${hostname}`));
           return;
         }
-        if (!isAllowedHost(hostname, config?.allowlist)) {
-          for (const addr of addrs) {
-            if (isPrivateIp(addr.address)) {
-              callback(toErrno(`Hostname ${hostname} resolves to private IP ${addr.address}`), "", 0);
-              return;
-            }
-          }
+
+        const validated = isAllowedHost(hostname, config?.allowlist)
+          ? addrs
+          : addrs.filter((addr) => !isPrivateIp(addr.address));
+
+        if (validated.length === 0) {
+          const blocked = addrs.map((a) => a.address).join(", ");
+          callback(toErrno(`Hostname ${hostname} resolves only to private/blocked addresses: ${blocked}`));
+          return;
         }
-        callback(null, addrs[0].address, addrs[0].family);
+
+        if (opts.all) {
+          callback(null, validated);
+        } else {
+          callback(null, validated[0]!.address, validated[0]!.family);
+        }
       })
       .catch((err) => {
-        callback(toErrno(`DNS lookup failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`), "", 0);
+        callback(toErrno(`DNS lookup failed for ${hostname}: ${err instanceof Error ? err.message : String(err)}`));
       });
   };
 }

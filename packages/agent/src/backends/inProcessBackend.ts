@@ -178,6 +178,7 @@ export class InProcessBackend implements AgentBackend {
     sessionId: string,
     onEvent: (event: BackendEvent) => void,
     signal?: AbortSignal,
+    _opts?: import("./types.js").RunTurnOpts,
   ): Promise<TurnResult> {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
@@ -298,6 +299,8 @@ function translateAgentEvent(event: AgentEvent): BackendEvent | null {
       return { type: "tool_call_done", name: event.name, result: event.result };
     case "tool_call_error":
       return { type: "tool_call_error", name: event.name, error: event.error };
+    case "status":
+      return { type: "status", status: event.status };
     case "turn_end":
       return { type: "turn_end" };
     case "usage":

@@ -223,23 +223,16 @@ The main agent gets a single `browser` tool that spawns a dedicated browser sub-
 
 ### Setup (Obscura)
 
+Install Obscura once:
+
 ```bash
 # Arch Linux
 yay -S obscura-browser
-
-# Start CDP server (default port 9222)
-obscura serve --port 9222
 ```
 
-### Fallback: Chrome / Chromium
+Harness **spawns Obscura automatically** when the `browser` tool runs and **stops it when the session ends**. No manual `obscura serve` required.
 
-Any CDP-compatible browser works with zero code changes:
-
-```bash
-google-chrome --headless --remote-debugging-port=9222
-# or
-chromium --headless --remote-debugging-port=9222
-```
+Optional: attach to an already-running CDP server for debugging with `"mode": "cdp"`.
 
 ### Configuration
 
@@ -248,8 +241,10 @@ chromium --headless --remote-debugging-port=9222
 ```json
 {
   "browser": {
-    "cdpUrl": "http://127.0.0.1:9222",
-    "model": "openrouter/deepseek/deepseek-v4-flash",
+    "mode": "obscura",
+    "model": "@preset/deepseek-flash",
+    "obscuraPath": "obscura",
+    "obscuraStartupTimeoutMs": 15000,
     "maxTurns": 25,
     "maxTokens": 4096,
     "maxTotalTokens": 80000,
@@ -262,15 +257,21 @@ chromium --headless --remote-debugging-port=9222
 }
 ```
 
-Environment override: `BROWSER_CDP_URL` (wins over `cdpUrl` in config).
+| Key | Default | Description |
+|-----|---------|-------------|
+| `mode` | `obscura` | `obscura` = managed spawn/teardown per session. `cdp` = external CDP only. |
+| `obscuraPath` | `obscura` | Binary path. Override with `OBSCURA_PATH` env. |
+| `cdpUrl` | `http://127.0.0.1:9222` | Only used when `mode` is `cdp`. |
+
+Environment overrides: `OBSCURA_PATH`, `BROWSER_CDP_URL` (cdp mode only).
 
 Downloads are stored under `$HARNESS_STATE/downloads/<session-id>/` (non-executable, magic-byte verified).
 
 ### Integration tests
 
 ```bash
-# Requires a running CDP endpoint
-BROWSER_INTEGRATION=1 pnpm --filter @harness/core test
+# Requires Obscura installed (obscura on PATH or OBSCURA_PATH)
+BROWSER_INTEGRATION=1 pnpm --filter @harness/core test tests/browser
 ```
 
 ## Development

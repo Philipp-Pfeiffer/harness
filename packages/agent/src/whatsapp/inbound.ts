@@ -6,8 +6,8 @@
  * - Abort-and-Restart: If new message arrives < ABORT_RESTART_WINDOW_MS after
  *   turn start and no tool has executed, abort and restart with expanded context.
  *   Max MAX_RESTARTS_PER_TURN, then steer-only via mailbox.
- * - 8h-Inactivity Compaction: Trigger compaction before the turn when session
- *   has been inactive > SESSION_INACTIVITY_THRESHOLD_MS.
+ * - 8h-Inactivity: rotate to a fresh session and notify before the turn when
+ *   the user returns after SESSION_INACTIVITY_THRESHOLD_MS.
  * - Test Mode: Echo instead of agent turns, structured logging of all events.
  */
 
@@ -55,6 +55,8 @@ export interface InboundProcessorCallbacks {
   submitTurn: (sessionId: string, text: string, imageBlocks?: InboundImageBlock[]) => Promise<{ finalResponse: string; internalAbortSignal?: AbortSignal }>;
   /** Trigger session compaction before the turn. */
   compactSession: (sessionId: string) => Promise<void>;
+  /** End inactive session and start a fresh one after the 8h boundary. */
+  rotateSessionForInactivity: (source: string, sessionId: string) => Promise<string>;
   /** Resolve or create a session for a source identifier. */
   resolveSession: (source: string) => Promise<string>;
   /** Send an outbound message (rendered text) to a target JID. */
@@ -161,20 +163,18 @@ export class WhatsAppInboundProcessor {
       this.sourceStates.set(event.source, state);
     }
 
-    // Check 8h inactivity — trigger compaction before the turn
+    // Check 8h inactivity — rotate to a fresh session before the turn
     const inactiveMs = Date.now() - state.lastActivityMs;
     if (state.lastActivityMs > 0 && inactiveMs > SESSION_INACTIVITY_THRESHOLD_MS) {
       this.log(
-        `Session ${state.sessionId} inactive for ${Math.round(inactiveMs / 3_600_000)}h — triggering compaction`,
+        `Session ${state.sessionId} inactive for ${Math.round(inactiveMs / 3_600_000)}h — rotating session`,
         "info",
       );
       try {
-        await this.callbacks.compactSession(state.sessionId);
+        state.sessionId = await this.callbacks.rotateSessionForInactivity(event.source, state.sessionId);
       } catch (err) {
-        this.log(`Compaction failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
+        this.log(`Session rotation failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
-      // TODO: Hook point for memory distillation of the expired session.
-      // Pipeline-Anbindung ist nicht Teil dieses Runs — nur der Aufruf-Punkt.
     }
 
     // If a turn is running, check abort-and-restart conditions

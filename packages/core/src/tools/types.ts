@@ -45,6 +45,13 @@ export interface ToolCallContext {
    * `send_file` returns an error.
    */
   channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Optional status callback for long-running tools (e.g. browser sub-agent).
+   * When present, tools may emit progress updates that reach the TUI via IPC.
+   */
+  onStatus?: (status: string) => void;
+  /** ID of the current tool call in the main agent loop (for trace linking). */
+  toolCallId?: string;
 }
 
 export interface Tool<TParameters extends TSchema = TSchema> {

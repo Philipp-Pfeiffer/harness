@@ -351,6 +351,7 @@ const initTools = loadTools({
     defaultModel: configResult.defaultModel,
     models: configResult.models,
     downloadsBaseDir: join(paths.state, "downloads"),
+    browserRunsDir: paths.browserRuns,
   },
 });
 const initAgent = createAgent({ tools: initTools, model: initModel, inlineThinking: (initModel as any).inlineThinking ?? false });

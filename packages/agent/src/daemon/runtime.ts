@@ -31,6 +31,7 @@ import {
   type HarnessPaths,
   type ConfigModel,
   type BrowserConfig,
+  type WebConfig,
   type Agent,
   type MetricsRecorder,
   type DaemonEventType,
@@ -84,6 +85,9 @@ import { DEFAULT_DAEMON_CONFIG } from "./types.js";
 
 import { createWhatsAppPlugin } from "../whatsapp/plugin.js";
 import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
+import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
+import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
+import { PerKeyLock } from "../util/perKeyLock.js";
 import type { ChannelPlugin } from "./types.js";
 
 /**
@@ -138,6 +142,8 @@ interface SessionEntry {
   lastActiveAt: string;
   /** Agent profile this session runs under ("default" when unspecified). */
   profile: string;
+  /** Selected model ref (config id, alias, or provider/model) for default-profile sessions. */
+  modelRef?: string;
   /** Mailbox for steering messages that arrive while a turn is running. */
   mailbox: Mailbox;
   /** Turn queue: serializes turns per session. A second submit-turn on the
@@ -168,6 +174,7 @@ export class DaemonRuntime {
   private configDefaultModel: ConfigModel | undefined;
   private configModels: ConfigModel[] = [];
   private browserConfig: BrowserConfig | undefined;
+  private webConfig: WebConfig | undefined;
   private memoryService: MemoryService | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
   private ipcServer: Server | null = null;
@@ -317,63 +324,72 @@ export class DaemonRuntime {
     const log = this.logger.child("runtime");
     log.info("daemon shutting down", { signal });
 
-    // Stop heartbeat
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+    const forceExit = setTimeout(() => {
+      log.error("shutdown timed out — forcing exit");
+      process.exit(1);
+    }, 10_000);
 
-    // Stop cron scheduler (running jobs finish, pending jitter is dropped)
-    if (this.scheduler) {
-      this.scheduler.stop();
-      this.scheduler = null;
-      log.info("cron scheduler stopped");
-    }
-
-    // Stop gateways
-    for (const [name, gw] of this.gateways) {
-      try {
-        await gw.stop();
-        log.info("gateway stopped", { name });
-      } catch (err) {
-        log.error("gateway stop failed", {
-          name,
-          error: err instanceof Error ? err.message : String(err),
-        });
+    try {
+      // Stop heartbeat
+      if (this.heartbeatTimer) {
+        clearInterval(this.heartbeatTimer);
+        this.heartbeatTimer = null;
       }
-    }
 
-    // Stop IPC server
-    if (this.ipcServer) {
-      await stopIpcServer(this.ipcServer, this.paths.socketFile);
-      this.ipcServer = null;
-    }
-
-    // Suspend all active sessions — they are resumable, not ended.
-    for (const [id, entry] of this.sessions) {
-      try {
-        entry.session = await suspendSession(entry.session, this.paths);
-        log.info("session suspended", { id });
-      } catch (err) {
-        log.error("failed to suspend session", {
-          id,
-          error: err instanceof Error ? err.message : String(err),
-        });
+      // Stop cron scheduler (running jobs finish, pending jitter is dropped)
+      if (this.scheduler) {
+        this.scheduler.stop();
+        this.scheduler = null;
+        log.info("cron scheduler stopped");
       }
+
+      // Stop gateways
+      for (const [name, gw] of this.gateways) {
+        try {
+          await gw.stop();
+          log.info("gateway stopped", { name });
+        } catch (err) {
+          log.error("gateway stop failed", {
+            name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      // Stop IPC server
+      if (this.ipcServer) {
+        await stopIpcServer(this.ipcServer, this.paths.socketFile);
+        this.ipcServer = null;
+      }
+
+      // Suspend all active sessions — they are resumable, not ended.
+      for (const [id, entry] of this.sessions) {
+        try {
+          entry.session = await suspendSession(entry.session, this.paths);
+          log.info("session suspended", { id });
+        } catch (err) {
+          log.error("failed to suspend session", {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      this.sessions.clear();
+
+      // Shutdown memory service
+      if (this.memoryService) {
+        await this.memoryService.shutdown();
+      }
+
+      // Remove PID file
+      await removePidFile(this.paths.pidFile);
+
+      // Record stop metric
+      await this.recordDaemonMetric("daemon_stop");
+      log.info("daemon stopped");
+    } finally {
+      clearTimeout(forceExit);
     }
-    this.sessions.clear();
-
-    // Shutdown memory service
-    if (this.memoryService) {
-      await this.memoryService.shutdown();
-    }
-
-    // Remove PID file
-    await removePidFile(this.paths.pidFile);
-
-    // Record stop metric
-    await this.recordDaemonMetric("daemon_stop");
-    log.info("daemon stopped");
 
     process.exit(0);
   }
@@ -530,18 +546,32 @@ export class DaemonRuntime {
         }
         // Eagerly resolve the profile's agent context so configuration
         // errors (e.g. an unresolvable model) surface as a clean error here.
-        let profileCtx: ProfileAgentContext;
         try {
-          profileCtx = this.agentContextFor(profile);
+          this.agentContextFor(profile);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           this.errorBuffer.push(msg);
           return { type: "error", message: msg };
         }
-        const model = req.model ?? profileCtx.model?.name ?? "unknown";
+        const profileCtx = this.agentContextFor(profile);
+        const modelRef = req.model ?? profileCtx.model?.id ?? this.model?.id;
+        let sessionModelLabel: string;
+        let storedModelRef: string | undefined = modelRef;
+        if (modelRef || profileCtx.model || this.model) {
+          const resolvedModel = this.resolveModelRef(modelRef, profileCtx.model ?? this.model);
+          const configMatch = this.configModels.find((m) => m.model === resolvedModel.id);
+          sessionModelLabel = configMatch?.alias ?? resolvedModel.name;
+          storedModelRef = modelRef ?? resolvedModel.id;
+        } else {
+          sessionModelLabel = "unknown";
+        }
         try {
-          const session = await createSession(this.paths, { model, title, profile: profile.name });
-          const entry = this.createSessionEntry(session, origin, title, profile.name);
+          const session = await createSession(this.paths, {
+            model: sessionModelLabel,
+            title,
+            profile: profile.name,
+          });
+          const entry = this.createSessionEntry(session, origin, title, profile.name, storedModelRef);
           this.sessions.set(session.id, entry);
           const log = this.logger.child("session");
           log.info("session created", { id: session.id, origin, profile: profile.name });
@@ -707,6 +737,7 @@ export class DaemonRuntime {
                 "api",
                 loaded.session.title,
                 loaded.session.profile ?? "default",
+                this.inferModelRefFromSessionLabel(loaded.session.model),
               );
               entry.session = { ...entry.session, status: "active" };
               entry.messages = loaded.turns.length > 0
@@ -781,6 +812,12 @@ export class DaemonRuntime {
               sessionId,
             };
           }
+
+          if (req.model) {
+            entry.modelRef = req.model;
+          }
+          turnCtx = this.applyTurnModel(turnCtx, req.model ?? entry.modelRef);
+
           const agent = turnCtx.agent;
           const runQueuedTurn = async (): Promise<IpcResponse> => {
             const turnStartedAt = new Date().toISOString();
@@ -838,6 +875,9 @@ export class DaemonRuntime {
                     break;
                   case "tool_call_error":
                     streamEvent = { type: "tool_call_error", name: event.name, error: event.error };
+                    break;
+                  case "status":
+                    streamEvent = { type: "status", status: event.status };
                     break;
                   default:
                     // Other event types (turn_end, usage) — not streamed to client
@@ -986,6 +1026,7 @@ export class DaemonRuntime {
     this.configDefaultModel = result.defaultModel;
     this.configModels = result.models;
     this.browserConfig = result.browserConfig;
+    this.webConfig = result.webConfig;
 
     if (result.warning) {
       this.logger.child("config").warn(result.warning);
@@ -1120,6 +1161,7 @@ export class DaemonRuntime {
     // Load tools (with skills)
     this.allTools = loadTools({
       memoryBackend: this.memoryService?.getBackend(),
+      webConfig: this.webConfig,
       skills: this.skillRecords,
       skillsDir: this.paths.skills,
       browser: {
@@ -1127,6 +1169,7 @@ export class DaemonRuntime {
         defaultModel: this.configDefaultModel,
         models: this.configModels,
         downloadsBaseDir: join(this.paths.state, "downloads"),
+        browserRunsDir: this.paths.browserRuns,
       },
     });
     const defaultZones = defaultProfile?.frontmatter.memory ?? ALL_MEMORY_ZONES;
@@ -1227,6 +1270,9 @@ export class DaemonRuntime {
         compactSession: async (sessionId) => {
           await this.compactWhatsAppSession(sessionId);
         },
+        rotateSessionForInactivity: async (source, sessionId) => {
+          return this.rotateWhatsAppSession(source, sessionId);
+        },
         resolveSession: async (source) => {
           return this.resolveWhatsAppSession(source);
         },
@@ -1248,6 +1294,9 @@ export class DaemonRuntime {
 
   /** WhatsApp session map: phone number → session ID. */
   private readonly whatsappSessions = new Map<string, string>();
+
+  /** Prevents duplicate session creation when many messages arrive at once. */
+  private readonly whatsappSessionLock = new PerKeyLock();
 
   /**
    * Submits a turn from the WhatsApp plugin, image blocks included.
@@ -1366,15 +1415,20 @@ export class DaemonRuntime {
     }
   }
 
+  private async resolveWhatsAppSession(source: string): Promise<string> {
+    const phone = extractPhoneNumber(source);
+    return this.whatsappSessionLock.run(phone, () => this.resolveWhatsAppSessionInner(phone));
+  }
+
   /**
    * Resolves or creates a persistent WhatsApp session for a phone number.
    * On daemon restart: searches the session index for an existing WhatsApp
    * session matching this source. Resumes if found and <8h inactive,
-   * otherwise creates a new session (with notification in chat).
+   * otherwise creates a new session (notify only after >8h inactivity).
    */
-  private async resolveWhatsAppSession(source: string): Promise<string> {
+  private async resolveWhatsAppSessionInner(phone: string): Promise<string> {
     // 1. Check in-memory map first
-    const existing = this.whatsappSessions.get(source);
+    const existing = this.whatsappSessions.get(phone);
     if (existing) {
       // Resume from disk if not in memory
       if (!this.sessions.has(existing)) {
@@ -1383,30 +1437,23 @@ export class DaemonRuntime {
           const entry = this.createSessionEntry(
             loaded.session,
             "whatsapp" as SessionOrigin,
-            `WhatsApp: ${source}`,
+            `WhatsApp: ${phone}`,
             loaded.session.profile ?? "default",
           );
           entry.session = { ...entry.session, status: "active" };
           entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
           this.sessions.set(existing, entry);
         } else {
-          // Session was ended or not found — create a new one
-          const session = await createSession(this.paths, {
-            model: this.model?.name ?? "unknown",
-            title: `WhatsApp: ${source}`,
-          });
-          const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, `WhatsApp: ${source}`);
-          this.sessions.set(session.id, entry);
-          this.whatsappSessions.set(source, session.id);
-          this.whatsappSessionToSource.set(session.id, source);
-          return session.id;
+          // Session was ended or not found — create a new one (no reset notice)
+          return this.createWhatsAppSession(phone, false);
         }
       }
       return existing;
     }
 
     // 2. Map is empty → search session index for existing WhatsApp session
-    const expectedTitle = `WhatsApp: ${source}`;
+    const expectedTitle = `WhatsApp: ${phone}`;
+    let notifySessionReset = false;
     try {
       const index = await listSessions(this.paths);
       // Find most recent WhatsApp session for this source that's not ended
@@ -1432,38 +1479,71 @@ export class DaemonRuntime {
             entry.session = { ...entry.session, status: "active" };
             entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
             this.sessions.set(match.sessionId, entry);
-            this.whatsappSessions.set(source, match.sessionId);
-            this.whatsappSessionToSource.set(match.sessionId, source);
+            this.whatsappSessions.set(phone, match.sessionId);
+            this.whatsappSessionToSource.set(match.sessionId, phone);
             return match.sessionId;
           }
+        } else {
+          // Session is too old (>8h) — create new one, notify in chat
+          notifySessionReset = true;
         }
-        // Session is too old (>8h) — create new one, notify in chat
       }
     } catch {
       // Index read failed — fall through to new session creation
     }
 
     // 3. Create new session
+    return this.createWhatsAppSession(phone, notifySessionReset);
+  }
+
+  /**
+   * Rotates a WhatsApp session after 8h inactivity while the daemon is running.
+   * Compacts and ends the old session, creates a fresh one, and notifies the user.
+   */
+  private async rotateWhatsAppSession(source: string, oldSessionId: string): Promise<string> {
+    const phone = extractPhoneNumber(source);
+    await this.compactWhatsAppSession(oldSessionId);
+
+    const oldEntry = this.sessions.get(oldSessionId);
+    if (oldEntry) {
+      await endSession(oldEntry.session, this.paths);
+      this.sessions.delete(oldSessionId);
+    }
+    this.whatsappSessionToSource.delete(oldSessionId);
+    this.whatsappSessions.delete(phone);
+
+    return this.whatsappSessionLock.run(phone, () => this.createWhatsAppSession(phone, true));
+  }
+
+  private async createWhatsAppSession(phone: string, notifySessionReset: boolean): Promise<string> {
+    const expectedTitle = `WhatsApp: ${phone}`;
     const session = await createSession(this.paths, {
       model: this.model?.name ?? "unknown",
       title: expectedTitle,
     });
     const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, expectedTitle);
     this.sessions.set(session.id, entry);
-    this.whatsappSessions.set(source, session.id);
-    this.whatsappSessionToSource.set(session.id, source);
+    this.whatsappSessions.set(phone, session.id);
+    this.whatsappSessionToSource.set(session.id, phone);
 
-    // Notify in chat that a new session was started
-    const plugin = this.channelPlugins.get("whatsapp");
-    if (plugin) {
-      try {
-        await plugin.sendMessage(source, { text: "[Neue Session gestartet — vorheriger Kontext wurde zurückgesetzt.]" });
-      } catch {
-        // Non-critical
-      }
+    if (shouldNotifyWhatsAppSessionReset(notifySessionReset)) {
+      await this.sendWhatsAppSessionResetNotice(phone);
     }
 
     return session.id;
+  }
+
+  private async sendWhatsAppSessionResetNotice(phone: string): Promise<void> {
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (!plugin) return;
+
+    try {
+      await plugin.sendMessage(formatJid(phone), {
+        text: "[Neue Session gestartet — vorheriger Kontext wurde zurückgesetzt.]",
+      });
+    } catch {
+      // Non-critical
+    }
   }
 
   /**
@@ -1699,6 +1779,7 @@ export class DaemonRuntime {
     origin: SessionOrigin,
     title: string,
     profile: string = "default",
+    modelRef?: string,
   ): SessionEntry {
     const now = new Date().toISOString();
     return {
@@ -1711,9 +1792,68 @@ export class DaemonRuntime {
       createdAt: session.createdAt ?? now,
       lastActiveAt: session.lastActivityAt ?? now,
       profile,
+      modelRef,
       mailbox: createMailbox(),
       turnQueue: Promise.resolve(),
     };
+  }
+
+  private resolveModelRef(ref: string | undefined, fallback?: Model<Api> | null): Model<Api> {
+    if (!ref) {
+      if (fallback) return fallback;
+      if (!this.model) throw new Error("Daemon not fully initialized (model missing)");
+      return this.model;
+    }
+
+    const fromConfig = this.configModels.find(
+      (m) =>
+        m.alias === ref ||
+        m.model === ref ||
+        `${m.provider}/${m.model}` === ref,
+    );
+    if (fromConfig) {
+      return resolveModelFromConfig(fromConfig);
+    }
+
+    if (fallback && (ref === fallback.id || ref === fallback.name)) {
+      return fallback;
+    }
+
+    const slash = ref.indexOf("/");
+    if (slash > 0) {
+      try {
+        return resolveModel(ref.slice(0, slash), ref.slice(slash + 1));
+      } catch {
+        // fall through to default
+      }
+    }
+
+    if (!this.model) throw new Error("Daemon not fully initialized (model missing)");
+    return this.model;
+  }
+
+  /** Maps a persisted session.model label back to a config preset ref. */
+  private inferModelRefFromSessionLabel(label: string | undefined): string | undefined {
+    if (!label) return undefined;
+    const match = this.configModels.find(
+      (m) => m.alias === label || m.model === label || `${m.provider}/${m.model}` === label,
+    );
+    return match?.model ?? label;
+  }
+
+  private applyTurnModel(
+    turnCtx: ProfileAgentContext,
+    modelRef: string | undefined,
+  ): ProfileAgentContext {
+    if (!modelRef && !turnCtx.model && !this.model) {
+      return turnCtx;
+    }
+    const turnModel = this.resolveModelRef(modelRef, turnCtx.model ?? this.model);
+    if (turnCtx.agent === this.agent && typeof turnCtx.agent.setModel === "function") {
+      turnCtx.agent.setModel(turnModel);
+      return { ...turnCtx, model: turnModel };
+    }
+    return turnCtx;
   }
 
   /**
@@ -1883,7 +2023,13 @@ export class DaemonRuntime {
           sessionId,
         };
       }
-      const entry = this.createSessionEntry(loaded.session, "api", loaded.session.title, loaded.session.profile ?? "default");
+      const entry = this.createSessionEntry(
+        loaded.session,
+        "api",
+        loaded.session.title,
+        loaded.session.profile ?? "default",
+        this.inferModelRefFromSessionLabel(loaded.session.model),
+      );
       entry.session = { ...entry.session, status: "active" };
       entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
       this.sessions.set(targetId, entry);

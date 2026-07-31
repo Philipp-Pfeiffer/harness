@@ -65,9 +65,6 @@ describe("createSecureDispatcher", () => {
   });
 
   it("creates a dispatcher that rejects localhost at connect time", async () => {
-    // Set the secure dispatcher as global, attempt to fetch a hostname
-    // that resolves to 127.0.0.1 — the lookup function inside the
-    // dispatcher must block it.
     const dispatcher = createSecureDispatcher();
     setGlobalDispatcher(dispatcher);
     try {
@@ -80,5 +77,16 @@ describe("createSecureDispatcher", () => {
       const { Agent } = await import("undici");
       setGlobalDispatcher(new Agent());
     }
+  });
+
+  it("fetches a public URL through the secure dispatcher", async () => {
+    const dispatcher = createSecureDispatcher();
+    const response = await fetch("https://example.com/", {
+      dispatcher,
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    } as RequestInit);
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
   });
 });

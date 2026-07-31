@@ -1,5 +1,5 @@
 import { resolveHarnessPaths, type HarnessPaths } from "@harness/core";
-import { sendIpcRequest, sendIpcStreaming } from "../daemon/ipc.js";
+import { sendIpcRequest, sendIpcStreaming, SUBMIT_TURN_IPC_TIMEOUT_MS } from "../daemon/ipc.js";
 import type {
   IpcResponse,
   SessionSummary,
@@ -12,6 +12,7 @@ import type {
   CreateSessionOpts,
   SessionData,
   TurnResult,
+  RunTurnOpts,
 } from "./types.js";
 
 /**
@@ -24,7 +25,7 @@ import type {
  */
 export class DaemonClientBackend implements AgentBackend {
   readonly name = "daemon";
-  readonly supportsModelSwitching = false;
+  readonly supportsModelSwitching = true;
 
   private readonly socketPath: string;
   private readonly paths: HarnessPaths;
@@ -118,10 +119,9 @@ export class DaemonClientBackend implements AgentBackend {
     sessionId: string,
     onEvent: (event: BackendEvent) => void,
     signal?: AbortSignal,
+    opts?: RunTurnOpts,
   ): Promise<TurnResult> {
-    // The abort signal is forwarded to sendIpcStreaming, which destroys
-    // the socket + timer on abort. doRunTurn will reject with "Aborted".
-    return this.doRunTurn(text, sessionId, onEvent, signal);
+    return this.doRunTurn(text, sessionId, onEvent, signal, opts);
   }
 
   private async doRunTurn(
@@ -129,10 +129,11 @@ export class DaemonClientBackend implements AgentBackend {
     sessionId: string,
     onEvent: (event: BackendEvent) => void,
     signal?: AbortSignal,
+    opts?: RunTurnOpts,
   ): Promise<TurnResult> {
     const resp = await sendIpcStreaming(
       this.socketPath,
-      { type: "submit-turn", text, sessionId },
+      { type: "submit-turn", text, sessionId, model: opts?.model },
       (ipcResp: IpcResponse) => {
         if (ipcResp.type !== "turn-event") return;
         const ev = ipcResp.event as TurnStreamEvent;
@@ -141,7 +142,7 @@ export class DaemonClientBackend implements AgentBackend {
           onEvent(backendEvent);
         }
       },
-      120_000,
+      SUBMIT_TURN_IPC_TIMEOUT_MS,
       signal,
     );
 

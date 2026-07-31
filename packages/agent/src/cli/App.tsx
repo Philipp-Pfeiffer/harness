@@ -990,7 +990,7 @@ export default function App({
       }
       try {
         const { sessionId } = await backend.createSession({
-          model: activeModel.name,
+          model: activeModel.id,
           title: "CLI Session",
         });
         sessionIdRef.current = sessionId;
@@ -1208,7 +1208,7 @@ export default function App({
           if (sessionIdRef.current) {
             await backend.endSession(sessionIdRef.current);
           }
-          const { sessionId } = await backend.createSession({ model: activeModel.name, title: "CLI Session" });
+          const { sessionId } = await backend.createSession({ model: activeModel.id, title: "CLI Session" });
           sessionIdRef.current = sessionId;
           historyRef.current = [];
           setPastTurns([]);
@@ -1424,7 +1424,7 @@ export default function App({
       // Ensure an active session exists (e.g. after /end or idle timeout).
       if (!sessionIdRef.current) {
         try {
-          const { sessionId } = await backend.createSession({ model: activeModel.name, title: "CLI Session" });
+          const { sessionId } = await backend.createSession({ model: activeModel.id, title: "CLI Session" });
           sessionIdRef.current = sessionId;
         } catch (err) {
           console.error("[harness] failed to create session:", err instanceof Error ? err.message : String(err));
@@ -1539,6 +1539,7 @@ export default function App({
             }
           },
           controller.signal,
+          { model: activeModel.id },
         )
         .then((result: TurnResult) => {
           // Daemon-side slash commands (e.g. /new) may return a new session ID

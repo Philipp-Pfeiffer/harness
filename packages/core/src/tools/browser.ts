@@ -65,6 +65,8 @@ export interface CreateBrowserToolOptions {
   models?: ConfigModel[];
   /** Base directory for session downloads (e.g. $HARNESS_STATE/downloads). */
   downloadsBaseDir: string;
+  /** Base directory for browser run traces (e.g. $HARNESS_STATE/browser-runs). */
+  browserRunsDir: string;
   logger?: (msg: string, level?: "warn" | "debug") => void;
 }
 
@@ -85,7 +87,10 @@ export function createBrowserTool(opts: CreateBrowserToolOptions): Tool<typeof B
             defaultModel: opts.defaultModel,
             models: opts.models,
             downloadsBaseDir: opts.downloadsBaseDir,
+            browserRunsDir: opts.browserRunsDir,
+            toolCallId: context?.toolCallId,
             logger: context?.logger ?? opts.logger,
+            onStatus: context?.onStatus,
           },
         );
         return result.isError ? err(result.content) : ok(result.content);

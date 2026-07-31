@@ -50,6 +50,11 @@ export interface CreateSessionOpts {
   title?: string;
 }
 
+export interface RunTurnOpts {
+  /** Config model id, alias, or provider/model — used by daemon-backed TUI. */
+  model?: string;
+}
+
 /**
  * Abstracts the agent execution layer. The TUI renders against this
  * interface, not against the agent loop directly.
@@ -94,5 +99,6 @@ export interface AgentBackend {
     sessionId: string,
     onEvent: (event: BackendEvent) => void,
     signal?: AbortSignal,
+    opts?: RunTurnOpts,
   ): Promise<TurnResult>;
 }

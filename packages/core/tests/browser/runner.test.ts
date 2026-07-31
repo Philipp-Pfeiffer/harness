@@ -152,8 +152,16 @@ describe("runBrowserSubAgent connection failure", () => {
       },
       {
         downloadsBaseDir: downloadsDir,
+        browserRunsDir: path.join(downloadsDir, "browser-runs"),
         engineFactory: () => failingEngine,
-        browserConfig: { maxTurns: 1, model: "openrouter/deepseek/deepseek-v4-flash" },
+        browserConfig: { maxTurns: 1, model: "@preset/deepseek-flash" },
+        models: [{
+          provider: "openrouter",
+          model: "@preset/deepseek-flash",
+          alias: "DeepSeek Flash",
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: "sk-test",
+        }],
       },
     );
 

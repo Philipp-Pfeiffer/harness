@@ -28,7 +28,7 @@ set -euo pipefail
 STATE_DIR="${HARNESS_STATE:-$HOME/.harness}"
 PID_FILE="$STATE_DIR/daemon.pid"
 LOCK_FILE="$STATE_DIR/restart.lock"
-DAEMON_PATTERN="node packages/agent/dist/index.js daemon run"
+DAEMON_PATTERN="packages/agent/dist/index.js [d]aemon run"
 
 # Prevent two restarts from racing each other.
 exec 200>"$LOCK_FILE"

@@ -31,6 +31,7 @@ export interface LoadToolsOptions {
     defaultModel?: ConfigModel;
     models?: ConfigModel[];
     downloadsBaseDir: string;
+    browserRunsDir: string;
   };
 }
 
@@ -75,6 +76,7 @@ export function loadTools(
       defaultModel: opts.browser.defaultModel,
       models: opts.browser.models,
       downloadsBaseDir: opts.browser.downloadsBaseDir,
+      browserRunsDir: opts.browser.browserRunsDir,
     }));
   }
 

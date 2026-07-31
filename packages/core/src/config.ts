@@ -56,8 +56,17 @@ export type WebConfig = {
   };
 };
 
+export type BrowserLaunchMode = "obscura" | "cdp";
+
 export type BrowserConfig = {
+  /** obscura: spawn managed Obscura per session (default). cdp: attach to external CDP only. */
+  mode?: BrowserLaunchMode;
+  /** Used only when mode is "cdp". */
   cdpUrl?: string;
+  /** Obscura binary path. Default: OBSCURA_PATH env or "obscura" on PATH. */
+  obscuraPath?: string;
+  /** Max wait for Obscura CDP to become ready after spawn. */
+  obscuraStartupTimeoutMs?: number;
   model?: string;
   maxTurns?: number;
   maxTokens?: number;

@@ -1,5 +1,9 @@
 import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Manages the daemon PID file.
@@ -122,4 +126,64 @@ export async function stopDaemon(
   } catch {
     return false;
   }
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * pgrep -f pattern for `node <entryPath> daemon run`.
+ * Uses the `[d]aemon` bracket trick so pgrep does not match its own argv.
+ */
+export function daemonRunPgrepPattern(entryPath: string): string {
+  return `${escapeRegex(entryPath)} [d]aemon run`;
+}
+
+/** Returns PIDs of harness `daemon run` processes for the given entry path. */
+export async function findDaemonRunPids(entryPath: string): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync("pgrep", ["-f", daemonRunPgrepPattern(entryPath)]);
+    return stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => Number(line))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+  } catch (err) {
+    if (isPgrepNoMatch(err)) return [];
+    throw err;
+  }
+}
+
+function isPgrepNoMatch(err: unknown): boolean {
+  const e = err as { code?: number | string; status?: number };
+  return e.code === 1 || e.code === "1" || e.status === 1;
+}
+
+/** Signals all matching `daemon run` processes. */
+export async function killDaemonRunProcesses(
+  entryPath: string,
+  signal: NodeJS.Signals,
+): Promise<void> {
+  for (const pid of await findDaemonRunPids(entryPath)) {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // Process may have exited between pgrep and kill.
+    }
+  }
+}
+
+/** Polls until no `daemon run` process remains, or the timeout elapses. */
+export async function waitUntilNoDaemonRunProcess(
+  entryPath: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if ((await findDaemonRunPids(entryPath)).length === 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return (await findDaemonRunPids(entryPath)).length === 0;
 }

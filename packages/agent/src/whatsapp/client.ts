@@ -25,6 +25,8 @@ import {
   RECONNECT_BACKOFF_BASE_MS,
   RECONNECT_BACKOFF_MAX_MS,
 } from "./limits.js";
+import { isRealtimeInboundUpsert } from "./sessionPolicy.js";
+import type { MessageUpsertType } from "baileys";
 
 /** Re-export WAMessage as the message type (Baileys' WebMessageInfo equivalent). */
 export type { WAMessage, DisconnectReason };
@@ -150,7 +152,10 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
       }
     });
 
-    sock.ev.on("messages.upsert", ({ messages }) => {
+    sock.ev.on("messages.upsert", ({ messages, type }: { messages: WAMessage[]; type: MessageUpsertType }) => {
+      if (!isRealtimeInboundUpsert(type)) {
+        return;
+      }
       for (const msg of messages) {
         // Only emit inbound messages (not fromMe)
         if (msg.key.fromMe) continue;
@@ -319,12 +324,6 @@ export function createMockWhatsAppClient(): WhatsAppClient {
   };
 }
 
-/**
- * Maps a MIME type to the Baileys message type key.
- * asSticker=true overrides to 'sticker' for WebP images.
- *
- * @returns The Baileys message content key ('image', 'audio', 'video', 'document', 'sticker').
- */
 export function baileysMessageType(mimeType: string, asSticker: boolean): string {
   if (asSticker) return "sticker";
   if (mimeType.startsWith("image/")) return "image";

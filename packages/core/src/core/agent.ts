@@ -166,6 +166,7 @@ export type AgentEvent =
   | { type: "tool_call_start"; name: string; args: unknown }
   | { type: "tool_call_done"; name: string; result: string }
   | { type: "tool_call_error"; name: string; error: string }
+  | { type: "status"; status: string }
   | { type: "turn_end"; turn: number }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number; cacheRead: number; cacheWrite: number; callCacheRead: number; callCacheWrite: number };
 
@@ -346,6 +347,7 @@ export function createAgent(config: AgentConfig): Agent {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
         logger: logger,
         channelFileSender,
+        onStatus: (status) => onEvent?.({ type: "status", status }),
       };
 
       if (memoryBackend) {
@@ -704,7 +706,9 @@ export function createAgent(config: AgentConfig): Agent {
                     // Tool calls are atomic: once started they run to completion
                     // even if the signal is aborted mid-flight.
                     toolCallCount++;
-                    const toolResult = await Promise.resolve(tool.execute(toolCall.arguments, toolContext));
+                    const toolResult = await Promise.resolve(
+                      tool.execute(toolCall.arguments, { ...toolContext, toolCallId: toolCall.id }),
+                    );
                     result = toolResult.content;
                     if (toolResult.isError) isError = true;
                     const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;

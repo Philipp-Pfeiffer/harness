@@ -37,6 +37,21 @@ describe("resolveModelFromConfig", () => {
     expect(getApiKey(model)).toBeUndefined();
   });
 
+  it("builds a custom OpenAI-compatible model for OpenRouter @preset refs", () => {
+    const model = resolveModelFromConfig({
+      provider: "openrouter",
+      model: "@preset/deepseek-flash",
+      alias: "DeepSeek Flash",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-test",
+    });
+
+    expect(model.id).toBe("@preset/deepseek-flash");
+    expect(model.provider).toBe("openrouter");
+    expect(model.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(getApiKey(model)).toBe("sk-test");
+  });
+
   it("builds a custom OpenAI-compatible model for unknown providers with baseUrl", () => {
     const model = resolveModelFromConfig({
       provider: "neuralwatt",

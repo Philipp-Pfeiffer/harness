@@ -35,6 +35,8 @@ export interface HarnessPaths {
   jobs: string;
   /** $state/inbound-media/ — Heruntergeladene Media-Dateien von Gateways */
   inboundMedia: string;
+  /** $state/browser-runs/ — JSONL traces for browser sub-agent runs */
+  browserRuns: string;
   /** $state/whatsapp/ — Baileys Session-Persistence und Auth-State */
   whatsapp: string;
   /** $state/daemon.pid */
@@ -81,6 +83,7 @@ export function resolveHarnessPaths(opts?: { home?: string; state?: string }): H
     logs: path.join(state, "logs"),
     jobs: path.join(state, "jobs"),
     inboundMedia: path.join(state, "inbound-media"),
+    browserRuns: path.join(state, "browser-runs"),
     whatsapp: path.join(state, "whatsapp"),
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
@@ -102,5 +105,6 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.logs, { recursive: true });
   await mkdir(paths.jobs, { recursive: true });
   await mkdir(paths.inboundMedia, { recursive: true });
+  await mkdir(paths.browserRuns, { recursive: true });
   await mkdir(paths.whatsapp, { recursive: true });
 }

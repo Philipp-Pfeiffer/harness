@@ -35,7 +35,7 @@ Session Slash Commands (in TUI):
   /session       List or resume sessions (picker or /session <id>).
   /end           End the current session explicitly.
   /clear         Clear the TUI display.
-  /model         Switch model (in-process mode only).
+  /model         Switch model (config presets from config.json).
   /status        Show harness status overview.
   /compact       Manually compact context.
   /showthink     Toggle thinking block visibility.

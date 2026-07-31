@@ -43,6 +43,7 @@ function createMockCallbacks() {
         });
       }),
       compactSession: vi.fn(async () => {}),
+      rotateSessionForInactivity: vi.fn(async (source: string, _oldSessionId: string) => `session-rotated-${source}`),
       resolveSession: vi.fn(async (source: string) => `session-${source}`),
       sendOutbound: vi.fn(async (_target: string, _text: string) => {}),
       steer: vi.fn(),
@@ -239,8 +240,8 @@ describe("WhatsApp Inbound Processor", () => {
 
   // ─── 8h Inactivity ───
 
-  describe("8h Inactivity Compaction", () => {
-    it("triggers compaction when session inactive >8h", async () => {
+  describe("8h Inactivity Session Rotation", () => {
+    it("rotates session when inactive >8h while daemon is running", async () => {
       const processor = new WhatsAppInboundProcessor({
         log: () => {},
         testMode: false,
@@ -251,7 +252,11 @@ describe("WhatsApp Inbound Processor", () => {
       await processor.processInbound(createEvent("491701234567", "Hello"));
       await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
       await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledWith(
+        "session-491701234567",
+        "Hello",
+        [],
+      );
 
       // Complete the turn
       mock.completeTurn("Response");
@@ -263,16 +268,22 @@ describe("WhatsApp Inbound Processor", () => {
       // New message after 8h inactivity
       await processor.processInbound(createEvent("491701234567", "New message after long break"));
 
-      // Compaction should have been called
-      expect(mock.callbacks.compactSession).toHaveBeenCalledWith("session-491701234567");
+      expect(mock.callbacks.rotateSessionForInactivity).toHaveBeenCalledWith(
+        "491701234567",
+        "session-491701234567",
+      );
 
-      // Then the debounce → turn should fire
+      // Then the debounce → turn should fire on the rotated session
       await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
       await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
+      expect(mock.callbacks.submitTurn).toHaveBeenLastCalledWith(
+        "session-rotated-491701234567",
+        "New message after long break",
+        [],
+      );
     });
 
-    it("does not trigger compaction within 8h", async () => {
+    it("does not rotate session within 8h", async () => {
       const processor = new WhatsAppInboundProcessor({
         log: () => {},
         testMode: false,
@@ -294,7 +305,7 @@ describe("WhatsApp Inbound Processor", () => {
 
       await processor.processInbound(createEvent("491701234567", "Short break message"));
 
-      expect(mock.callbacks.compactSession).not.toHaveBeenCalled();
+      expect(mock.callbacks.rotateSessionForInactivity).not.toHaveBeenCalled();
     });
   });
 

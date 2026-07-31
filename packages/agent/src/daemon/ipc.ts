@@ -108,6 +108,9 @@ async function handleRequest(
  *
  * @throws Error if the socket cannot be connected or the response is an error.
  */
+/** Default idle timeout for submit-turn IPC (browser sub-agent can run several minutes). */
+export const SUBMIT_TURN_IPC_TIMEOUT_MS = 600_000;
+
 export async function sendIpcRequest(
   socketPath: string,
   req: IpcRequest,
@@ -128,20 +131,26 @@ export async function sendIpcStreaming(
   socketPath: string,
   req: IpcRequest,
   onEvent?: (resp: IpcResponse) => void,
-  timeoutMs = 120_000,
+  timeoutMs = SUBMIT_TURN_IPC_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<IpcResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let buffer = "";
     let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
 
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      reject(new Error(`IPC request timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        reject(new Error(`IPC request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    };
+
+    armTimeout();
 
     // If an abort signal is provided, wire it to destroy the socket
     // and reject immediately. This prevents socket + timer leaks when
@@ -205,7 +214,8 @@ export async function sendIpcStreaming(
           return;
         }
 
-        // Intermediate event — forward to callback.
+        // Intermediate event — forward to callback and reset idle timeout.
+        armTimeout();
         onEvent?.(resp);
       }
     });

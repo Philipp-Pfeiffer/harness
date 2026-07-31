@@ -53,6 +53,7 @@ export interface WhatsAppPluginOptions {
   callbacks: {
     submitTurn: (sessionId: string, text: string, imageBlocks?: import("../daemon/types.js").InboundImageBlock[]) => Promise<{ finalResponse: string }>;
     compactSession: (sessionId: string) => Promise<void>;
+    rotateSessionForInactivity: (source: string, sessionId: string) => Promise<string>;
     resolveSession: (source: string) => Promise<string>;
     steer: (sessionId: string, text: string) => void;
     checkToolExecuted: (sessionId: string) => boolean;
@@ -81,6 +82,7 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         callbacks: {
           submitTurn: opts.callbacks.submitTurn,
           compactSession: opts.callbacks.compactSession,
+          rotateSessionForInactivity: opts.callbacks.rotateSessionForInactivity,
           resolveSession: opts.callbacks.resolveSession,
           sendOutbound: async (target, markdown) => {
             if (!client) return;

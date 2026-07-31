@@ -1,4 +1,8 @@
 import type { Page, Browser, BrowserContext } from "playwright-core";
+import type { BrowserLaunchMode } from "../config.js";
+import { BrowserConnectionError, BrowserSessionError } from "./errors.js";
+import type { ObscuraSession } from "./obscura.js";
+import { parseCdpPort, startObscura } from "./obscura.js";
 import type { BrowserReport, BrowserSessionOptions, SnapshotResult } from "./types.js";
 import { validateBrowserUrl } from "./urlSecurity.js";
 import {
@@ -8,18 +12,7 @@ import {
   type SnapshotCollectorResult,
 } from "./snapshot.js";
 
-export class BrowserSessionError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "BrowserSessionError";
-  }
-}
-export class BrowserConnectionError extends BrowserSessionError {
-  constructor(message: string) {
-    super(message);
-    this.name = "BrowserConnectionError";
-  }
-}
+export { BrowserConnectionError, BrowserSessionError } from "./errors.js";
 
 export interface BrowserEngine {
   connect(): Promise<void>;
@@ -39,9 +32,22 @@ export interface BrowserEngine {
   getVisitedUrls(): string[];
 }
 
+export interface BrowserLaunchOptions {
+  mode: BrowserLaunchMode;
+  cdpUrl: string;
+  obscuraPath: string;
+  obscuraStartupTimeoutMs: number;
+}
+
+export interface BrowserEngineDeps {
+  startObscura?: typeof startObscura;
+}
+
+const CDP_CONNECT_TIMEOUT_MS = 10_000;
+
 /**
- * Playwright CDP-backed browser engine.
- * Lazy-connects on first use, auto-reconnects on disconnect.
+ * Playwright CDP-backed browser engine using Obscura.
+ * In obscura mode, spawns a managed Obscura process per session and tears it down on disconnect.
  */
 export class PlaywrightBrowserEngine implements BrowserEngine {
   private browser: Browser | null = null;
@@ -51,10 +57,12 @@ export class PlaywrightBrowserEngine implements BrowserEngine {
   private refs = new Map<number, { selector: string }>();
   private visited = new Set<string>();
   private connecting: Promise<void> | null = null;
+  private obscuraSession: ObscuraSession | null = null;
 
   constructor(
-    private readonly cdpUrl: string,
+    private readonly launchOptions: BrowserLaunchOptions,
     private readonly options: BrowserSessionOptions,
+    private readonly deps: BrowserEngineDeps = {},
   ) {}
 
   isConnected(): boolean {
@@ -78,14 +86,38 @@ export class PlaywrightBrowserEngine implements BrowserEngine {
 
   private async doConnect(): Promise<void> {
     const { chromium } = await import("playwright-core");
+    const cdpUrl = await this.resolveCdpUrl();
+
     try {
-      this.browser = await chromium.connectOverCDP(this.cdpUrl, { timeout: 10_000 });
+      this.browser = await chromium.connectOverCDP(cdpUrl, {
+        timeout: CDP_CONNECT_TIMEOUT_MS,
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw new BrowserConnectionError(
-        `Cannot connect to CDP endpoint ${this.cdpUrl}: ${detail}. ` +
-        `Start a browser with CDP enabled, e.g. \`obscura serve --port 9222\` or \`google-chrome --remote-debugging-port=9222\`.`,
+        `Cannot connect to Obscura CDP at ${cdpUrl}: ${detail}`,
       );
+    }
+
+    await this.initFromBrowser();
+  }
+
+  private async resolveCdpUrl(): Promise<string> {
+    if (this.launchOptions.mode === "cdp") {
+      return this.launchOptions.cdpUrl;
+    }
+
+    const start = this.deps.startObscura ?? startObscura;
+    this.obscuraSession = await start({
+      executable: this.launchOptions.obscuraPath,
+      startupTimeoutMs: this.launchOptions.obscuraStartupTimeoutMs,
+    });
+    return this.obscuraSession.cdpUrl;
+  }
+
+  private async initFromBrowser(): Promise<void> {
+    if (!this.browser) {
+      throw new BrowserConnectionError("Browser connection missing after connect");
     }
 
     const contexts = this.browser.contexts();
@@ -115,6 +147,16 @@ export class PlaywrightBrowserEngine implements BrowserEngine {
         // Best-effort teardown
       }
     }
+
+    if (this.obscuraSession) {
+      try {
+        await this.obscuraSession.stop();
+      } catch {
+        // Best-effort teardown
+      }
+      this.obscuraSession = null;
+    }
+
     this.browser = null;
     this.context = null;
     this.pages = [];
@@ -305,3 +347,5 @@ export function synthesizeFailureReport(
     notes: notes.length > 0 ? notes.join("\n") : undefined,
   };
 }
+
+export { parseCdpPort };
