@@ -1,6 +1,6 @@
 import type { Tool } from "./types.js";
 import type { MemoryBackend } from "../core/memoryBackend.js";
-import type { WebConfig } from "../config.js";
+import type { WebConfig, BrowserConfig, ConfigModel } from "../config.js";
 import type { SkillRecord } from "../skills/types.js";
 import type { FindSkillToolOptions } from "./findSkill.js";
 import { readFileTool } from "./readFile.js";
@@ -14,6 +14,7 @@ import { createWebFetchTool } from "./web_fetch.js";
 import { createLoadSkillTool } from "./loadSkill.js";
 import { createFindSkillTool } from "./findSkill.js";
 import { sendFileTool } from "./send_file.js";
+import { createBrowserTool } from "./browser.js";
 
 export interface LoadToolsOptions {
   memoryBackend?: MemoryBackend;
@@ -24,6 +25,13 @@ export interface LoadToolsOptions {
   skillsDir?: string;
   /** Optional QMD store for find_skill search. */
   findSkillStore?: FindSkillToolOptions["store"];
+  /** Browser subsystem options. When downloadsBaseDir is set, registers the `browser` tool. */
+  browser?: {
+    config?: BrowserConfig;
+    defaultModel?: ConfigModel;
+    models?: ConfigModel[];
+    downloadsBaseDir: string;
+  };
 }
 
 export function loadTools(opts?: LoadToolsOptions): Tool[];
@@ -59,6 +67,15 @@ export function loadTools(
       createLoadSkillTool(opts.skills, opts.skillsDir ?? ""),
       createFindSkillTool(opts.skills, { store: opts.findSkillStore }),
     );
+  }
+
+  if (opts.browser?.downloadsBaseDir) {
+    tools.push(createBrowserTool({
+      browserConfig: opts.browser.config,
+      defaultModel: opts.browser.defaultModel,
+      models: opts.browser.models,
+      downloadsBaseDir: opts.browser.downloadsBaseDir,
+    }));
   }
 
   return tools;

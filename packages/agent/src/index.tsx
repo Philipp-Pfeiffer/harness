@@ -346,6 +346,12 @@ const initTools = loadTools({
   webConfig: configResult.webConfig,
   skills: skillResult.skills,
   skillsDir: paths.skills,
+  browser: {
+    config: configResult.browserConfig,
+    defaultModel: configResult.defaultModel,
+    models: configResult.models,
+    downloadsBaseDir: join(paths.state, "downloads"),
+  },
 });
 const initAgent = createAgent({ tools: initTools, model: initModel, inlineThinking: (initModel as any).inlineThinking ?? false });
 

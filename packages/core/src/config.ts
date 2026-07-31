@@ -56,10 +56,24 @@ export type WebConfig = {
   };
 };
 
+export type BrowserConfig = {
+  cdpUrl?: string;
+  model?: string;
+  maxTurns?: number;
+  maxTokens?: number;
+  maxTotalTokens?: number;
+  snapshotTokenCap?: number;
+  navigationTimeoutMs?: number;
+  actionTimeoutMs?: number;
+  maxTabs?: number;
+  maxDownloadBytes?: number;
+};
+
 export type Config = {
   models?: ConfigModel[];
   providers?: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
+  browser?: BrowserConfig;
 } & WebConfig;
 
 const DEFAULT_MODELS: ConfigModel[] = [
@@ -198,6 +212,7 @@ export async function loadConfig(options?: {
   providers: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
   webConfig: WebConfig;
+  browserConfig?: BrowserConfig;
   error?: string;
   warning?: string;
   source?: string;
@@ -252,6 +267,7 @@ export async function loadConfig(options?: {
         models: DEFAULT_MODELS,
         providers: DEFAULT_PROVIDERS,
         webConfig: {},
+        browserConfig: undefined,
         error: `Failed to parse config at ${candidate.path}: ${err instanceof Error ? err.message : String(err)}`,
         source: candidate.source,
       };
@@ -280,11 +296,14 @@ export async function loadConfig(options?: {
       web_fetch: config.web_fetch,
     };
 
+    const browserConfig = config.browser;
+
     if (models.length === 0) {
       return {
         models: DEFAULT_MODELS,
         providers: DEFAULT_PROVIDERS,
         webConfig,
+        browserConfig,
         error: "Config has no models, using default",
         warning,
         source: candidate.source,
@@ -295,13 +314,14 @@ export async function loadConfig(options?: {
       ? mergeProviderDefaults([config.defaultModel], providers)[0]
       : undefined;
 
-    return { models, providers, defaultModel, webConfig, warning, source: candidate.source };
+    return { models, providers, defaultModel, webConfig, browserConfig, warning, source: candidate.source };
   }
 
   return {
     models: DEFAULT_MODELS,
     providers: DEFAULT_PROVIDERS,
     webConfig: {},
+    browserConfig: undefined,
     error: errors.length > 0
       ? `No usable config found. Errors: ${errors.join("; ")}`
       : "No config found, using default model",

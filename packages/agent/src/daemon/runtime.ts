@@ -30,6 +30,7 @@ import {
   ALL_MEMORY_ZONES,
   type HarnessPaths,
   type ConfigModel,
+  type BrowserConfig,
   type Agent,
   type MetricsRecorder,
   type DaemonEventType,
@@ -165,6 +166,8 @@ export class DaemonRuntime {
   private agent: Agent | null = null;
   private model: Model<Api> | null = null;
   private configDefaultModel: ConfigModel | undefined;
+  private configModels: ConfigModel[] = [];
+  private browserConfig: BrowserConfig | undefined;
   private memoryService: MemoryService | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
   private ipcServer: Server | null = null;
@@ -981,6 +984,8 @@ export class DaemonRuntime {
   private async loadDaemonConfig(): Promise<void> {
     const result = await loadConfig({ harnessHome: this.paths.home });
     this.configDefaultModel = result.defaultModel;
+    this.configModels = result.models;
+    this.browserConfig = result.browserConfig;
 
     if (result.warning) {
       this.logger.child("config").warn(result.warning);
@@ -1117,6 +1122,12 @@ export class DaemonRuntime {
       memoryBackend: this.memoryService?.getBackend(),
       skills: this.skillRecords,
       skillsDir: this.paths.skills,
+      browser: {
+        config: this.browserConfig,
+        defaultModel: this.configDefaultModel,
+        models: this.configModels,
+        downloadsBaseDir: join(this.paths.state, "downloads"),
+      },
     });
     const defaultZones = defaultProfile?.frontmatter.memory ?? ALL_MEMORY_ZONES;
     this.defaultTools = this.applyProfileToolPolicy(

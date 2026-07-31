@@ -215,6 +215,63 @@ Built-in tools (in `@harness/core`):
 | `process` | Background process lifecycle (list, poll, kill, log) |
 | `web_search` | Multi-provider web search with fallback |
 | `web_fetch` | URL fetcher with content safety filtering |
+| `browser` | Delegates to a browser sub-agent (CDP/Obscura) for JS-rendered pages |
+
+## Browser Subsystem
+
+The main agent gets a single `browser` tool that spawns a dedicated browser sub-agent. The sub-agent operates a real browser via CDP and returns a structured report.
+
+### Setup (Obscura)
+
+```bash
+# Arch Linux
+yay -S obscura-browser
+
+# Start CDP server (default port 9222)
+obscura serve --port 9222
+```
+
+### Fallback: Chrome / Chromium
+
+Any CDP-compatible browser works with zero code changes:
+
+```bash
+google-chrome --headless --remote-debugging-port=9222
+# or
+chromium --headless --remote-debugging-port=9222
+```
+
+### Configuration
+
+`$HARNESS_HOME/config.json`:
+
+```json
+{
+  "browser": {
+    "cdpUrl": "http://127.0.0.1:9222",
+    "model": "openrouter/deepseek/deepseek-v4-flash",
+    "maxTurns": 25,
+    "maxTokens": 4096,
+    "maxTotalTokens": 80000,
+    "snapshotTokenCap": 8000,
+    "navigationTimeoutMs": 30000,
+    "actionTimeoutMs": 15000,
+    "maxTabs": 5,
+    "maxDownloadBytes": 52428800
+  }
+}
+```
+
+Environment override: `BROWSER_CDP_URL` (wins over `cdpUrl` in config).
+
+Downloads are stored under `$HARNESS_STATE/downloads/<session-id>/` (non-executable, magic-byte verified).
+
+### Integration tests
+
+```bash
+# Requires a running CDP endpoint
+BROWSER_INTEGRATION=1 pnpm --filter @harness/core test
+```
 
 ## Development
 
