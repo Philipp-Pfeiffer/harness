@@ -4,6 +4,7 @@ import chalk, { Chalk } from "chalk";
 import { marked } from "marked";
 import MarkedTerminalRenderer from "marked-terminal";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import {
   createAgent,
   resolveModel,
@@ -14,6 +15,8 @@ import {
   resolveHarnessPaths,
   type ConfigModel,
   type WebConfig,
+  type BrowserConfig,
+  type ImageConfig,
   type HarnessPaths,
 } from "@harness/core";
 import { loadCoreMemoryRaw } from "../core/coreMemory.js";
@@ -902,12 +905,36 @@ export default function App({
   }, [selectionMode, setRawMode]);
 
   const [webConfig, setWebConfig] = useState<WebConfig | undefined>(webConfigProp);
+  const [browserConfig, setBrowserConfig] = useState<BrowserConfig | undefined>(undefined);
+  const [imageConfig, setImageConfig] = useState<ImageConfig | undefined>(undefined);
+  const [configModels, setConfigModels] = useState<ConfigModel[]>(configModelsProp ?? []);
+  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(configDefaultModelProp);
+  const [configError, setConfigError] = useState<string | undefined>(configErrorProp);
 
   // Model/tool setup is only relevant for InProcessBackend.
   // DaemonClientBackend delegates to the daemon which has its own model.
   const tools = useMemo(
-    () => loadTools(memoryService?.getBackend(), webConfig),
-    [memoryService, webConfig]
+    () => loadTools({
+      memoryBackend: memoryService?.getBackend(),
+      webConfig,
+      browser: configModels.length > 0
+        ? {
+            config: browserConfig,
+            defaultModel: configDefaultModel,
+            models: configModels,
+            downloadsBaseDir: join(paths.state, "downloads"),
+            browserRunsDir: paths.browserRuns,
+          }
+        : undefined,
+      image: configModels.length > 0
+        ? {
+            config: imageConfig,
+            defaultModel: configDefaultModel,
+            models: configModels,
+          }
+        : undefined,
+    }),
+    [memoryService, webConfig, browserConfig, imageConfig, configModels, configDefaultModel, paths],
   );
   const [activeModel, setActiveModel] = useState<Model<Api>>(() => resolveModel("minimax", "MiniMax-M2.7"));
   const inProcessAgent = useMemo(() => createAgent({ tools, model: activeModel, inlineThinking: (activeModel as any).inlineThinking ?? false }), [tools, activeModel]);
@@ -937,9 +964,6 @@ export default function App({
     })();
   }, [inProcessAgent, tools, backend, paths]);
 
-  const [configModels, setConfigModels] = useState<ConfigModel[]>(configModelsProp ?? []);
-  const [configDefaultModel, setConfigDefaultModel] = useState<ConfigModel | undefined>(configDefaultModelProp);
-  const [configError, setConfigError] = useState<string | undefined>(configErrorProp);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
   const [modelPickerFilter, setModelPickerFilter] = useState("");
@@ -963,6 +987,8 @@ export default function App({
       setConfigModels(result.models);
       setConfigDefaultModel(result.defaultModel);
       setWebConfig(result.webConfig);
+      setBrowserConfig(result.browserConfig);
+      setImageConfig(result.imageConfig);
       if (result.error) {
         setConfigError(result.error);
       }

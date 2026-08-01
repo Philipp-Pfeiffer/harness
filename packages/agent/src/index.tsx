@@ -353,6 +353,11 @@ const initTools = loadTools({
     downloadsBaseDir: join(paths.state, "downloads"),
     browserRunsDir: paths.browserRuns,
   },
+  image: {
+    config: configResult.imageConfig,
+    defaultModel: configResult.defaultModel,
+    models: configResult.models,
+  },
 });
 const initAgent = createAgent({ tools: initTools, model: initModel, inlineThinking: (initModel as any).inlineThinking ?? false });
 

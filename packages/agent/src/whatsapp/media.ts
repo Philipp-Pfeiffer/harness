@@ -202,9 +202,15 @@ export async function processMediaForTurn(
 
     // Build annotation for all media types
     const sizeStr = formatFileSize(m.size);
-    annotations.push(
-      `Datei angehängt: ${m.filePath} (${m.type}, ${sizeStr}). Schau sie dir bei Bedarf an.`,
-    );
+    if (m.type === "image") {
+      annotations.push(
+        `Bild angehängt: ${m.filePath} (${sizeStr}). Nutze das image-Tool mit url="${m.filePath}" und optional einem prompt, um das Bild anzusehen.`,
+      );
+    } else {
+      annotations.push(
+        `Datei angehängt: ${m.filePath} (${m.type}, ${sizeStr}). Schau sie dir bei Bedarf an.`,
+      );
+    }
   }
 
   return { imageBlocks, annotations };

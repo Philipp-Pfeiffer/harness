@@ -58,6 +58,12 @@ export type WebConfig = {
 
 export type BrowserLaunchMode = "obscura" | "cdp";
 
+export type ImageConfig = {
+  /** Vision model reference. Default: @preset/vision (OpenRouter dashboard preset). */
+  model?: string;
+  maxTokens?: number;
+};
+
 export type BrowserConfig = {
   /** obscura: spawn managed Obscura per session (default). cdp: attach to external CDP only. */
   mode?: BrowserLaunchMode;
@@ -82,6 +88,7 @@ export type Config = {
   models?: ConfigModel[];
   providers?: Record<string, ConfigProvider>;
   defaultModel?: ConfigModel;
+  image?: ImageConfig;
   browser?: BrowserConfig;
 } & WebConfig;
 
@@ -222,6 +229,7 @@ export async function loadConfig(options?: {
   defaultModel?: ConfigModel;
   webConfig: WebConfig;
   browserConfig?: BrowserConfig;
+  imageConfig?: ImageConfig;
   error?: string;
   warning?: string;
   source?: string;
@@ -277,6 +285,7 @@ export async function loadConfig(options?: {
         providers: DEFAULT_PROVIDERS,
         webConfig: {},
         browserConfig: undefined,
+        imageConfig: undefined,
         error: `Failed to parse config at ${candidate.path}: ${err instanceof Error ? err.message : String(err)}`,
         source: candidate.source,
       };
@@ -306,6 +315,7 @@ export async function loadConfig(options?: {
     };
 
     const browserConfig = config.browser;
+    const imageConfig = config.image;
 
     if (models.length === 0) {
       return {
@@ -313,6 +323,7 @@ export async function loadConfig(options?: {
         providers: DEFAULT_PROVIDERS,
         webConfig,
         browserConfig,
+        imageConfig,
         error: "Config has no models, using default",
         warning,
         source: candidate.source,
@@ -323,7 +334,7 @@ export async function loadConfig(options?: {
       ? mergeProviderDefaults([config.defaultModel], providers)[0]
       : undefined;
 
-    return { models, providers, defaultModel, webConfig, browserConfig, warning, source: candidate.source };
+    return { models, providers, defaultModel, webConfig, browserConfig, imageConfig, warning, source: candidate.source };
   }
 
   return {
@@ -331,6 +342,7 @@ export async function loadConfig(options?: {
     providers: DEFAULT_PROVIDERS,
     webConfig: {},
     browserConfig: undefined,
+    imageConfig: undefined,
     error: errors.length > 0
       ? `No usable config found. Errors: ${errors.join("; ")}`
       : "No config found, using default model",

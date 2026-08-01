@@ -169,8 +169,8 @@ describe("WhatsApp Media Pipeline", () => {
       expect(imageBlocks.length).toBe(1);
       expect(imageBlocks[0]!.mimeType).toBe("image/jpeg");
       expect(annotations.length).toBe(1);
-      expect(annotations[0]).toContain("Datei angehängt:");
-      expect(annotations[0]).toContain("image");
+      expect(annotations[0]).toContain("Bild angehängt:");
+      expect(annotations[0]).toContain("image-Tool");
     });
 
     it("does not create image blocks for non-vision models", async () => {

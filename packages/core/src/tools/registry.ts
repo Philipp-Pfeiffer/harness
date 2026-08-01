@@ -1,6 +1,6 @@
 import type { Tool } from "./types.js";
 import type { MemoryBackend } from "../core/memoryBackend.js";
-import type { WebConfig, BrowserConfig, ConfigModel } from "../config.js";
+import type { WebConfig, BrowserConfig, ImageConfig, ConfigModel } from "../config.js";
 import type { SkillRecord } from "../skills/types.js";
 import type { FindSkillToolOptions } from "./findSkill.js";
 import { readFileTool } from "./readFile.js";
@@ -15,6 +15,7 @@ import { createLoadSkillTool } from "./loadSkill.js";
 import { createFindSkillTool } from "./findSkill.js";
 import { sendFileTool } from "./send_file.js";
 import { createBrowserTool } from "./browser.js";
+import { createImageTool } from "./image.js";
 
 export interface LoadToolsOptions {
   memoryBackend?: MemoryBackend;
@@ -33,6 +34,12 @@ export interface LoadToolsOptions {
     downloadsBaseDir: string;
     browserRunsDir: string;
   };
+  /** Vision model options. When models are set, registers the `image` tool. */
+  image?: {
+    config?: ImageConfig;
+    defaultModel?: ConfigModel;
+    models?: ConfigModel[];
+  };
 }
 
 export function loadTools(opts?: LoadToolsOptions): Tool[];
@@ -44,7 +51,15 @@ export function loadTools(
 ): Tool[] {
   // Normalize to options object (backward compat with old signature)
   const opts: LoadToolsOptions =
-    arg1 !== undefined && typeof arg1 === "object" && "memoryBackend" in arg1
+    arg1 !== undefined &&
+    typeof arg1 === "object" &&
+    ("memoryBackend" in arg1 ||
+      "webConfig" in arg1 ||
+      "skills" in arg1 ||
+      "skillsDir" in arg1 ||
+      "findSkillStore" in arg1 ||
+      "browser" in arg1 ||
+      "image" in arg1)
       ? (arg1 as LoadToolsOptions)
       : {
           memoryBackend: arg1 as MemoryBackend | undefined,
@@ -77,6 +92,15 @@ export function loadTools(
       models: opts.browser.models,
       downloadsBaseDir: opts.browser.downloadsBaseDir,
       browserRunsDir: opts.browser.browserRunsDir,
+    }));
+  }
+
+  if (opts.image?.models) {
+    tools.push(createImageTool({
+      imageConfig: opts.image.config,
+      defaultModel: opts.image.defaultModel,
+      models: opts.image.models,
+      webConfig: opts.webConfig,
     }));
   }
 

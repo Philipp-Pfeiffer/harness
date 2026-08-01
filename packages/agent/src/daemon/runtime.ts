@@ -31,6 +31,7 @@ import {
   type HarnessPaths,
   type ConfigModel,
   type BrowserConfig,
+  type ImageConfig,
   type WebConfig,
   type Agent,
   type MetricsRecorder,
@@ -175,6 +176,7 @@ export class DaemonRuntime {
   private configDefaultModel: ConfigModel | undefined;
   private configModels: ConfigModel[] = [];
   private browserConfig: BrowserConfig | undefined;
+  private imageConfig: ImageConfig | undefined;
   private webConfig: WebConfig | undefined;
   private memoryService: MemoryService | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
@@ -1030,6 +1032,7 @@ export class DaemonRuntime {
     this.configDefaultModel = result.defaultModel;
     this.configModels = result.models;
     this.browserConfig = result.browserConfig;
+    this.imageConfig = result.imageConfig;
     this.webConfig = result.webConfig;
 
     if (result.warning) {
@@ -1174,6 +1177,11 @@ export class DaemonRuntime {
         models: this.configModels,
         downloadsBaseDir: join(this.paths.state, "downloads"),
         browserRunsDir: this.paths.browserRuns,
+      },
+      image: {
+        config: this.imageConfig,
+        defaultModel: this.configDefaultModel,
+        models: this.configModels,
       },
     });
     const defaultZones = defaultProfile?.frontmatter.memory ?? ALL_MEMORY_ZONES;

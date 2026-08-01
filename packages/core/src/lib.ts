@@ -32,6 +32,7 @@ export { sendFileTool, detectMimeFromExtension } from "./tools/send_file.js";
 export { createWebSearchTool } from "./tools/web_search.js";
 export { createWebFetchTool } from "./tools/web_fetch.js";
 export { createBrowserTool } from "./tools/browser.js";
+export { createImageTool } from "./tools/image.js";
 export { loadTools, findTool } from "./tools/registry.js";
 
 // Process supervisor (singleton — used by exec/process tools, logger-injectable)
@@ -66,6 +67,7 @@ export {
   type WebSearchProviderConfig,
   type WebConfig,
   type BrowserConfig,
+  type ImageConfig,
   type Config,
 } from "./config.js";
 
