@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, chmod, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, chmod, writeFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 
 export class SandboxError extends Error {
@@ -88,5 +88,35 @@ export async function verifyDownload(filePath: string, maxBytes: number): Promis
     throw new SandboxError(
       `File extension ${ext} does not match content magic bytes: ${path.basename(filePath)}`,
     );
+  }
+}
+
+/** List basenames in a download directory (non-recursive). */
+export async function listDownloadBasenames(downloadDir: string): Promise<Set<string>> {
+  try {
+    const entries = await readdir(downloadDir);
+    return new Set(entries);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Remove files created during an aborted browser run. Deletes any file in
+ * `downloadDir` that was not present in `beforeAbort` plus Playwright
+ * partial download suffixes.
+ */
+export async function cleanupPartialDownloads(
+  downloadDir: string,
+  beforeAbort: Set<string>,
+): Promise<void> {
+  const current = await listDownloadBasenames(downloadDir);
+  for (const name of current) {
+    if (beforeAbort.has(name)) continue;
+    if (name.endsWith(".crdownload")) {
+      await unlink(path.join(downloadDir, name)).catch(() => undefined);
+      continue;
+    }
+    await unlink(path.join(downloadDir, name)).catch(() => undefined);
   }
 }

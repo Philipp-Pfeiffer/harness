@@ -91,6 +91,37 @@ export interface SessionTurn {
    * Stored to enable exact resume of the conversation context.
    */
   messages?: Message[];
+  /** True when the user aborted this turn (Esc/Ctrl+C). Distinct from errors. */
+  aborted?: boolean;
+  /** True when assistant output was cut short by user abort. */
+  truncated?: boolean;
+}
+
+/** Collect assistant text blocks from a message slice (for aborted-turn persistence). */
+export function extractAssistantTextFromMessages(messages: Message[]): string {
+  const parts: string[] = [];
+  for (const msg of messages) {
+    if (msg.role !== "assistant") continue;
+    const content = msg.content;
+    if (typeof content === "string") {
+      parts.push(content);
+      continue;
+    }
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (
+          block &&
+          typeof block === "object" &&
+          "type" in block &&
+          block.type === "text" &&
+          "text" in block
+        ) {
+          parts.push(String(block.text));
+        }
+      }
+    }
+  }
+  return parts.join("");
 }
 
 export type SessionStatus = "active" | "idle" | "suspended" | "ended";

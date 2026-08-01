@@ -58,6 +58,7 @@ import {
   countTurnsInTranscript,
   markActiveSessionsIdle,
   extractToolData,
+  extractAssistantTextFromMessages,
   type Session,
 } from "../core/session.js";
 import { ensureInbox } from "../core/memoryFolders.js";
@@ -276,8 +277,8 @@ export class DaemonRuntime {
     // Sessions are created on-demand — no initSession() here.
 
     // Start IPC server
-    this.ipcServer = await startIpcServer(this.paths.socketFile, (req, send) =>
-      this.handleIpcRequest(req, send),
+    this.ipcServer = await startIpcServer(this.paths.socketFile, (req, send, ctx) =>
+      this.handleIpcRequest(req, send, ctx),
     );
     log.info("IPC server listening", { socket: this.paths.socketFile });
 
@@ -524,6 +525,7 @@ export class DaemonRuntime {
   private async handleIpcRequest(
     req: IpcRequest,
     send?: (resp: IpcResponse) => void,
+    ctx?: { signal?: AbortSignal },
   ): Promise<IpcResponse> {
     switch (req.type) {
       case "ping":
@@ -847,6 +849,7 @@ export class DaemonRuntime {
             }
 
             const result = await agent.run(messages, {
+              signal: ctx?.signal,
               metricsRecorder: entry.metricsRecorder,
               memoryBackend: turnCtx.memoryZones.includes("notes")
                 ? this.memoryService?.getBackend()
@@ -901,16 +904,14 @@ export class DaemonRuntime {
             }
 
             // Record the turn in the session transcript
-            const finalMessage = result.aborted
-              ? "Aborted"
-              : result.finalMessage;
-            // Compaction may have replaced the messages array in-place during
-            // the turn, invalidating any numeric "before turn" index. Find the
-            // user message by reference, or fall back to 0 for old-style calls.
             const turnStartIndex = userMessage
               ? Math.max(0, messages.indexOf(userMessage))
               : 0;
             const turnSlice = messages.slice(turnStartIndex);
+            const partialContent = extractAssistantTextFromMessages(turnSlice);
+            const finalMessage = result.aborted
+              ? partialContent
+              : result.finalMessage;
             const { tool_calls, tool_results } = extractToolData(turnSlice);
             const turn = {
               id: crypto.randomUUID(),
@@ -936,6 +937,8 @@ export class DaemonRuntime {
               model: turnCtx.model?.name ?? "unknown",
               timestamp: new Date().toISOString(),
               messages: turnSlice,
+              aborted: result.aborted ? true : undefined,
+              truncated: result.aborted && partialContent.length > 0 ? true : undefined,
             };
             entry.session = await recordTurn(entry.session, turn, this.paths);
 
@@ -945,6 +948,7 @@ export class DaemonRuntime {
               finalResponse: finalMessage,
               info: `Turn completed: ${result.aborted ? "aborted" : "ok"}, ${result.aborted ? result.completedTurns : result.turns} turns, ${result.usage.totalTokens} tokens`,
               turnsCompleted: entry.turnsCompleted,
+              aborted: result.aborted,
               usage: {
                 inputTokens: result.usage.inputTokens,
                 outputTokens: result.usage.outputTokens,

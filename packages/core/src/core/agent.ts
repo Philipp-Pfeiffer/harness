@@ -16,7 +16,7 @@ import type {
   Message,
   AssistantMessage,
 } from "@mariozechner/pi-ai";
-import type { Tool, ToolCallContext } from "../tools/types.js";
+import type { Tool, ToolCallContext, ToolResult } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
 import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
@@ -275,6 +275,52 @@ function stripDanglingToolCalls(
   }
 }
 
+async function executeToolWithAbort(
+  tool: Tool,
+  args: unknown,
+  context: ToolCallContext,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
+  if (signal?.aborted) {
+    return { content: "Tool execution aborted by user.", isError: true };
+  }
+
+  const execution = Promise.resolve(tool.execute(args, context));
+
+  if (!signal) {
+    return execution;
+  }
+
+  return new Promise<ToolResult>((resolve) => {
+    let settled = false;
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      resolve({ content: "Tool execution aborted by user.", isError: true });
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    execution.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve({
+          content: err instanceof Error ? err.message : String(err),
+          isError: true,
+        });
+      },
+    );
+  });
+}
 
 
 export interface AgentConfig {
@@ -348,6 +394,7 @@ export function createAgent(config: AgentConfig): Agent {
         logger: logger,
         channelFileSender,
         onStatus: (status) => onEvent?.({ type: "status", status }),
+        signal,
       };
 
       if (memoryBackend) {
@@ -703,17 +750,25 @@ export function createAgent(config: AgentConfig): Agent {
                 } else {
                   const toolStart = Date.now();
                   try {
-                    // Tool calls are atomic: once started they run to completion
-                    // even if the signal is aborted mid-flight.
-                    toolCallCount++;
-                    const toolResult = await Promise.resolve(
-                      tool.execute(toolCall.arguments, { ...toolContext, toolCallId: toolCall.id }),
-                    );
-                    result = toolResult.content;
-                    if (toolResult.isError) isError = true;
-                    const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
-                    logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
-                    metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: isError ? "error" : "ok" });
+                    if (signal?.aborted) {
+                      result = "Tool execution aborted by user.";
+                      isError = true;
+                      logger?.(`[TOOL ABORT] ${toolCall.name}`);
+                      metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: 0, status: "error", error: result });
+                    } else {
+                      toolCallCount++;
+                      const toolResult = await executeToolWithAbort(
+                        tool,
+                        toolCall.arguments,
+                        { ...toolContext, toolCallId: toolCall.id },
+                        signal,
+                      );
+                      result = toolResult.content;
+                      if (toolResult.isError) isError = true;
+                      const truncated = result.length > 200 ? result.substring(0, 200) + "..." : result;
+                      logger?.(`[TOOL CALL] ${toolCall.name}(${JSON.stringify(toolCall.arguments)}) → ${truncated}`);
+                      metricsRecorder?.recordToolCall({ tool: toolCall.name, latencyMs: Date.now() - toolStart, status: isError ? "error" : "ok" });
+                    }
                   } catch (err) {
                     result = err instanceof Error ? err.message : String(err);
                     isError = true;

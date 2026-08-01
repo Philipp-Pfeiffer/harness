@@ -131,46 +131,59 @@ export class DaemonClientBackend implements AgentBackend {
     signal?: AbortSignal,
     opts?: RunTurnOpts,
   ): Promise<TurnResult> {
-    const resp = await sendIpcStreaming(
-      this.socketPath,
-      { type: "submit-turn", text, sessionId, model: opts?.model },
-      (ipcResp: IpcResponse) => {
-        if (ipcResp.type !== "turn-event") return;
-        const ev = ipcResp.event as TurnStreamEvent;
-        const backendEvent = translateStreamEvent(ev);
-        if (backendEvent) {
-          onEvent(backendEvent);
-        }
-      },
-      SUBMIT_TURN_IPC_TIMEOUT_MS,
-      signal,
-    );
+    try {
+      const resp = await sendIpcStreaming(
+        this.socketPath,
+        { type: "submit-turn", text, sessionId, model: opts?.model },
+        (ipcResp: IpcResponse) => {
+          if (ipcResp.type !== "turn-event") return;
+          const ev = ipcResp.event as TurnStreamEvent;
+          const backendEvent = translateStreamEvent(ev);
+          if (backendEvent) {
+            onEvent(backendEvent);
+          }
+        },
+        SUBMIT_TURN_IPC_TIMEOUT_MS,
+        signal,
+      );
 
-    if (resp.type === "turn-complete") {
-      // Emit synthetic turn_end + usage events
-      onEvent({ type: "turn_end" });
-      if (resp.usage) {
-        onEvent({
-          type: "usage",
-          inputTokens: resp.usage.inputTokens,
-          outputTokens: resp.usage.outputTokens,
-          totalTokens: resp.usage.totalTokens,
-          cacheRead: resp.usage.cacheRead,
-          cacheWrite: resp.usage.cacheWrite,
-        });
+      if (resp.type === "turn-complete") {
+        // Emit synthetic turn_end + usage events
+        onEvent({ type: "turn_end" });
+        if (resp.usage) {
+          onEvent({
+            type: "usage",
+            inputTokens: resp.usage.inputTokens,
+            outputTokens: resp.usage.outputTokens,
+            totalTokens: resp.usage.totalTokens,
+            cacheRead: resp.usage.cacheRead,
+            cacheWrite: resp.usage.cacheWrite,
+          });
+        }
+        return {
+          finalResponse: resp.finalResponse,
+          aborted: resp.aborted ?? false,
+          turnsCompleted: resp.turnsCompleted,
+          sessionId: resp.sessionId,
+          usage: resp.usage,
+        };
       }
-      return {
-        finalResponse: resp.finalResponse,
-        aborted: false,
-        turnsCompleted: resp.turnsCompleted,
-        sessionId: resp.sessionId,
-        usage: resp.usage,
-      };
+      if (resp.type === "error") {
+        throw new Error(resp.message);
+      }
+      throw new Error(`Unexpected response: ${resp.type}`);
+    } catch (err) {
+      if (signal?.aborted) {
+        onEvent({ type: "turn_end" });
+        return {
+          finalResponse: "",
+          aborted: true,
+          turnsCompleted: 0,
+          sessionId,
+        };
+      }
+      throw err;
     }
-    if (resp.type === "error") {
-      throw new Error(resp.message);
-    }
-    throw new Error(`Unexpected response: ${resp.type}`);
   }
 }
 

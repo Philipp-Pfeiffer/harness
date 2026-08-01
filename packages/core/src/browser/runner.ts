@@ -15,7 +15,7 @@ import {
 } from "./engine.js";
 import { createBrowserSubAgentTools } from "./subAgentTools.js";
 import type { BrowserReport, BrowserSessionOptions, BrowserToolInput } from "./types.js";
-import { ensureDownloadDir } from "./sandbox.js";
+import { ensureDownloadDir, listDownloadBasenames, cleanupPartialDownloads } from "./sandbox.js";
 import { BrowserTraceWriter } from "./trace.js";
 
 export interface BrowserRunnerDeps {
@@ -31,6 +31,8 @@ export interface BrowserRunnerDeps {
   toolCallId?: string;
   logger?: (msg: string, level?: "warn" | "debug") => void;
   onStatus?: (status: string) => void;
+  /** Parent abort signal from the main agent loop. */
+  parentSignal?: AbortSignal;
 }
 
 function resolveBrowserModel(
@@ -125,6 +127,7 @@ export async function runBrowserSubAgent(
   const resolved = resolveBrowserConfig(deps.browserConfig, deps.defaultModel);
   const downloadDir = path.join(deps.downloadsBaseDir, sessionId);
   await ensureDownloadDir(downloadDir);
+  const downloadsBefore = await listDownloadBasenames(downloadDir);
 
   const trace = await BrowserTraceWriter.create({
     browserRunsDir: deps.browserRunsDir,
@@ -156,6 +159,13 @@ export async function runBrowserSubAgent(
   const tools = createBrowserSubAgentTools(ctx, sessionOptions);
   const abortController = new AbortController();
   ctx.setAbortHandler(() => abortController.abort());
+  if (deps.parentSignal) {
+    if (deps.parentSignal.aborted) {
+      abortController.abort();
+    } else {
+      deps.parentSignal.addEventListener("abort", () => abortController.abort(), { once: true });
+    }
+  }
 
   let model: ResolvedModel;
   try {
@@ -238,6 +248,9 @@ export async function runBrowserSubAgent(
   } finally {
     await engine.disconnect().catch(() => undefined);
     await trace.phase("disconnected");
+    if (runResult?.aborted && runResult.reason === "signal" && !ctx.isComplete()) {
+      await cleanupPartialDownloads(downloadDir, downloadsBefore);
+    }
   }
 
   const visited = engine.getVisitedUrls();
@@ -264,7 +277,9 @@ export async function runBrowserSubAgent(
   }
 
   let failureReason: string;
-  if (runResult.aborted && runResult.reason === "maxTurns") {
+  if (runResult.aborted && runResult.reason === "signal" && !ctx.isComplete()) {
+    failureReason = "aborted by user";
+  } else if (runResult.aborted && runResult.reason === "maxTurns") {
     failureReason = `Turn budget exhausted (${resolved.maxTurns} turns). Call submit_report earlier when stuck.`;
   } else if (runResult.aborted && runResult.reason === "signal" && ctx.isComplete()) {
     failureReason = "Session ended without report.";

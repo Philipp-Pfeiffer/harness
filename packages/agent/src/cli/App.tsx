@@ -34,6 +34,11 @@ import {
   formatSessionLoadWarning,
 } from "./sessionCommand.js";
 import type { AgentBackend, BackendEvent, TurnResult } from "../backends/types.js";
+import { ViewportPicker, getPickerViewport } from "./ViewportPicker.js";
+import {
+  filterPickerItems,
+  handlePickerKey,
+} from "./picker.js";
 
 /* ─── marked config ───
    Use a dedicated chalk instance with full ANSI level so that markdown
@@ -186,7 +191,7 @@ function turnToCompletedTurn(turn: SessionTurn): CompletedTurn {
     assistantRendered: true,
     tools,
     toolOffsets: [],
-    aborted: false,
+    aborted: turn.aborted ?? false,
   };
 }
 
@@ -469,11 +474,15 @@ function PromptInput({
   history,
   commands,
   paused = false,
+  terminalRows = 24,
+  pickerReservedRows = 6,
 }: {
   onSubmit: (v: string) => void;
   history: string[];
   commands?: SlashCommandInfo[];
   paused?: boolean;
+  terminalRows?: number;
+  pickerReservedRows?: number;
 }) {
   const [, setRenderTick] = useState(0);
   const valueRef = useRef("");
@@ -548,20 +557,34 @@ function PromptInput({
 
     if (commands && pickerOpen) {
       const filtered = filterCommands(valueRef.current);
-      if (key.upArrow && !key.shift) {
-        setPickerIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (key.downArrow && !key.shift) {
-        setPickerIndex((i) => Math.min(filtered.length - 1, i + 1));
-        return;
-      }
-      if (key.escape) {
+      const { listRows } = getPickerViewport({
+        items: filtered.map((cmd) => ({ key: cmd.name, label: cmd.name })),
+        selectedIndex: pickerIndex,
+        terminalRows,
+        reservedRows: pickerReservedRows,
+        showFilter: false,
+      });
+      const action = handlePickerKey(
+        {
+          upArrow: key.upArrow && !key.shift,
+          downArrow: key.downArrow && !key.shift,
+          pageUp: key.pageUp,
+          pageDown: key.pageDown,
+          escape: key.escape,
+          return: key.return,
+          tab: key.tab,
+        },
+        { selectedIndex: pickerIndex, filter: "" },
+        filtered.length,
+        listRows,
+        { filterable: false },
+      );
+      if (action.type === "close") {
         setPickerOpen(false);
         setPickerIndex(0);
         return;
       }
-      if ((key.return || key.tab) && filtered.length > 0) {
+      if (action.type === "select" && filtered.length > 0) {
         const cmd = filtered[pickerIndex] ?? filtered[0];
         valueRef.current = cmd.name;
         cursorOffsetRef.current = cmd.name.length;
@@ -569,6 +592,10 @@ function PromptInput({
         setPickerOpen(false);
         setPickerIndex(0);
         setRenderTick((t) => t + 1);
+        return;
+      }
+      if (action.type === "update") {
+        setPickerIndex(action.selectedIndex);
         return;
       }
     }
@@ -712,6 +739,11 @@ function PromptInput({
 
   const filteredCommands = pickerOpen && commands ? filterCommands(valueRef.current) : [];
 
+  const slashPickerItems = filteredCommands.map((cmd) => ({
+    key: cmd.name,
+    label: `${cmd.name}  – ${cmd.description}`,
+  }));
+
   // Build display lines with selection highlighting
   const fullText = valueRef.current;
   const lines = fullText.split("\n");
@@ -781,14 +813,15 @@ function PromptInput({
           </Box>
         );
       })}
-      {pickerOpen && filteredCommands.length > 0 && (
-        <Box flexDirection="column" marginTop={1} paddingLeft={2}>
-          {filteredCommands.map((cmd, idx) => (
-            <Text key={`cmd-${cmd.name}-${idx}`} color={idx === pickerIndex ? "cyan" : "gray"} bold={idx === pickerIndex}>
-              {cmd.name}  – {cmd.description}
-            </Text>
-          ))}
-        </Box>
+      {pickerOpen && slashPickerItems.length > 0 && (
+        <ViewportPicker
+          title="Commands"
+          items={slashPickerItems}
+          selectedIndex={pickerIndex}
+          showFilter={false}
+          terminalRows={terminalRows}
+          reservedRows={pickerReservedRows}
+        />
       )}
     </Box>
   );
@@ -837,6 +870,7 @@ export default function App({
 
   const historyRef = useRef<string[]>([]);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const abortingRef = useRef(false);
   const userAbortedRef = useRef(false);
   const lastSigintRef = useRef(0);
   const isRunningRef = useRef(false);
@@ -908,6 +942,8 @@ export default function App({
   const [configError, setConfigError] = useState<string | undefined>(configErrorProp);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
+  const [modelPickerFilter, setModelPickerFilter] = useState("");
+  const [abortStatusMessage, setAbortStatusMessage] = useState<string | null>(null);
   const [showSessionPicker, setShowSessionPicker] = useState(false);
   const [sessionPickerIndex, setSessionPickerIndex] = useState(0);
   const [sessionPickerOptions, setSessionPickerOptions] = useState<SessionListDetail[]>([]);
@@ -1154,18 +1190,41 @@ export default function App({
   }
 
   const filteredSessionPickerOptions = useMemo(() => {
-    const filter = sessionPickerFilter.trim().toLowerCase();
     const sorted = [...sessionPickerOptions].sort((a, b) =>
       b.lastActivity.localeCompare(a.lastActivity),
     );
-    if (!filter) return sorted;
-    return sorted.filter(
-      (s) =>
-        s.sessionId.toLowerCase().includes(filter) ||
-        s.title.toLowerCase().includes(filter) ||
-        s.model?.toLowerCase().includes(filter),
+    return filterPickerItems(
+      sorted,
+      sessionPickerFilter,
+      (s) => `${s.sessionId} ${s.title} ${s.model ?? ""}`,
     );
   }, [sessionPickerOptions, sessionPickerFilter]);
+
+  const filteredModelPickerOptions = useMemo(() => {
+    return filterPickerItems(
+      configModels,
+      modelPickerFilter,
+      (m) => `${m.alias} ${m.provider} ${m.model}`,
+    );
+  }, [configModels, modelPickerFilter]);
+
+  const pickerReservedRows =
+    3 + (activeTurnRef.current ? 8 : pastTurns.length > 0 ? 5 : 2);
+
+  const abortCurrentTurn = useCallback(() => {
+    if (!isRunningRef.current || !abortControllerRef.current || abortingRef.current) {
+      return;
+    }
+    abortingRef.current = true;
+    userAbortedRef.current = true;
+    abortControllerRef.current.abort();
+    if (activeTurnRef.current) {
+      activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
+      forceUpdate();
+    }
+    setAbortStatusMessage("turn aborted");
+    setTimeout(() => setAbortStatusMessage(null), 3000);
+  }, [forceUpdate]);
 
   const handleSubmit = useCallback(
     async (value: string) => {
@@ -1281,6 +1340,7 @@ export default function App({
       if (trimmed === "/model") {
         setShowModelPicker(true);
         setModelPickerIndex(0);
+        setModelPickerFilter("");
         return;
       }
       if (trimmed === "/help") {
@@ -1411,12 +1471,7 @@ export default function App({
         // Safety: treat "stopp", "stop", "abort" as immediate abort commands
         const stopWords = ["stopp", "stop", "abort"];
         if (stopWords.includes(trimmed.toLowerCase()) && abortControllerRef.current) {
-          userAbortedRef.current = true;
-          abortControllerRef.current.abort();
-          if (activeTurnRef.current) {
-            activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
-            forceUpdate();
-          }
+          abortCurrentTurn();
         }
         return;
       }
@@ -1582,6 +1637,7 @@ export default function App({
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
+          abortingRef.current = false;
         })
         .catch((err: unknown) => {
           if (activeTurnRef.current) {
@@ -1603,9 +1659,10 @@ export default function App({
           }
           abortControllerRef.current = null;
           userAbortedRef.current = false;
+          abortingRef.current = false;
         });
     },
-    [backend, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession, initiateSessionResume]
+    [backend, exit, forceUpdate, activeModel, sessionUsage, lastCallTokens, pastTurns, memoryService, paths, resetIdleTimer, clearIdleTimer, resumeSession, initiateSessionResume, abortCurrentTurn]
   );
 
   const toggleLastTool = useCallback(() => {
@@ -1638,21 +1695,36 @@ export default function App({
 
   useInput((inputStr, key) => {
     if (showSessionPicker) {
-      if (key.upArrow) {
-        setSessionPickerIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (key.downArrow) {
-        setSessionPickerIndex((i) =>
-          Math.min(filteredSessionPickerOptions.length - 1, i + 1),
-        );
-        return;
-      }
-      if (key.escape) {
+      const { listRows } = getPickerViewport({
+        items: filteredSessionPickerOptions.map((s) => ({ key: s.sessionId, label: s.sessionId })),
+        selectedIndex: sessionPickerIndex,
+        terminalRows: termSize.rows,
+        reservedRows: pickerReservedRows,
+      });
+      const action = handlePickerKey(
+        {
+          upArrow: key.upArrow,
+          downArrow: key.downArrow,
+          pageUp: key.pageUp,
+          pageDown: key.pageDown,
+          escape: key.escape,
+          return: key.return,
+          tab: key.tab,
+          backspace: key.backspace,
+          delete: key.delete,
+          inputStr,
+          ctrl: key.ctrl,
+          meta: key.meta,
+        },
+        { selectedIndex: sessionPickerIndex, filter: sessionPickerFilter },
+        filteredSessionPickerOptions.length,
+        listRows,
+      );
+      if (action.type === "close") {
         setShowSessionPicker(false);
         return;
       }
-      if (key.return || key.tab) {
+      if (action.type === "select") {
         const selected = filteredSessionPickerOptions[sessionPickerIndex];
         if (selected) {
           setShowSessionPicker(false);
@@ -1660,34 +1732,49 @@ export default function App({
         }
         return;
       }
-      if (key.backspace || key.delete) {
-        setSessionPickerFilter((f) => f.slice(0, -1));
-        setSessionPickerIndex(0);
-        return;
-      }
-      if (inputStr && !key.ctrl && !key.meta) {
-        setSessionPickerFilter((f) => f + inputStr);
-        setSessionPickerIndex(0);
+      if (action.type === "update") {
+        setSessionPickerIndex(action.selectedIndex);
+        setSessionPickerFilter(action.filter);
         return;
       }
       return;
     }
 
     if (showModelPicker) {
-      if (key.upArrow) {
-        setModelPickerIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (key.downArrow) {
-        setModelPickerIndex((i) => Math.min(configModels.length - 1, i + 1));
-        return;
-      }
-      if (key.escape) {
+      const { listRows } = getPickerViewport({
+        items: filteredModelPickerOptions.map((m) => ({
+          key: `${m.provider}-${m.model}`,
+          label: m.alias,
+        })),
+        selectedIndex: modelPickerIndex,
+        terminalRows: termSize.rows,
+        reservedRows: pickerReservedRows,
+      });
+      const action = handlePickerKey(
+        {
+          upArrow: key.upArrow,
+          downArrow: key.downArrow,
+          pageUp: key.pageUp,
+          pageDown: key.pageDown,
+          escape: key.escape,
+          return: key.return,
+          tab: key.tab,
+          backspace: key.backspace,
+          delete: key.delete,
+          inputStr,
+          ctrl: key.ctrl,
+          meta: key.meta,
+        },
+        { selectedIndex: modelPickerIndex, filter: modelPickerFilter },
+        filteredModelPickerOptions.length,
+        listRows,
+      );
+      if (action.type === "close") {
         setShowModelPicker(false);
         return;
       }
-      if (key.return || key.tab) {
-        const selected = configModels[modelPickerIndex];
+      if (action.type === "select") {
+        const selected = filteredModelPickerOptions[modelPickerIndex];
         if (selected) {
           try {
             const newModel = resolveModelFromConfig(selected);
@@ -1709,6 +1796,16 @@ export default function App({
         setShowModelPicker(false);
         return;
       }
+      if (action.type === "update") {
+        setModelPickerIndex(action.selectedIndex);
+        setModelPickerFilter(action.filter);
+        return;
+      }
+      return;
+    }
+
+    if (key.escape && isRunningRef.current) {
+      abortCurrentTurn();
       return;
     }
 
@@ -1733,12 +1830,7 @@ export default function App({
       lastSigintRef.current = now;
 
       if (isRunningRef.current && abortControllerRef.current) {
-        userAbortedRef.current = true;
-        abortControllerRef.current.abort();
-        if (activeTurnRef.current) {
-          activeTurnRef.current = { ...activeTurnRef.current, status: "aborted" };
-          forceUpdate();
-        }
+        abortCurrentTurn();
       }
       return;
     }
@@ -1770,39 +1862,36 @@ export default function App({
         {configError && (
           <Text color="yellow">Warning: {configError}</Text>
         )}
-        {showModelPicker && configModels.length > 0 && (
-          <Box flexDirection="column" marginY={1} paddingLeft={2}>
-            <Text bold>Select model:</Text>
-            {configModels.map((m, idx) => (
-              <Text key={`${m.provider}-${m.model}-${idx}`} color={idx === modelPickerIndex ? "cyan" : "gray"} bold={idx === modelPickerIndex}>
-                {m.alias} ({m.provider}/{m.model})
-              </Text>
-            ))}
-          </Box>
+        {showModelPicker && (
+          <ViewportPicker
+            title="Select model:"
+            items={filteredModelPickerOptions.map((m) => ({
+              key: `${m.provider}-${m.model}`,
+              label: `${m.alias} (${m.provider}/${m.model})`,
+            }))}
+            selectedIndex={modelPickerIndex}
+            filter={modelPickerFilter}
+            terminalRows={termSize.rows}
+            reservedRows={pickerReservedRows}
+            emptyMessage="No models match."
+          />
         )}
         {showSessionPicker && (
-          <Box flexDirection="column" marginY={1} paddingLeft={2}>
-            <Text bold>Select session:</Text>
-            {sessionPickerFilter && (
-              <Text dimColor>Filter: {sessionPickerFilter}</Text>
-            )}
-            {filteredSessionPickerOptions.length === 0 && (
-              <Text color="gray">No sessions match.</Text>
-            )}
-            {filteredSessionPickerOptions.map((s, idx) => {
-              const isCurrent = s.sessionId === sessionIdRef.current;
-              const marker = isCurrent ? "● " : "  ";
-              return (
-                <Text
-                  key={`${s.sessionId}-${idx}`}
-                  color={idx === sessionPickerIndex ? "cyan" : "gray"}
-                  bold={idx === sessionPickerIndex || isCurrent}
-                >
-                  {marker}{s.sessionId} · {s.created.slice(0, 10)} · {s.model} · {s.turnCount}t · {s.status}
-                </Text>
-              );
-            })}
-          </Box>
+          <ViewportPicker
+            title="Select session:"
+            items={filteredSessionPickerOptions.map((s) => ({
+              key: s.sessionId,
+              label: `${s.sessionId === sessionIdRef.current ? "● " : "  "}${s.sessionId} · ${s.created.slice(0, 10)} · ${s.model} · ${s.turnCount}t · ${s.status}`,
+            }))}
+            selectedIndex={sessionPickerIndex}
+            filter={sessionPickerFilter}
+            terminalRows={termSize.rows}
+            reservedRows={pickerReservedRows}
+            emptyMessage="No sessions match."
+          />
+        )}
+        {abortStatusMessage && (
+          <Text color="gray" italic>{abortStatusMessage}</Text>
         )}
       </Box>
       {selectionMode && (
@@ -1813,7 +1902,14 @@ export default function App({
         </Box>
       )}
       {!showSessionPicker && (
-        <PromptInput onSubmit={handleSubmit} history={inputHistory} commands={slashCommands} paused={selectionMode} />
+        <PromptInput
+          onSubmit={handleSubmit}
+          history={inputHistory}
+          commands={slashCommands}
+          paused={selectionMode}
+          terminalRows={termSize.rows}
+          pickerReservedRows={pickerReservedRows}
+        />
       )}
       <StatusBar modelId={activeModel.id} status={status} usage={sessionUsage} lastCallTokens={lastCallTokens} contextWindow={activeModel.contextWindow} workspace={paths.home} />
     </Box>

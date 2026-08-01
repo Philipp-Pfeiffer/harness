@@ -21,6 +21,7 @@ const DELIMITER = "\n";
 export type IpcHandler = (
   req: IpcRequest,
   send?: (resp: IpcResponse) => void,
+  ctx?: { signal?: AbortSignal },
 ) => Promise<IpcResponse>;
 
 /**
@@ -78,6 +79,11 @@ async function handleRequest(
   rawLine: string,
   handler: IpcHandler,
 ): Promise<void> {
+  const abortController = new AbortController();
+  const onSocketClose = () => abortController.abort();
+  socket.once("close", onSocketClose);
+  socket.once("error", onSocketClose);
+
   // `send` writes intermediate streaming events to the socket.
   const send = (resp: IpcResponse): void => {
     if (!socket.destroyed) {
@@ -88,12 +94,15 @@ async function handleRequest(
   let response: IpcResponse;
   try {
     const req = JSON.parse(rawLine) as IpcRequest;
-    response = await handler(req, send);
+    response = await handler(req, send, { signal: abortController.signal });
   } catch (err) {
     response = {
       type: "error",
       message: err instanceof Error ? err.message : String(err),
     };
+  } finally {
+    socket.off("close", onSocketClose);
+    socket.off("error", onSocketClose);
   }
 
   if (!socket.destroyed) {

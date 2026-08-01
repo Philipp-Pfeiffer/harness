@@ -113,6 +113,7 @@ export async function executeExecSync(args: {
   stdin?: string;
   timeout?: number;
   elevated?: boolean;
+  abortSignal?: AbortSignal;
 }): Promise<ExecToolResult> {
   const resolvedCwdResult = await resolveCwd(args.cwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
@@ -215,11 +216,25 @@ export async function executeExecSync(args: {
 
   return new Promise((resolvePromise) => {
     let timedOut = false;
+    let abortedByUser = false;
 
     const timeoutId = setTimeout(() => {
       timedOut = true;
       cleanup();
     }, timeoutMs);
+
+    const onUserAbort = () => {
+      if (abortedByUser || timedOut) return;
+      abortedByUser = true;
+      cleanup();
+    };
+    if (args.abortSignal) {
+      if (args.abortSignal.aborted) {
+        onUserAbort();
+      } else {
+        args.abortSignal.addEventListener("abort", onUserAbort, { once: true });
+      }
+    }
 
     child.on("exit", (code, sig) => {
       exitCode = code;
@@ -228,6 +243,7 @@ export async function executeExecSync(args: {
 
     child.on("error", (err) => {
       clearTimeout(timeoutId);
+      args.abortSignal?.removeEventListener("abort", onUserAbort);
       cleanup();
       resolvePromise({
         isError: true,
@@ -237,8 +253,15 @@ export async function executeExecSync(args: {
 
     child.on("exit", () => {
       clearTimeout(timeoutId);
+      args.abortSignal?.removeEventListener("abort", onUserAbort);
       cleanup();
-      if (timedOut) {
+      if (abortedByUser) {
+        const { stdout, stderr } = getOutput();
+        resolvePromise({
+          isError: true,
+          content: `Command aborted by user.\n${formatOutput(stdout, stderr, exitCode, signal, truncated)}`,
+        });
+      } else if (timedOut) {
         const { stdout, stderr } = getOutput();
         resolvePromise({
           isError: true,
@@ -454,7 +477,11 @@ export async function executeExecSyncWithYield(args: {
   });
 }
 
-export async function executeExec(args: ExecArgsType, logger?: (msg: string, level?: "warn" | "debug") => void): Promise<ExecToolResult> {
+export async function executeExec(
+  args: ExecArgsType,
+  logger?: (msg: string, level?: "warn" | "debug") => void,
+  abortSignal?: AbortSignal,
+): Promise<ExecToolResult> {
   if (!Value.Check(ExecArgs, args)) {
     const errors = Array.from(Value.Errors(ExecArgs, args));
     const msg = errors
@@ -498,7 +525,7 @@ export async function executeExec(args: ExecArgsType, logger?: (msg: string, lev
     }, logger);
   }
 
-  return executeExecSync(args);
+  return executeExecSync({ ...args, abortSignal });
 }
 
 export const execTool: Tool<typeof ExecArgs> = {
@@ -507,6 +534,6 @@ export const execTool: Tool<typeof ExecArgs> = {
     "Execute a CLI command. Supports pipes, redirects, globs, environment overrides, stdin, configurable timeout, PTY mode for interactive CLIs (vim, htop, claude, gemini, codex), and elevated execution via passwordless sudo. Returns combined output with exit code. Default timeout 30s, output capped at 64 KB. With yieldMs (default 10000), processes running longer than the yield threshold transition to background and return a handle for later polling. Some destructive commands (e.g. rm -rf /) are blocked.",
   parameters: ExecArgs,
   async execute(args, context) {
-    return executeExec(args, context?.logger);
+    return executeExec(args, context?.logger, context?.signal);
   },
 };

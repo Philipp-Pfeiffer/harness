@@ -23,6 +23,7 @@ import {
   countTurnsInTranscript,
   calculateTurnCost,
   extractToolData,
+  extractAssistantTextFromMessages,
   type Session,
   type SessionTurn,
 } from "../core/session.js";
@@ -244,12 +245,12 @@ export class InProcessBackend implements AgentBackend {
     messages: Message[],
     runStartMs: number,
   ): Promise<Session> {
-    const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
-    // Compaction may have replaced the messages array in-place during the
-    // turn, invalidating any numeric "before turn" index. Find the user
-    // message by reference to get the correct slice start.
     const turnStartIndex = Math.max(0, messages.indexOf(userMessage));
     const turnSlice = messages.slice(turnStartIndex);
+    const partialContent = extractAssistantTextFromMessages(turnSlice);
+    const finalMessage = result.aborted
+      ? partialContent
+      : result.finalMessage;
     const { tool_calls, tool_results } = extractToolData(turnSlice);
     const sessionTurn: SessionTurn = {
       id: randomUUID(),
@@ -282,6 +283,8 @@ export class InProcessBackend implements AgentBackend {
       model: this.modelRef.current.name,
       timestamp: new Date().toISOString(),
       messages: turnSlice,
+      aborted: result.aborted ? true : undefined,
+      truncated: result.aborted && partialContent.length > 0 ? true : undefined,
     };
     return recordTurn(entry.session, sessionTurn, this.paths);
   }

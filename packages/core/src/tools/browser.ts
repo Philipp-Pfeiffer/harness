@@ -91,6 +91,7 @@ export function createBrowserTool(opts: CreateBrowserToolOptions): Tool<typeof B
             toolCallId: context?.toolCallId,
             logger: context?.logger ?? opts.logger,
             onStatus: context?.onStatus,
+            parentSignal: context?.signal,
           },
         );
         return result.isError ? err(result.content) : ok(result.content);

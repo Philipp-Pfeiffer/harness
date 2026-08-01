@@ -52,6 +52,12 @@ export interface ToolCallContext {
   onStatus?: (status: string) => void;
   /** ID of the current tool call in the main agent loop (for trace linking). */
   toolCallId?: string;
+  /**
+   * User abort signal from the agent loop. Long-running tools should
+   * cancel in-flight work (kill subprocesses, disconnect browsers, etc.)
+   * when this signal fires.
+   */
+  signal?: AbortSignal;
 }
 
 export interface Tool<TParameters extends TSchema = TSchema> {

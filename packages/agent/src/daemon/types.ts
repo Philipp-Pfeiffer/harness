@@ -210,7 +210,7 @@ export type IpcResponse =
   | { type: "session-resumed"; sessionId: string; messageCount: number }
   | { type: "session-ended"; sessionId: string }
   | { type: "turn-event"; sessionId: string; event: TurnStreamEvent }
-  | { type: "turn-complete"; sessionId: string; finalResponse: string; info: string; turnsCompleted: number; usage?: TurnUsage }
+  | { type: "turn-complete"; sessionId: string; finalResponse: string; info: string; turnsCompleted: number; aborted?: boolean; usage?: TurnUsage }
   | { type: "config-reloaded"; ok: boolean; message?: string }
   | { type: "shutting-down" }
   | { type: "error"; message: string; sessionId?: string };
