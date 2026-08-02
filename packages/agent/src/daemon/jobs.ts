@@ -186,7 +186,7 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
   if (agent !== undefined && !PROFILE_NAME_RE.test(agent)) {
     throw new CronJobParseError(
       filePath,
-      `invalid agent "${agent}" — must be a profile name (lowercase-hyphenated, e.g. "distillation")`,
+      `invalid agent "${agent}" — must be a profile name (lowercase-hyphenated, e.g. "distillation-daily")`,
     );
   }
 

@@ -114,21 +114,19 @@ Profile bestimmen System-Prompt, Modell/Thinking und Tool-Allowlist einer Sessio
 
 ```
 ---
-name: distillation
+name: distillation-daily
 model: minimax/MiniMax-M2.7
-thinking: true
-tools: readFile, exec
-memory: core, notes
+thinking: false
+tools: readFile, write
+memory: notes
 skills: false
-temperature: 0.7
-maxTokens: 4096
 ---
 Persona-Prompt …
 ```
 
 - Frontmatter (alle außer `name` optional): `model` (`provider/model-id`), `thinking`, `tools` (Allowlist; absent = alle), `memory` (Zonen `core`|`notes`; absent = alle; `search_memory` + Ambient Hints brauchen `notes`), `skills` (Hot-Set-Block im Prompt, Default true), `temperature`/`maxTokens`.
 - Body = Persona. Finaler Prompt: `base-prompt.md` (bare Runtime-Konventionen) + Persona + `<core_memory>` (Zone `core`) + Skill-Hot-Set (`skills: true`).
-- Loader (`loadAgentProfiles`): validiert, sammelt Fehler, wirft nie. Built-in-Profile: `default` (bisheriger Main-Agent-Prompt) und `distillation` (Stub).
+- Loader (`loadAgentProfiles`): validiert, sammelt Fehler, wirft nie. Built-in-Profile: `default`, `distillation-daily`, `distillation-wiki`, `session-end`, `curator-stage1`, `curator-stage2` (siehe `packages/agent/agents/`).
 - IPC `create-session` nimmt optional `profile: <name>`; unbekanntes Profil → sauberer `error`-Response. Das Profil wird im Session-Index persistiert und beim Resume wiederhergestellt.
 - Pro Profil wird lazily ein eigener Agent (Prompt, Modell, Tool-Subset) erzeugt und gecacht; Sessions ohne Profilangabe laufen exakt wie bisher über den Shared-Agent des `default`-Profils.
 

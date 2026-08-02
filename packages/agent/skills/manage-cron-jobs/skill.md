@@ -85,7 +85,7 @@ name: distill-notes
 schedule: 0 5 * * *
 enabled: true
 type: agent
-agent: distillation
+agent: distillation-daily
 ---
 Distill this week's notes into long-term memory entries.
 ```

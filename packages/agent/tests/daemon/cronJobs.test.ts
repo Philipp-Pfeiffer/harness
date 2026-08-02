@@ -159,11 +159,11 @@ describe("parseCronJobFile", () => {
     const job = parseCronJobFile(
       "/jobs/profiled.md",
       jobFile(
-        "name: p\nschedule: 0 0 * * *\ntype: agent\nagent: distillation",
+        "name: p\nschedule: 0 0 * * *\ntype: agent\nagent: distillation-daily",
         "prompt",
       ),
     );
-    expect(job.agent).toBe("distillation");
+    expect(job.agent).toBe("distillation-daily");
   });
 
   it("defaults agent to undefined when absent", () => {

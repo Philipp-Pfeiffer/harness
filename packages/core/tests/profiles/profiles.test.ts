@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   parseAgentProfileFile,
@@ -298,5 +299,34 @@ describe("loadAgentProfiles", () => {
       vars: { inboxPath: "/h/memory/_inbox.md" },
     });
     expect(result.profiles[0]!.body).toBe("Inbox at /h/memory/_inbox.md.");
+  });
+
+  it("loads all shipped built-in profiles without errors", async () => {
+    const builtinAgentsDir = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "..",
+      "agent",
+      "agents",
+    );
+    const result = await loadAgentProfiles({
+      profilesDir: join(baseDir, "empty-user-agents"),
+      builtinDir: builtinAgentsDir,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.profiles.map((p) => p.name).sort()).toEqual([
+      "browser",
+      "curator-stage1",
+      "curator-stage2",
+      "default",
+      "distillation-daily",
+      "distillation-wiki",
+      "session-end",
+    ]);
+    for (const profile of result.profiles) {
+      expect(profile.body.length).toBeGreaterThan(0);
+      expect(profile.builtin).toBe(true);
+    }
   });
 });
