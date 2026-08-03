@@ -191,6 +191,26 @@ function extractUserText(msg: Message): string {
   return "";
 }
 
+/** Ephemeral user message inserted after the triggering user turn — not persisted. */
+function injectMemoryHintMessage(
+  messages: Message[],
+  anchorUserMessage: Message,
+  hintBlock: string,
+): Message[] {
+  const idx = messages.indexOf(anchorUserMessage);
+  if (idx === -1) return messages;
+  const hintMessage: Message = {
+    role: "user",
+    content: hintBlock,
+    timestamp: Date.now(),
+  };
+  return [
+    ...messages.slice(0, idx + 1),
+    hintMessage,
+    ...messages.slice(idx + 1),
+  ];
+}
+
 function createToolResultMessage(
   toolCall: PiToolCall,
   result: string,
@@ -383,7 +403,8 @@ export function createAgent(config: AgentConfig): Agent {
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
       const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender } = options;
-      let effectiveSystemPrompt = systemPrompt;
+      let memoryHintAnchor: Message | undefined;
+      let memoryHintBlock: string | undefined;
 
       // Session scope for per-session tool state (read-before-edit guard).
       // Explicit sessionId wins; the daemon's per-run compaction options
@@ -412,16 +433,25 @@ export function createAgent(config: AgentConfig): Agent {
             const hints = await memoryBackend.getAmbientHints(query);
             const hintBlock = formatMemoryHint(hints);
             if (hintBlock) {
-              effectiveSystemPrompt = `${systemPrompt}\n\n${hintBlock}`;
+              memoryHintAnchor = messages[lastUserIndex];
+              memoryHintBlock = hintBlock;
             }
           }
         }
       }
 
       const context: PiContext = {
-        systemPrompt: effectiveSystemPrompt,
+        systemPrompt,
         messages,
         tools: tools.map(toPiTool),
+      };
+
+      const llmContext = (): PiContext => {
+        if (!memoryHintAnchor || !memoryHintBlock) return context;
+        return {
+          ...context,
+          messages: injectMemoryHintMessage(context.messages, memoryHintAnchor, memoryHintBlock),
+        };
       };
 
       let totalInput = 0;
@@ -454,7 +484,7 @@ export function createAgent(config: AgentConfig): Agent {
 
         // Auto-compaction: if messages exceed threshold, compact before LLM call.
         if (compaction && Date.now() >= compactionCooldownUntil) {
-          if (shouldCompact(context.messages, resolvedModel, compaction.threshold, effectiveSystemPrompt, tools.map(toPiTool))) {
+          if (shouldCompact(context.messages, resolvedModel, compaction.threshold, systemPrompt, tools.map(toPiTool))) {
             const compactionResult = await compactSession(context.messages, {
               model: resolvedModel,
               paths: compaction.paths,
@@ -497,7 +527,7 @@ export function createAgent(config: AgentConfig): Agent {
           const timeoutController = new TimeoutController(effectiveRetryPolicy.timeoutMs, signal, internalAbortSignal);
 
           try {
-            const eventStream = stream(resolvedModel, context, { ...streamOptions, signal: timeoutController.signal });
+            const eventStream = stream(resolvedModel, llmContext(), { ...streamOptions, signal: timeoutController.signal });
 
             for await (const event of eventStream) {
               timeoutController.reset(); // inactivity timer — reset on every chunk

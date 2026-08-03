@@ -42,6 +42,7 @@ import {
   type Tool,
   type AgentProfile,
   type MemoryZone,
+  type MemoryBackend,
   type Logger,
 } from "@harness/core";
 import { processSupervisor } from "@harness/core";
@@ -411,10 +412,7 @@ export class DaemonRuntime {
     try {
       await this.loadDaemonConfig();
 
-      // Re-apply hot-reloadable settings
-      if (this.memoryService && this.config.memory.ambientHints === false) {
-        log.info("ambient hints disabled — will take effect on next turn");
-      }
+      // Re-apply hot-reloadable settings (ambientHints checked per turn via ambientMemoryBackend)
 
       // Adjust heartbeat
       if (this.heartbeatTimer && this.config.heartbeatIntervalSec === 0) {
@@ -853,9 +851,7 @@ export class DaemonRuntime {
             const result = await agent.run(messages, {
               signal: ctx?.signal,
               metricsRecorder: entry.metricsRecorder,
-              memoryBackend: turnCtx.memoryZones.includes("notes")
-                ? this.memoryService?.getBackend()
-                : undefined,
+              memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
               compaction: {
                 paths: this.paths,
                 sessionId,
@@ -1353,9 +1349,7 @@ export class DaemonRuntime {
 
     const result = await turnCtx.agent.run(entry.messages, {
       metricsRecorder: entry.metricsRecorder,
-      memoryBackend: turnCtx.memoryZones.includes("notes")
-        ? this.memoryService?.getBackend()
-        : undefined,
+      memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
       compaction: {
         paths: this.paths,
         sessionId,
@@ -1866,6 +1860,13 @@ export class DaemonRuntime {
       return { ...turnCtx, model: turnModel };
     }
     return turnCtx;
+  }
+
+  /** Ambient L2 hints — gated by config and profile memory zone. */
+  private ambientMemoryBackend(memoryZones: MemoryZone[]): MemoryBackend | undefined {
+    if (!this.config.memory.ambientHints) return undefined;
+    if (!memoryZones.includes("notes")) return undefined;
+    return this.memoryService?.getBackend() ?? undefined;
   }
 
   /**

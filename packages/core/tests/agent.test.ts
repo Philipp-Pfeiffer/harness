@@ -1169,11 +1169,15 @@ describe("Agent", () => {
       };
     }
 
-    it("appends memory_hint to systemPrompt when hits exist", async () => {
+    it("injects memory_hint as ephemeral user message when hits exist", async () => {
+      const basePrompt = "You are a test agent";
       const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
       vi.mocked(stream).mockImplementationOnce((_, context) => {
-        expect(context.systemPrompt).toContain("<memory_hint>");
-        expect(context.systemPrompt).toContain("Architecture Notes");
+        expect(context.systemPrompt).toBe(basePrompt);
+        expect(context.messages).toHaveLength(2);
+        expect(context.messages[1].role).toBe("user");
+        expect(context.messages[1].content).toContain("<memory_hint>");
+        expect(context.messages[1].content).toContain("Architecture Notes");
         return mockStream(mockResponse);
       });
 
@@ -1181,7 +1185,7 @@ describe("Agent", () => {
         { title: "Architecture Notes", path: "/proj/memory/arch.md", score: 0.92, snippet: "Use MVC" },
       ]);
 
-      const agent = createAgent({ tools: [], model });
+      const agent = createAgent({ tools: [], model, systemPrompt: basePrompt });
       const history: Message[] = [makeUserMessage("Tell me about architecture")];
       const result = await agent.run(history, { memoryBackend: backend });
 
@@ -1222,7 +1226,7 @@ describe("Agent", () => {
       expect(result.aborted).toBe(false);
     });
 
-    it("does not mutate the passed messages array via ambient injection", async () => {
+    it("does not persist ambient hint in the passed messages array", async () => {
       const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
       vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse));
 
@@ -1240,12 +1244,12 @@ describe("Agent", () => {
       expect(history[0]).toBe(userMsg);
       expect((history[0] as any).content).toBe("Tell me about architecture");
 
-      // No memory-hint message injected; only normal assistant response appended
+      // Hint is ephemeral — not persisted; only assistant response appended
       expect(history).toHaveLength(2);
       expect(history[1].role).toBe("assistant");
     });
 
-    it("preserves multimodal user messages unchanged", async () => {
+    it("preserves multimodal user messages unchanged in persisted history", async () => {
       const mockResponse = makeAssistantMessage([{ type: "text", text: "Hello!" }], "stop");
       let capturedContext: any;
       vi.mocked(stream).mockImplementationOnce((_, context) => {
@@ -1270,16 +1274,19 @@ describe("Agent", () => {
 
       await agent.run(history, { memoryBackend: backend });
 
-      // messages array must be reference-identical and unchanged
-      expect(capturedContext.messages).toBe(history);
-      expect(capturedContext.messages[0]).toBe(userMsg);
-      expect((capturedContext.messages[0] as any).content).toEqual([
+      // Persisted history: original user message unchanged
+      expect(history[0]).toBe(userMsg);
+      expect((history[0] as any).content).toEqual([
         { type: "text", text: "Describe this image" },
         { type: "image", data: "base64abc", mimeType: "image/png" },
       ]);
 
-      // hint lives only in systemPrompt
-      expect(capturedContext.systemPrompt).toContain("<memory_hint>");
+      // LLM context: hint injected after the multimodal user message
+      expect(capturedContext.systemPrompt).not.toContain("<memory_hint>");
+      expect(capturedContext.messages).toHaveLength(2);
+      expect(capturedContext.messages[0]).toBe(userMsg);
+      expect(capturedContext.messages[1].role).toBe("user");
+      expect(capturedContext.messages[1].content).toContain("<memory_hint>");
     });
 
     it("latency discipline: uses getAmbientHints, not search", async () => {

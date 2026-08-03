@@ -39,7 +39,7 @@ export interface AmbientHint {
 }
 
 /**
- * Formats ambient hints into a <memory_hint> block for ephemeral injection.
+ * Formats ambient hints into a <memory_hint> block for ephemeral message injection.
  *
  * Tiered formatting (per ADR):
  * - Top-1: Title + Path + Snippet (if present)

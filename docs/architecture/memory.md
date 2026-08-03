@@ -266,13 +266,13 @@ Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unveränder
 2. **Retrieval:** `memoryBackend.getAmbientHints(query, { k: 3, minCosine: 0.5 })` → `store.searchVector(query, { limit: 3 })`.
 3. **Filter:** Treffer mit Cosine-Score < 0.5 werden verworfen.
 4. **Formatierung:** `formatMemoryHint(hits)` baut den `<memory_hint>`-Block (tiered: Top-1 mit Snippet, Top-2/3 ohne).
-5. **Injektion:** Der Block wird **ephemer an den per-call `systemPrompt` angehängt**. Die `messages`-Liste wird weder mutiert noch kopiert noch umgebaut.
+5. **Injektion:** Der Block wird als **ephemere User-Message** direkt nach der auslösenden User-Message in den LLM-Context eingefügt. `systemPrompt` bleibt byte-identisch. Die persistierte `messages`-History wird nicht mutiert.
 
 ### Design-Entscheidungen
 
 | Aspekt | Entscheidung | Begründung |
 |--------|-------------|------------|
-| Injection-Ziel | `systemPrompt` (per-call) | Keine Mutation der History, keine consecutive-user-Messages, native Multimodalität bleibt erhalten |
+| Injection-Ziel | Ephemere User-Message nach dem Trigger-Turn | System-Prompt-Prefix bleibt cache-stabil; Hint nicht in Session-History |
 | L2 Modus | `searchVector` (vector-only) | < 100 ms/Turn, kein LLM-Rerank, kein Query-Expansion |
 | Threshold | `minCosine = 0.5` | QMD `score = 1 - bestDist` = roher Cosine. 0.5 = 60° Winkel, filtert schwache Treffer |
 | Snippet | Top-1 nur, aus `body` | Phase-A-Limitation: Chunk-Text nicht direkt verfügbar; `body` kann Titel duplizieren |
@@ -311,7 +311,7 @@ Das Interface `MemoryBackend` und die Klasse `MemoryService` bleiben unveränder
 | Retrieval | Vector-only | BM25 + Vector + Reciprocal Rank Fusion |
 | LLM-Calls | 0 | 0 (keine Expansion, kein Rerank) |
 | Top-K | 3 | 10 |
-| Output | Ephememer `<memory_hint>`-Block im System-Prompt | Tool-Result-Message mit strukturiertem Text |
+| Output | Ephemere `<memory_hint>`-User-Message im LLM-Context | Tool-Result-Message mit strukturiertem Text |
 | Latenz | < 100 ms (nach Cold-Start) | < 200 ms (BM25 + vector parallel, keine LLM-Calls) |
 
 ### Output-Format
