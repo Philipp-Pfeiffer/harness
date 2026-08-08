@@ -46,6 +46,7 @@ import {
   type Logger,
 } from "@harness/core";
 import { processSupervisor } from "@harness/core";
+import { buildStatusSummary, formatStatusSummary } from "../core/statusSummary.js";
 import { loadCoreMemoryRaw } from "../core/coreMemory.js";
 import { composeProfilePrompt } from "../core/profilePrompt.js";
 import { MemoryService } from "../core/memoryService.js";
@@ -59,6 +60,7 @@ import {
   listSessions,
   countTurnsInTranscript,
   markActiveSessionsIdle,
+  setSessionModelRef,
   extractToolData,
   extractAssistantTextFromMessages,
   type Session,
@@ -90,6 +92,7 @@ import { createWhatsAppPlugin } from "../whatsapp/plugin.js";
 import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
 import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
+import { channelAddendum } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import type { ChannelPlugin } from "./types.js";
 
@@ -572,6 +575,8 @@ export class DaemonRuntime {
             model: sessionModelLabel,
             title,
             profile: profile.name,
+            origin,
+            modelRef: storedModelRef,
           });
           const entry = this.createSessionEntry(session, origin, title, profile.name, storedModelRef);
           this.sessions.set(session.id, entry);
@@ -619,7 +624,7 @@ export class DaemonRuntime {
             summaries.push({
               sessionId: idx.sessionId,
               title: idx.title,
-              origin: "api", // Origin not persisted yet — default
+              origin: idx.origin ?? "api", // Old sessions have no persisted origin — default
               status: idx.status,
               createdAt: idx.created,
               lastActiveAt: idx.lastActivity,
@@ -663,9 +668,10 @@ export class DaemonRuntime {
           }
           const entry = this.createSessionEntry(
             loaded.session,
-            "api",
+            loaded.session.origin ?? "api",
             loaded.session.title,
             loaded.session.profile ?? "default",
+            loaded.session.modelRef ?? this.inferModelRefFromSessionLabel(loaded.session.model),
           );
           entry.session = { ...entry.session, status: "active" };
           entry.messages = loaded.turns.length > 0
@@ -736,10 +742,10 @@ export class DaemonRuntime {
               }
               entry = this.createSessionEntry(
                 loaded.session,
-                "api",
+                loaded.session.origin ?? "api",
                 loaded.session.title,
                 loaded.session.profile ?? "default",
-                this.inferModelRefFromSessionLabel(loaded.session.model),
+                loaded.session.modelRef ?? this.inferModelRefFromSessionLabel(loaded.session.model),
               );
               entry.session = { ...entry.session, status: "active" };
               entry.messages = loaded.turns.length > 0
@@ -858,6 +864,7 @@ export class DaemonRuntime {
                 threshold: DEFAULT_COMPACTION_THRESHOLD,
               },
               mailbox: entry.mailbox,
+              systemPromptAddendum: channelAddendum(entry.origin),
               onEvent: (event) => {
                 if (!send) return;
                 let streamEvent: TurnStreamEvent | null = null;
@@ -1290,6 +1297,13 @@ export class DaemonRuntime {
         checkToolExecuted: (sessionId) => {
           return this.checkWhatsAppToolExecuted(sessionId);
         },
+        executeCommand: async (sessionId, text) => {
+          const result = await this.handleChannelSlashCommand(sessionId, text);
+          if (result === null) {
+            return { response: "Unknown command. Type /help to see available commands." };
+          }
+          return result;
+        },
       },
     });
 
@@ -1320,7 +1334,8 @@ export class DaemonRuntime {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    const turnCtx = this.agentContextFor(this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!);
+    let turnCtx = this.agentContextFor(this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!);
+    turnCtx = this.applyTurnModel(turnCtx, entry.modelRef);
 
     // Build the user message with optional image content blocks
     let userContent: string | Array<{ type: string; text?: string; source?: { type: "base64"; mediaType: string; data: string } }> = text;
@@ -1357,6 +1372,7 @@ export class DaemonRuntime {
       },
       mailbox: entry.mailbox,
       channelFileSender: this.channelFileSender,
+      systemPromptAddendum: channelAddendum(entry.origin),
     });
 
     entry.turnsCompleted++;
@@ -1442,9 +1458,10 @@ export class DaemonRuntime {
         if (loaded && loaded.session.status !== "ended") {
           const entry = this.createSessionEntry(
             loaded.session,
-            "whatsapp" as SessionOrigin,
+            loaded.session.origin ?? ("whatsapp" as SessionOrigin),
             `WhatsApp: ${phone}`,
             loaded.session.profile ?? "default",
+            loaded.session.modelRef,
           );
           entry.session = { ...entry.session, status: "active" };
           entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
@@ -1478,9 +1495,10 @@ export class DaemonRuntime {
           if (loaded) {
             const entry = this.createSessionEntry(
               loaded.session,
-              "whatsapp" as SessionOrigin,
+              loaded.session.origin ?? ("whatsapp" as SessionOrigin),
               expectedTitle,
               loaded.session.profile ?? "default",
+              loaded.session.modelRef,
             );
             entry.session = { ...entry.session, status: "active" };
             entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
@@ -1526,6 +1544,7 @@ export class DaemonRuntime {
     const session = await createSession(this.paths, {
       model: this.model?.name ?? "unknown",
       title: expectedTitle,
+      origin: "whatsapp",
     });
     const entry = this.createSessionEntry(session, "whatsapp" as SessionOrigin, expectedTitle);
     this.sessions.set(session.id, entry);
@@ -1870,33 +1889,122 @@ export class DaemonRuntime {
   }
 
   /**
-   * Daemon-side slash command handling for submit-turn.
-   *
-   * These commands are interpreted in the daemon (not the client) so they
-   * work identically across all gateways (TUI, WhatsApp, etc.).
+   * Channel-agnostic slash command handler. Returns a response string
+   * and optionally a new session ID (when /new or /resume changes the
+   * session). Returns null if the text is not a recognized slash command.
    *
    * Supported commands:
+   *   /help     — List all available commands.
+   *   /status   — Show daemon + session status including active model.
+   *   /model    — List available models (active one marked).
+   *   /model <alias|model|provider/model> — Switch model for current session.
    *   /new      — End current session, create a new one.
+   *   /end      — End the current session explicitly.
    *   /sessions — List all sessions.
    *   /resume <id> — Resume a specific session.
-   *   /end      — End the current session explicitly.
-   *
-   * Returns an IpcResponse if the command was handled, or null if the
-   * text is not a recognized slash command (caller continues with normal
-   * turn processing).
+   *   /compact  — Manually trigger context compaction.
    */
-  private async tryHandleSlashCommand(
-    text: string,
+  async handleChannelSlashCommand(
     sessionId: string,
-    send?: (resp: IpcResponse) => void,
-  ): Promise<IpcResponse | null> {
+    text: string,
+  ): Promise<{ response: string; newSessionId?: string } | null> {
     const trimmed = text.trim();
 
+    // /help — list all available commands
+    if (trimmed === "/help") {
+      return {
+        response: [
+          "Commands:",
+          "/help — Show this list",
+          "/status — Daemon status + active model",
+          "/model — List available models",
+          "/model <name|alias|provider/model> — Switch model",
+          "/new — Start a fresh session",
+          "/end — End current session",
+          "/sessions — List all sessions",
+          "/resume <id> — Resume a session",
+          "/compact — Compact context window",
+        ].join("\n"),
+      };
+    }
+
+    // /status — daemon + session status
+    if (trimmed === "/status" || trimmed.startsWith("/status ")) {
+      const entry = this.sessions.get(sessionId);
+      const activeModel = entry?.session.model ?? this.model?.name ?? "unknown";
+      const modelRefLabel = entry?.modelRef ? ` (ref: ${entry.modelRef})` : "";
+      const summary = await buildStatusSummary({
+        sessionState: entry ? "active" : "ready",
+        model: `${activeModel}${modelRefLabel}`,
+        workspace: process.cwd(),
+        sessionId,
+        memoryReady: this.memoryService ? !this.memoryService.degraded : false,
+        toolCalls: entry?.turnsCompleted ?? 0,
+        errors: this.errorBuffer.snapshot().length,
+        daemon: {
+          pid: process.pid,
+          uptimeSeconds: Math.floor((Date.now() - this.startMs) / 1000),
+          gateways: [...this.gateways.keys()].join(", ") || "none",
+        },
+      });
+      return { response: formatStatusSummary(summary) };
+    }
+
+    // /model — list models
+    if (trimmed === "/model") {
+      const entry = this.sessions.get(sessionId);
+      const activeRef = entry?.modelRef ?? entry?.session.model ?? this.model?.name ?? "";
+      if (this.configModels.length === 0) {
+        return { response: `Active model: ${activeRef}\nNo other models configured.` };
+      }
+      const lines = this.configModels.map((m, i) => {
+        const label = m.alias || `${m.provider}/${m.model}`;
+        const isActive = m.alias === activeRef || m.model === activeRef || `${m.provider}/${m.model}` === activeRef;
+        const marker = isActive ? " *" : "  ";
+        return `${marker} ${i + 1}. ${label} (${m.provider}/${m.model})`;
+      });
+      return { response: `Models (${this.configModels.length}):\n${lines.join("\n")}\n\nUse /model <name|alias|provider/model> to switch.` };
+    }
+
+    // /model <ref> — switch model
+    const modelMatch = trimmed.match(/^\/model\s+(.+)/);
+    if (modelMatch) {
+      const ref = modelMatch[1]!.trim();
+      const entry = this.sessions.get(sessionId);
+      const match = this.configModels.find(
+        (m) => m.alias === ref || m.model === ref || `${m.provider}/${m.model}` === ref,
+      );
+      if (!match) {
+        const names = this.configModels.map((m) => m.alias || `${m.provider}/${m.model}`).join(", ");
+        return { response: `Unknown model: "${ref}".\nAvailable: ${names}` };
+      }
+      const resolved = resolveModelFromConfig(match);
+      if (entry) {
+        entry.modelRef = ref;
+        entry.session = await setSessionModelRef(entry.session, ref, this.paths);
+        const log = this.logger.child("session");
+        log.info("model switched via /model", { sessionId, model: ref });
+      }
+      return { response: `Model switched to: ${match.alias || `${match.provider}/${match.model}`} (${resolved.name})` };
+    }
+
+    // Delegate to session commands
+    return this.executeSessionSlashCommand(trimmed, sessionId);
+  }
+
+  /**
+   * Session-scoped slash commands shared by IPC and channel paths.
+   * Returns {response} for success, or null if not a recognized command.
+   */
+  private async executeSessionSlashCommand(
+    trimmed: string,
+    sessionId: string,
+  ): Promise<{ response: string; newSessionId?: string } | null> {
     // /new — end current session, start a new one
     if (trimmed === "/new") {
-      // Read origin before deleting the session entry
       const entry = this.sessions.get(sessionId);
       const oldOrigin = entry?.origin ?? "api";
+      const oldTitle = entry?.title ?? "Channel Session";
       if (entry) {
         entry.session = await endSession(entry.session, this.paths);
         this.sessions.delete(sessionId);
@@ -1904,22 +2012,25 @@ export class DaemonRuntime {
         const loaded = await loadSession(sessionId, this.paths);
         if (loaded) await endSession(loaded.session, this.paths);
       }
-      // Create new session
       const session = await createSession(this.paths, {
         model: this.model?.name ?? "unknown",
-        title: "IPC Session",
+        title: oldTitle,
+        origin: oldOrigin,
       });
-      const newEntry = this.createSessionEntry(session, oldOrigin, "IPC Session");
+      const newEntry = this.createSessionEntry(session, oldOrigin, oldTitle);
       this.sessions.set(session.id, newEntry);
       const log = this.logger.child("session");
       log.info("session created via /new", { oldId: sessionId, newId: session.id });
-      return {
-        type: "turn-complete",
-        sessionId: session.id,
-        finalResponse: `Started new session: ${session.id}`,
-        info: "/new",
-        turnsCompleted: 0,
-      };
+
+      // Update WhatsApp session mapping if this is a WhatsApp session
+      const phone = this.whatsappSessionToSource.get(sessionId);
+      if (phone) {
+        this.whatsappSessionToSource.delete(sessionId);
+        this.whatsappSessionToSource.set(session.id, phone);
+        this.whatsappSessions.set(phone, session.id);
+      }
+
+      return { response: `Started new session: ${session.id}`, newSessionId: session.id };
     }
 
     // /end — end the current session explicitly
@@ -1934,13 +2045,15 @@ export class DaemonRuntime {
       }
       const log = this.logger.child("session");
       log.info("session ended via /end", { id: sessionId });
-      return {
-        type: "turn-complete",
-        sessionId,
-        finalResponse: "Session ended. Type a message to start a new session.",
-        info: "/end",
-        turnsCompleted: 0,
-      };
+
+      // Cleanup WhatsApp mapping
+      const phone = this.whatsappSessionToSource.get(sessionId);
+      if (phone) {
+        this.whatsappSessionToSource.delete(sessionId);
+        this.whatsappSessions.delete(phone);
+      }
+
+      return { response: "Session ended. Send any message to start a new session." };
     }
 
     // /sessions — list all sessions
@@ -1968,7 +2081,7 @@ export class DaemonRuntime {
         summaries.push({
           sessionId: idx.sessionId,
           title: idx.title,
-          origin: "api",
+          origin: idx.origin ?? "api",
           status: idx.status,
           createdAt: idx.created,
           lastActiveAt: idx.lastActivity,
@@ -1988,13 +2101,7 @@ export class DaemonRuntime {
         ? `Sessions:\n${lines.map((l) => `  ${l}`).join("\n")}`
         : "No sessions found.";
 
-      return {
-        type: "turn-complete",
-        sessionId,
-        finalResponse: text,
-        info: "/sessions",
-        turnsCompleted: this.sessions.get(sessionId)?.turnsCompleted ?? 0,
-      };
+      return { response: text };
     }
 
     // /resume <id> — resume a specific session
@@ -2002,46 +2109,41 @@ export class DaemonRuntime {
     if (resumeMatch) {
       const targetId = resumeMatch[1]!;
 
-      // End the current session
       const currentEntry = this.sessions.get(sessionId);
+      const oldPhone = this.whatsappSessionToSource.get(sessionId);
       if (currentEntry) {
         currentEntry.session = await endSession(currentEntry.session, this.paths);
         this.sessions.delete(sessionId);
       }
+      if (oldPhone) {
+        this.whatsappSessionToSource.delete(sessionId);
+      }
 
-      // Resume the target session
       if (this.sessions.has(targetId)) {
         const entry = this.sessions.get(targetId)!;
+        if (oldPhone) {
+          this.whatsappSessionToSource.set(targetId, oldPhone);
+          this.whatsappSessions.set(oldPhone, targetId);
+        }
         return {
-          type: "turn-complete",
-          sessionId: targetId,
-          finalResponse: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
-          info: "/resume",
-          turnsCompleted: entry.turnsCompleted,
+          response: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
+          newSessionId: targetId,
         };
       }
 
       const loaded = await loadSession(targetId, this.paths);
       if (!loaded) {
-        return {
-          type: "error",
-          message: `Session not found: ${targetId}`,
-          sessionId,
-        };
+        return { response: `Session not found: ${targetId}` };
       }
       if (loaded.session.status === "ended") {
-        return {
-          type: "error",
-          message: `Session ${targetId} is ended and cannot be resumed.`,
-          sessionId,
-        };
+        return { response: `Session ${targetId} is ended and cannot be resumed.` };
       }
       const entry = this.createSessionEntry(
         loaded.session,
-        "api",
+        loaded.session.origin ?? "api",
         loaded.session.title,
         loaded.session.profile ?? "default",
-        this.inferModelRefFromSessionLabel(loaded.session.model),
+        loaded.session.modelRef ?? this.inferModelRefFromSessionLabel(loaded.session.model),
       );
       entry.session = { ...entry.session, status: "active" };
       entry.messages = loaded.turns.length > 0 ? turnsToMessages(loaded.turns) : [];
@@ -2049,12 +2151,14 @@ export class DaemonRuntime {
       const log = this.logger.child("session");
       log.info("session resumed via /resume", { id: targetId });
 
+      if (oldPhone) {
+        this.whatsappSessionToSource.set(targetId, oldPhone);
+        this.whatsappSessions.set(oldPhone, targetId);
+      }
+
       return {
-        type: "turn-complete",
-        sessionId: targetId,
-        finalResponse: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
-        info: "/resume",
-        turnsCompleted: entry.turnsCompleted,
+        response: `Resumed session: ${targetId} (${entry.messages.length} messages)`,
+        newSessionId: targetId,
       };
     }
 
@@ -2062,18 +2166,57 @@ export class DaemonRuntime {
     if (trimmed === "/compact") {
       const entry = this.sessions.get(sessionId);
       if (!entry) {
-        return {
-          type: "error",
-          message: "No active session to compact.",
-          sessionId,
-        };
+        return { response: "No active session to compact." };
       }
       if (!this.model) {
+        return { response: "Model not initialized." };
+      }
+
+      const tokensBefore = estimateTokens(entry.messages);
+      const compactResult = await compactSession(entry.messages, {
+        model: this.model,
+        paths: this.paths,
+        sessionId,
+      });
+
+      if (compactResult.performed) {
+        entry.messages = compactResult.messages;
+        const tokensAfter = estimateTokens(entry.messages);
         return {
-          type: "error",
-          message: "Model not initialized.",
-          sessionId,
+          response: `Compacted ${compactResult.compactedTurnCount} messages.\nTokens: ${tokensBefore} → ${tokensAfter}\nAlt-context: ${compactResult.altContextPath}`,
         };
+      } else {
+        return {
+          response: `No compaction needed.\nTokens: ${tokensBefore}\nAlt-context: ${compactResult.altContextPath || "(none)"}`,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Daemon-side slash command handling for submit-turn (IPC path).
+   *
+   * Delegates to handleChannelSlashCommand and wraps the result in
+   * IpcResponse. Returns null for unrecognized commands so the caller
+   * continues with normal turn processing.
+   */
+  private async tryHandleSlashCommand(
+    text: string,
+    sessionId: string,
+    send?: (resp: IpcResponse) => void,
+  ): Promise<IpcResponse | null> {
+    const trimmed = text.trim();
+
+    // /compact via IPC sends streaming status events, so handle it specially
+    if (trimmed === "/compact") {
+      const entry = this.sessions.get(sessionId);
+      if (!entry) {
+        return { type: "error", message: "No active session to compact.", sessionId };
+      }
+      if (!this.model) {
+        return { type: "error", message: "Model not initialized.", sessionId };
       }
 
       send?.({ type: "turn-event", sessionId, event: { type: "status", status: "compacting" } });
@@ -2105,8 +2248,20 @@ export class DaemonRuntime {
       }
     }
 
-    void send; // send is used for streaming, not needed for slash commands
-    return null;
+    // For all other commands, delegate to the shared handler
+    const result = await this.handleChannelSlashCommand(sessionId, trimmed);
+    if (result === null) {
+      void send;
+      return null;
+    }
+
+    return {
+      type: "turn-complete",
+      sessionId: result.newSessionId ?? sessionId,
+      finalResponse: result.response,
+      info: trimmed.split(/\s+/)[0]!.replace("/", ""),
+      turnsCompleted: this.sessions.get(result.newSessionId ?? sessionId)?.turnsCompleted ?? 0,
+    };
   }
 
   private startHeartbeat(): void {

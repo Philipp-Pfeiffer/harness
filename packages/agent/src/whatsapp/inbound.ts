@@ -65,6 +65,8 @@ export interface InboundProcessorCallbacks {
   steer: (sessionId: string, text: string) => void;
   /** Check whether a tool has executed in the current turn. */
   checkToolExecuted: (sessionId: string) => boolean;
+  /** Execute a slash command and return {response, newSessionId?}. */
+  executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
 }
 
 /** Constructor options. */
@@ -94,6 +96,13 @@ export class WhatsAppInboundProcessor {
    * Main entry point. Called for each inbound event from the WhatsApp client.
    */
   async processInbound(event: ChannelInboundEvent): Promise<void> {
+    // Slash command interception: must happen BEFORE test mode and normal mode.
+    // Commands never go through the agent loop, debounce, or provenance prefix.
+    if (event.text.trimStart().startsWith("/")) {
+      await this.handleSlashCommand(event);
+      return;
+    }
+
     // Test mode: structured logging + echo, no agent turns
     if (this.testMode) {
       await this.handleTestMode(event);
@@ -102,6 +111,35 @@ export class WhatsAppInboundProcessor {
 
     // Normal mode: debounce + process
     await this.handleNormalMode(event);
+  }
+
+  // ─── Slash Commands ───
+
+  private async handleSlashCommand(event: ChannelInboundEvent): Promise<void> {
+    try {
+      // Resolve session (same logic as handleNormalMode would use)
+      let state = this.sourceStates.get(event.source);
+      const sessionId = state?.sessionId ?? await this.callbacks.resolveSession(event.source);
+      const result = await this.callbacks.executeCommand(sessionId, event.text);
+      await this.callbacks.sendOutbound(event.source, result.response);
+
+      // Update source state if the session changed
+      if (result.newSessionId && result.newSessionId !== sessionId) {
+        if (!state) {
+          state = this.sourceStates.get(event.source);
+        }
+        if (state) {
+          state.sessionId = result.newSessionId;
+        }
+      }
+    } catch (err) {
+      this.log(`Slash command failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      try {
+        await this.callbacks.sendOutbound(event.source, "Command failed. Try /help for available commands.");
+      } catch {
+        // Can't send error response
+      }
+    }
   }
 
   // ─── Test Mode ───

@@ -48,6 +48,9 @@ function createMockCallbacks() {
       sendOutbound: vi.fn(async (_target: string, _text: string) => {}),
       steer: vi.fn(),
       checkToolExecuted: vi.fn(() => toolExecuted),
+      executeCommand: vi.fn(async (_sessionId: string, _text: string) => {
+        return { response: `OK: ${_text}` };
+      }),
     },
     completeTurn: (response: string = "Agent response") => {
       resolveTurn?.({ finalResponse: response });
@@ -446,6 +449,134 @@ describe("WhatsApp Inbound Processor", () => {
       const logEntry = logCalls.find((l) => l.includes("[test] Inbound"));
       expect(logEntry).toBeDefined();
       expect(logEntry).toContain("type=sticker");
+    });
+  });
+
+  // ─── Slash Commands ───
+
+  describe("Slash Commands", () => {
+    it("intercepts /-prefixed text before normal mode", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "/help"));
+
+      // Should NOT call submitTurn
+      expect(mock.callbacks.submitTurn).not.toHaveBeenCalled();
+      // Should call executeCommand
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        "/help",
+      );
+      // Response should go through sendOutbound
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        expect.stringContaining("OK"),
+      );
+    });
+
+    it("intercepts /-prefixed text in test mode (not echo)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: true,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "/status"));
+
+      // Should NOT echo as test mode
+      expect(mock.callbacks.sendOutbound).not.toHaveBeenCalledWith(
+        "491701234567",
+        expect.stringContaining("[test]"),
+      );
+      // Should call executeCommand instead
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        "/status",
+      );
+    });
+
+    it("intercepts commands during a running turn", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Start a normal turn first
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+
+      // Now send a slash command while the turn is running
+      await processor.processInbound(createEvent("491701234567", "/model"));
+
+      // Should be handled immediately via executeCommand (no debounce, no steering)
+      expect(mock.callbacks.steer).not.toHaveBeenCalled();
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        "/model",
+      );
+      // Response should go through sendOutbound immediately
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        expect.stringContaining("OK"),
+      );
+    });
+
+    it("no provenance prefix on command text", async () => {
+      mock.callbacks.executeCommand = vi.fn(async (_sessionId: string, text: string) => {
+        // Verify the text passed has NO provenance prefix
+        return { response: `text was: ${text}` };
+      });
+
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "/model gpt-5", { senderName: "Philipp" }));
+
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        "/model gpt-5",
+      );
+    });
+
+    it("non-command messages still go through normal processing", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Just a normal message"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.executeCommand).not.toHaveBeenCalled();
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("whitespace-only text starting with / is still intercepted", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "   /help"));
+
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        expect.any(String),
+        "   /help",
+      );
+      expect(mock.callbacks.submitTurn).not.toHaveBeenCalled();
     });
   });
 });

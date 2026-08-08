@@ -57,6 +57,7 @@ export interface WhatsAppPluginOptions {
     resolveSession: (source: string) => Promise<string>;
     steer: (sessionId: string, text: string) => void;
     checkToolExecuted: (sessionId: string) => boolean;
+    executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
   };
 }
 
@@ -112,6 +113,7 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
           },
           steer: opts.callbacks.steer,
           checkToolExecuted: opts.callbacks.checkToolExecuted,
+          executeCommand: opts.callbacks.executeCommand,
         },
       });
 
