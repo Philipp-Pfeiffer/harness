@@ -120,6 +120,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Der `harness migrate-home` Command migriert Legacy-Substrat nach `$HARNESS_HOME`.
 - Siehe: `docs/architecture/topology.md`
 
+### Selbst-Modifikation
+
+Der Daemon kann sich selbst deployen und neustarten. Bei Selbst-Änderungs-Aufträgen gilt das Runbook `docs/architecture/self-modification.md` (verbindlich, hier nicht dupliziert):
+
+- Code-Änderungen nur auf Feature-Branches in Worktrees, nie auf `main` oder im Produktiv-Checkout.
+- Build/Test-Gate vor jedem Deploy; Code-Deploys nur nach Philipps Bestätigung via `/deploy <branch>`.
+- Config (`~/harness/.env`, `config.json`) autonom, Restart nur über Deferred Restart.
+- No-Gos: `kill -9` auf den Daemon, zweiter Daemon, `--reset-whatsapp-auth` (außer Nummernwechsel), Edits an `dist/`, Restart ohne grünen Build.
+
 ## Bei Unsicherheit
 
 - Frag explizit nach, statt zu spekulieren.
