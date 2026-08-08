@@ -28,7 +28,7 @@ import {
 } from "./client.js";
 import { downloadContentFromMessage } from "baileys";
 import type { DownloadableMessage } from "baileys";
-import { isWhitelisted, extractPhoneNumber } from "./whitelist.js";
+import { isWhitelisted, resolveSenderName, extractPhoneNumber } from "./whitelist.js";
 import {
   downloadMedia,
   processMediaForTurn,
@@ -266,6 +266,7 @@ async function handleInboundMessage(
   const event = await parseBaileysMessage(waMessage, effectiveJid, timestamp, opts, msg);
 
   if (event) {
+    event.senderName = resolveSenderName(effectiveJid);
     await processor.processInbound(event);
   }
 }

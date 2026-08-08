@@ -288,12 +288,17 @@ export class WhatsAppInboundProcessor {
       return;
     }
 
+    // Prepend provenance prefix so the model knows this is an external channel message
+    const senderName = events[0]?.senderName ?? source;
+    const provenancePrefix = `[WhatsApp · ${senderName}] `;
+    const prefixedText = provenancePrefix + fullText;
+
     // Start the turn
     state.turnRunning = true;
     state.turnStartMs = Date.now();
     state.hasToolExecuted = false;
     state.restartCount = 0;
-    state.currentTurnText = fullText;
+    state.currentTurnText = prefixedText;
     state.currentTurnImageBlocks = combinedImageBlocks;
     state.currentTurnAnnotations = combinedAnnotations;
     const abortController = new AbortController();
@@ -302,7 +307,7 @@ export class WhatsAppInboundProcessor {
     try {
       const result = await this.callbacks.submitTurn(
         state.sessionId,
-        fullText,
+        prefixedText,
         combinedImageBlocks,
       );
       this.handleTurnComplete(source, state, result.finalResponse);

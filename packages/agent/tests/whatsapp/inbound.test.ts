@@ -115,7 +115,7 @@ describe("WhatsApp Inbound Processor", () => {
       await vi.advanceTimersByTimeAsync(10);
 
       expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
-      expect(mock.callbacks.submitTurn.mock.calls[0]![1]).toBe("Single message");
+      expect(mock.callbacks.submitTurn.mock.calls[0]![1]).toContain("Single message");
     });
   });
 
@@ -254,7 +254,7 @@ describe("WhatsApp Inbound Processor", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(mock.callbacks.submitTurn).toHaveBeenCalledWith(
         "session-491701234567",
-        "Hello",
+        expect.stringContaining("Hello"),
         [],
       );
 
@@ -278,7 +278,7 @@ describe("WhatsApp Inbound Processor", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(mock.callbacks.submitTurn).toHaveBeenLastCalledWith(
         "session-rotated-491701234567",
-        "New message after long break",
+        expect.stringContaining("New message after long break"),
         [],
       );
     });
@@ -306,6 +306,60 @@ describe("WhatsApp Inbound Processor", () => {
       await processor.processInbound(createEvent("491701234567", "Short break message"));
 
       expect(mock.callbacks.rotateSessionForInactivity).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Provenance Prefix ───
+
+  describe("Provenance Prefix", () => {
+    it("prepends sender name prefix when senderName is set", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello", { senderName: "Philipp" }));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      const text = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
+      expect(text).toBe("[WhatsApp · Philipp] Hello");
+    });
+
+    it("falls back to source when senderName is not set", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      const text = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
+      expect(text).toBe("[WhatsApp · 491701234567] Hello");
+    });
+
+    it("prefix is preserved through debounce combination", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello", { senderName: "Philipp" }));
+      await vi.advanceTimersByTimeAsync(200);
+      await processor.processInbound(createEvent("491701234567", "World", { senderName: "Philipp" }));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      const text = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
+      expect(text).toBe("[WhatsApp · Philipp] Hello\nWorld");
     });
   });
 

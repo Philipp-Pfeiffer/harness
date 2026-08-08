@@ -140,6 +140,8 @@ export interface ChannelInboundEvent {
   channel: string;
   /** Source identifier (phone number, chat id). */
   source: string;
+  /** Display name of the sender (from whitelist map, or formatted phone number). */
+  senderName?: string;
   /** Text content for the agent turn. */
   text: string;
   /** ISO timestamp of receipt. */

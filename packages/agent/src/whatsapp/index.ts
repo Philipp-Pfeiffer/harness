@@ -7,7 +7,8 @@ export { createWhatsAppClient, createMockWhatsAppClient, baileysMessageType } fr
 export type { WhatsAppClient, WhatsAppClientOptions, BaileysMessage, ConnectionUpdate, WAMessage, DisconnectReason } from "./client.js";
 
 // Whitelist
-export { isWhitelisted, hasWhitelist, extractPhoneNumber, formatJid } from "./whitelist.js";
+export { isWhitelisted, hasWhitelist, normalizeNumber, resolveSenderName, extractPhoneNumber, formatJid } from "./whitelist.js";
+export type { WhitelistMap } from "./whitelist.js";
 
 // Media
 export {

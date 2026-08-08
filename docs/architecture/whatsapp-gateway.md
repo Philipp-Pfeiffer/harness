@@ -36,8 +36,25 @@ In `~/harness/config.json` den `daemon`-Key erweitern:
 
 | Variable | Erforderlich | Beschreibung |
 |----------|-------------|--------------|
-| `WHATSAPP_WHITELIST_NUMBER` | Ja | Whitelisted Handynummer (gleiche wie `phoneNumber`). Nachrichten von allen anderen → Silent Drop (loggen, nie antworten). |
+| `WHATSAPP_WHITELIST` | Ja* | JSON-Map `{"<Nummer>":"<Name>", ...}`. Nachrichten von Nummern in der Map → normaler Agent-Turn. Alle anderen → Silent Drop (loggen, nie antworten). Nummern werden digits-only normalisiert (ignoriert `+`, Leerzeichen, Bindestriche). |
+| `WHATSAPP_WHITELIST_NUMBER` | Ja* (Legacy) | Einzelne Whitelist-Nummer (international, `+` optional). Wird ignoriert, wenn `WHATSAPP_WHITELIST` gesetzt ist. |
 | `ASSEMBLYAI_API_KEY` | Nein | Für Voice-Nachrichten-Transkription. Fehlt → Annotation „Transkription nicht verfügbar" + Datei-Pfad. |
+
+*Entweder `WHATSAPP_WHITELIST` oder `WHATSAPP_WHITELIST_NUMBER` muss gesetzt sein.
+
+**Beispiel `WHATSAPP_WHITELIST`:**
+```bash
+WHATSAPP_WHITELIST='{"4915112345678":"Philipp","447700900123":"Anna"}'
+```
+
+## Sender-Provenienz (Provenance Prefix)
+
+Jede Inbound-Nachricht wird vor dem Agent-Turn mit einem Provenienz-Präfix versehen:
+
+- **Mit Name in der Map:** `[WhatsApp · Philipp] <nachricht>`
+- **Ohne Name (Legacy-Env):** `[WhatsApp · +491511…] <nachricht>`
+
+Das Modell erkennt so strukturell, dass die Nachricht von einem externen Channel kommt und von wem. Der Präfix wird in `WhatsAppInboundProcessor.flushDebounced()` (inbound.ts) gesetzt, also vor dem ersten Turn-Start und nach dem Debounce.
 
 ## Ersteinrichtung / Pairing
 
