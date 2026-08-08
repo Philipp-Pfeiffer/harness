@@ -1,7 +1,6 @@
 import { resolve, join, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-
 import type { Message, Model, Api } from "@mariozechner/pi-ai";
 import type { Server } from "node:net";
 
@@ -95,6 +94,14 @@ import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
 import { channelAddendum } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import type { ChannelPlugin } from "./types.js";
+import {
+  HARNESS_REPO_DIR,
+  currentGitHead,
+  readPendingRestart,
+  scheduleRestart,
+  sendRestartPing,
+} from "./selfModify.js";
+import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
 
 /**
  * Heartbeat hook — periodic self-check interface.
@@ -210,6 +217,17 @@ export class DaemonRuntime {
   /** Composed system prompt of the default profile (== this.agent's prompt). */
   private defaultPrompt = "";
 
+  /**
+   * Deferred restart requested by /deploy or /restart. Set while a turn
+   * is running so the exit happens only after the turn + response are
+   * fully sent. Guarded by selfModifyInFlight to serialize self-modification.
+   */
+  private pendingRestartReason: string | null = null;
+  /** Whether a self-modification (deploy) is currently in flight. */
+  private selfModifyInFlight = false;
+  /** Whether any turn is currently running (used to defer restarts). */
+  private turnActive = false;
+
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
     this.paths = resolveHarnessPaths();
     this.config = { ...DEFAULT_DAEMON_CONFIG, ...opts?.config };
@@ -320,16 +338,60 @@ export class DaemonRuntime {
     await this.recordDaemonMetric("daemon_start");
     log.info("daemon started", { uptime: 0 });
 
+    // Post-restart ping: if a previous run left a restart marker, report
+    // back to the requesting channel, then consume the marker. Failures
+    // are warn-logged — the marker is still removed (no retry storm).
+    const marker = await readPendingRestart();
+    if (marker) {
+      log.info("found pending restart marker", {
+        reason: marker.reason,
+        target: marker.replyTarget,
+        gitHead: marker.gitHead,
+      });
+      const plugin = this.channelPlugins.get("whatsapp");
+      if (plugin) {
+        try {
+          await sendRestartPing(marker, (target, payload) =>
+            plugin.sendMessage(target, payload),
+            (msg, level, data) => {
+              if (level === "warn") log.warn(msg, data);
+              else log.info(msg, data);
+            },
+          );
+        } catch (err) {
+          log.warn("restart ping send failed — marker already consumed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else {
+        log.warn("pending restart marker but no whatsapp plugin — marker consumed", {
+          reason: marker.reason,
+        });
+      }
+    }
+
     // Signal handlers
     process.on("SIGTERM", () => void this.shutdown("SIGTERM"));
     process.on("SIGINT", () => void this.shutdown("SIGINT"));
   }
 
   async shutdown(signal?: string): Promise<void> {
+    await this.shutdownWithExit(signal, 0);
+  }
+
+  /**
+   * Shutdown with an explicit exit code. Exit 0 = clean stop (systemd
+   * does not restart), exit 1 = deferred self-restart (systemd restarts
+   * with Restart=on-failure).
+   */
+  private async shutdownWithExit(
+    signal: string | undefined,
+    exitCode: number,
+  ): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     const log = this.logger.child("runtime");
-    log.info("daemon shutting down", { signal });
+    log.info("daemon shutting down", { signal, exitCode });
 
     const forceExit = setTimeout(() => {
       log.error("shutdown timed out — forcing exit");
@@ -398,8 +460,84 @@ export class DaemonRuntime {
       clearTimeout(forceExit);
     }
 
-    process.exit(0);
+    process.exit(exitCode);
   }
+
+  /**
+   * Deferred restart: requests a self-restart that takes effect after the
+   * current turn finishes and its final response has been sent. The marker
+   * is written first so the intent survives even a mid-shutdown crash.
+   * systemd sees exit code 1 and restarts the daemon (Restart=on-failure).
+   *
+   * @param gitHeadOverride New HEAD to record in the marker (e.g. after a
+   *   deploy merged a branch). Defaults to the current repo HEAD.
+   */
+  async requestRestartAfterTurn(
+    grund: string,
+    benachrichtigeSession?: string,
+    gitHeadOverride?: string,
+  ): Promise<void> {
+    const log = this.logger.child("self");
+    log.info("requestRestartAfterTurn", {
+      grund,
+      replyTarget: benachrichtigeSession ?? "(none)",
+    });
+
+    // Write the restart marker immediately — the shutdown path must not
+    // lose this intent if it fails partway.
+    let gitHead = gitHeadOverride ?? "";
+    if (!gitHead) {
+      try {
+        gitHead = await currentGitHead(HARNESS_REPO_DIR);
+      } catch (err) {
+        log.warn("could not read git HEAD for restart marker", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    await scheduleRestart(grund, benachrichtigeSession ?? "", gitHead);
+
+    this.pendingRestartReason = grund;
+
+    if (this.turnActive) {
+      log.info("restart deferred — turn still running", {
+        grund,
+        replyTarget: benachrichtigeSession ?? "(none)",
+      });
+      return;
+    }
+
+    // No turn running — restart now via the clean shutdown path (exit 1).
+    // Deferred to the next macrotask so the caller's response (socket
+    // write / WhatsApp outbound) can flush before the gateways stop.
+    setImmediate(() => {
+      void this.shutdownWithExit("self-restart", 1);
+    });
+  }
+
+  /**
+   * Called after a turn completes and its final response has been sent.
+   * If a deferred restart was requested, runs the same clean shutdown
+   * path as SIGTERM (suspend sessions, stop gateways) with exit code 1
+   * so systemd restarts the daemon.
+   */
+  private async performPendingRestartIfNeeded(): Promise<void> {
+    if (!this.pendingRestartReason) return;
+    const reason = this.pendingRestartReason;
+    this.pendingRestartReason = null;
+    const log = this.logger.child("self");
+    log.info("performing deferred restart after turn", { reason });
+    // Deferred to the next macrotask: the IPC response write and the
+    // WhatsApp outbound must flush before the gateways are stopped.
+    setImmediate(() => {
+      void this.shutdownWithExit("self-restart", 1);
+    });
+  }
+
+  /**
+   * Whether a self-modification (deploy) is currently in flight.
+   * Guards against parallel /deploy calls.
+   */
 
   /**
    * Reloads the daemon config without restarting.
@@ -854,6 +992,7 @@ export class DaemonRuntime {
               messages = req.messages as Message[];
             }
 
+            this.turnActive = true;
             const result = await agent.run(messages, {
               signal: ctx?.signal,
               metricsRecorder: entry.metricsRecorder,
@@ -946,6 +1085,11 @@ export class DaemonRuntime {
               truncated: result.aborted && partialContent.length > 0 ? true : undefined,
             };
             entry.session = await recordTurn(entry.session, turn, this.paths);
+            this.turnActive = false;
+            // A deferred restart (requested mid-turn via /deploy or
+            // /restart) fires after the turn body settles and the final
+            // response has been written to the socket below.
+            void this.performPendingRestartIfNeeded();
 
             return {
               type: "turn-complete" as const,
@@ -973,6 +1117,7 @@ export class DaemonRuntime {
 
           return await turnPromise;
         } catch (err) {
+          this.turnActive = false;
           const rawMsg = err instanceof Error ? err.message : String(err);
           const msg = this.enhanceAuthError(rawMsg);
           this.errorBuffer.push(msg);
@@ -1362,51 +1507,59 @@ export class DaemonRuntime {
     };
     entry.messages.push(userMessage as Message);
 
-    const result = await turnCtx.agent.run(entry.messages, {
-      metricsRecorder: entry.metricsRecorder,
-      memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
-      compaction: {
-        paths: this.paths,
-        sessionId,
-        threshold: DEFAULT_COMPACTION_THRESHOLD,
-      },
-      mailbox: entry.mailbox,
-      channelFileSender: this.channelFileSender,
-      systemPromptAddendum: channelAddendum(entry.origin),
-    });
+    this.turnActive = true;
+    try {
+      const result = await turnCtx.agent.run(entry.messages, {
+        metricsRecorder: entry.metricsRecorder,
+        memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
+        compaction: {
+          paths: this.paths,
+          sessionId,
+          threshold: DEFAULT_COMPACTION_THRESHOLD,
+        },
+        mailbox: entry.mailbox,
+        channelFileSender: this.channelFileSender,
+        systemPromptAddendum: channelAddendum(entry.origin),
+      });
 
-    entry.turnsCompleted++;
-    entry.lastActiveAt = new Date().toISOString();
+      entry.turnsCompleted++;
+      entry.lastActiveAt = new Date().toISOString();
 
-    const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
-    const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
-    const turnSlice = entry.messages.slice(turnStartIndex);
-    const { tool_calls, tool_results } = extractToolData(turnSlice);
-    const turn = {
-      id: crypto.randomUUID(),
-      role: "assistant" as const,
-      content: finalMessage,
-      userContent: text,
-      tool_calls,
-      tool_results,
-      tokens: {
-        input: result.usage.inputTokens,
-        output: result.usage.outputTokens,
-        total: result.usage.totalTokens,
-        cacheRead: result.usage.cacheRead,
-        cacheWrite: result.usage.cacheWrite,
-      },
-      timing: {
-        startedAt: new Date().toISOString(),
-        latencyMs: 0,
-      },
-      model: turnCtx.model?.name ?? "unknown",
-      timestamp: new Date().toISOString(),
-      messages: turnSlice,
-    };
-    entry.session = await recordTurn(entry.session, turn, this.paths);
+      const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+      const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
+      const turnSlice = entry.messages.slice(turnStartIndex);
+      const { tool_calls, tool_results } = extractToolData(turnSlice);
+      const turn = {
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        content: finalMessage,
+        userContent: text,
+        tool_calls,
+        tool_results,
+        tokens: {
+          input: result.usage.inputTokens,
+          output: result.usage.outputTokens,
+          total: result.usage.totalTokens,
+          cacheRead: result.usage.cacheRead,
+          cacheWrite: result.usage.cacheWrite,
+        },
+        timing: {
+          startedAt: new Date().toISOString(),
+          latencyMs: 0,
+        },
+        model: turnCtx.model?.name ?? "unknown",
+        timestamp: new Date().toISOString(),
+        messages: turnSlice,
+      };
+      entry.session = await recordTurn(entry.session, turn, this.paths);
 
-    return { finalResponse: finalMessage };
+      return { finalResponse: finalMessage };
+    } finally {
+      this.turnActive = false;
+      // If a restart was requested during this turn, trigger it now that
+      // the turn is done. The outbound response is sent by the caller.
+      void this.performPendingRestartIfNeeded();
+    }
   }
 
   /**
@@ -1924,6 +2077,8 @@ export class DaemonRuntime {
           "/sessions — List all sessions",
           "/resume <id> — Resume a session",
           "/compact — Compact context window",
+          "/restart — Restart the daemon (after the current turn)",
+          "/deploy <branch> — Merge branch into main, build, restart",
         ].join("\n"),
       };
     }
@@ -1988,8 +2143,98 @@ export class DaemonRuntime {
       return { response: `Model switched to: ${match.alias || `${match.provider}/${match.model}`} (${resolved.name})` };
     }
 
+    // /restart — schedule a deferred self-restart (no build steps)
+    if (trimmed === "/restart") {
+      const replyTarget = this.whatsappSessionToSource.get(sessionId) ?? "";
+
+      if (this.selfModifyInFlight) {
+        return {
+          response: "A self-modification is already in progress. Try again shortly.",
+        };
+      }
+
+      await this.requestRestartAfterTurn("manual /restart", replyTarget);
+
+      if (this.turnActive) {
+        return {
+          response: "Restart scheduled — will restart after the current turn finishes.",
+        };
+      }
+      return { response: "Restarting — back in a few seconds." };
+    }
+
+    // /deploy <branch> — merge a branch into main, build/test, restart
+    const deployMatch = trimmed.match(/^\/deploy\s+(\S+)/);
+    if (deployMatch) {
+      return this.handleDeployCommand(sessionId, deployMatch[1]!);
+    }
+
     // Delegate to session commands
     return this.executeSessionSlashCommand(trimmed, sessionId);
+  }
+
+  /**
+   * /deploy <branch> — merges the branch into main, runs build/typecheck/
+   * tests, and on success schedules a deferred restart. On any failure:
+   * main is restored to the previous HEAD, the error is answered, and NO
+   * restart happens.
+   */
+  private async handleDeployCommand(
+    sessionId: string,
+    branch: string,
+  ): Promise<{ response: string }> {
+    const log = this.logger.child("self");
+
+    // Branch-pflicht: /deploy on main itself is rejected.
+    if (branch === "main" || branch === "origin/main" || branch === "HEAD") {
+      return { response: "Deploy rejected: deploying main onto itself is not supported. Specify a feature branch." };
+    }
+
+    // Turn-Queue beachten: /deploy darf auch während eines laufenden Turns
+    // ausgeführt werden, aber nicht parallel zu einem anderen /deploy.
+    if (this.selfModifyInFlight) {
+      return { response: "A deploy is already in progress. Wait for it to finish." };
+    }
+    this.selfModifyInFlight = true;
+    try {
+      const result = await runDeploy(
+        HARNESS_REPO_DIR,
+        branch,
+        (msg, level, data) => {
+          if (level === "warn") log.warn(msg, data);
+          else log.info(msg, data);
+        },
+        { timeoutMs: DEPLOY_TIMEOUT_MS },
+      );
+
+      if (!result.ok) {
+        // Fehler: main wurde zurückgesetzt, kein Restart.
+        return { response: result.message };
+      }
+
+      // Erfolg: Marker schreiben + Deferred Restart über den gemeinsamen
+      // requestRestartAfterTurn-Pfad. gitHead kommt aus dem Deploy-Ergebnis.
+      const replyTarget = this.whatsappSessionToSource.get(sessionId) ?? "";
+      await this.requestRestartAfterTurn(
+        `deploy ${branch}`,
+        replyTarget,
+        result.gitHead,
+      );
+
+      if (this.turnActive) {
+        return {
+          response:
+            "Deploy prepared, restarting… (after the current turn finishes)",
+        };
+      }
+      return { response: "Deploy prepared, restarting…" };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error("deploy command failed", { error: msg });
+      return { response: `Deploy failed: ${msg}` };
+    } finally {
+      this.selfModifyInFlight = false;
+    }
   }
 
   /**
