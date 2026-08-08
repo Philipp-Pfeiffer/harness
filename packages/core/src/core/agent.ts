@@ -133,6 +133,14 @@ export interface RunOptions {
    * to this turn, preventing race conditions on shared agents.
    */
   compaction?: CompactionOptions;
+  /**
+   * Optional channel-specific system-prompt addendum. Appended to the
+   * agent's system prompt for this run() invocation WITHOUT mutating the
+   * shared agent instance. The addendum is a pure function of the session
+   * origin (static text), so the effective system prompt stays
+   * byte-identical across turns and daemon restarts.
+   */
+  systemPromptAddendum?: string;
 }
 
 /**
@@ -402,9 +410,17 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, systemPromptAddendum } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
+
+      // Effective system prompt for THIS turn: base prompt plus the
+      // channel addendum (if any). Computed per run() — the shared agent
+      // instance is never mutated, so parallel sessions on the same agent
+      // cannot leak each other's addendum.
+      const effectiveSystemPrompt = systemPromptAddendum
+        ? `${systemPrompt}\n\n${systemPromptAddendum}`
+        : systemPrompt;
 
       // Session scope for per-session tool state (read-before-edit guard).
       // Explicit sessionId wins; the daemon's per-run compaction options
@@ -441,7 +457,7 @@ export function createAgent(config: AgentConfig): Agent {
       }
 
       const context: PiContext = {
-        systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         messages,
         tools: tools.map(toPiTool),
       };
@@ -484,7 +500,7 @@ export function createAgent(config: AgentConfig): Agent {
 
         // Auto-compaction: if messages exceed threshold, compact before LLM call.
         if (compaction && Date.now() >= compactionCooldownUntil) {
-          if (shouldCompact(context.messages, resolvedModel, compaction.threshold, systemPrompt, tools.map(toPiTool))) {
+          if (shouldCompact(context.messages, resolvedModel, compaction.threshold, effectiveSystemPrompt, tools.map(toPiTool))) {
             const compactionResult = await compactSession(context.messages, {
               model: resolvedModel,
               paths: compaction.paths,

@@ -126,6 +126,10 @@ export function extractAssistantTextFromMessages(messages: Message[]): string {
 
 export type SessionStatus = "active" | "idle" | "suspended" | "ended";
 
+/** Channel origin of a session. Determines channel-specific behavior
+ *  (e.g. the WhatsApp system-prompt addendum). Persisted on the session. */
+export type SessionOrigin = "tui" | "cron" | "whatsapp" | "api";
+
 export interface Session {
   id: string;
   title: string;
@@ -140,6 +144,19 @@ export interface Session {
   endedAt?: string;
   /** Agent profile the session runs under. Absent for pre-profile sessions (treated as "default"). */
   profile?: string;
+  /**
+   * Origin channel this session belongs to. Persisted so resume (including
+   * across daemon restarts) can restore the same system-prompt addendum.
+   * Absent for sessions created before this field existed.
+   */
+  origin?: SessionOrigin;
+  /**
+   * Selected model ref (config alias, model id, or provider/model) for this
+   * session. Persisted so resume (including across daemon restarts) keeps
+   * the model chosen via /model. Absent for sessions created before this
+   * field existed.
+   */
+  modelRef?: string;
 }
 
 export interface SessionIndexEntry {
@@ -155,6 +172,10 @@ export interface SessionIndexEntry {
   endedAt?: string;
   /** Agent profile the session runs under. Absent for pre-profile sessions (treated as "default"). */
   profile?: string;
+  /** Origin channel this session belongs to (see Session.origin). */
+  origin?: SessionOrigin;
+  /** Selected model ref for this session (see Session.modelRef). */
+  modelRef?: string;
 }
 
 interface SessionIndexLoadResult {
@@ -174,6 +195,8 @@ export interface SessionMetaRecord {
   type: "session-meta";
   title: string;
   updatedAt: string;
+  /** Selected model ref — written when the model changes via /model. */
+  modelRef?: string;
 }
 
 export interface CreateSessionOptions {
@@ -182,6 +205,10 @@ export interface CreateSessionOptions {
   parentSessionId?: string;
   /** Agent profile name — persisted so resume restores the same profile. */
   profile?: string;
+  /** Origin channel — persisted so resume restores the same system-prompt addendum. */
+  origin?: SessionOrigin;
+  /** Selected model ref — persisted so resume keeps the model chosen via /model. */
+  modelRef?: string;
 }
 
 export interface ModelCost {
@@ -484,6 +511,8 @@ function sessionToIndexEntry(session: Session): SessionIndexEntry {
     status: session.status,
     endedAt: session.endedAt,
     profile: session.profile,
+    origin: session.origin,
+    modelRef: session.modelRef,
   };
 }
 
@@ -520,6 +549,8 @@ export async function createSession(
     transcriptPath,
     status: "active",
     profile: options.profile,
+    origin: options.origin,
+    modelRef: options.modelRef,
   };
 
   await mkdir(dirname(transcriptPath), { recursive: true });
@@ -592,6 +623,25 @@ export async function renameSession(
   const renamed: Session = { ...session, title: newTitle };
   await upsertIndexEntry(paths, sessionToIndexEntry(renamed));
   return renamed;
+}
+
+/**
+ * Persists a session's selected model ref: writes a meta-record to the
+ * transcript and updates the index entry. The ref survives an index rebuild
+ * because it is stored in the transcript itself.
+ */
+export async function setSessionModelRef(
+  session: Session,
+  modelRef: string,
+  paths: HarnessPaths
+): Promise<Session> {
+  const updatedAt = new Date().toISOString();
+  const meta: SessionMetaRecord = { type: "session-meta", title: session.title, updatedAt, modelRef };
+  await appendFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
+
+  const updated: Session = { ...session, modelRef };
+  await upsertIndexEntry(paths, sessionToIndexEntry(updated));
+  return updated;
 }
 
 /**
@@ -756,7 +806,7 @@ export function extractToolData(messages: Message[]): {
  */
 async function readTranscript(
   tPath: string
-): Promise<{ turns: SessionTurn[]; title?: string }> {
+): Promise<{ turns: SessionTurn[]; title?: string; modelRef?: string }> {
   let raw: string;
   try {
     raw = await readFile(tPath, "utf-8");
@@ -768,6 +818,7 @@ async function readTranscript(
 
   const turns: SessionTurn[] = [];
   let title: string | undefined;
+  let modelRef: string | undefined;
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -775,12 +826,16 @@ async function readTranscript(
       const parsed = JSON.parse(trimmed) as {
         type?: string;
         title?: string;
+        modelRef?: string;
       } & SessionTurn;
       // Skip end-marker and meta-record lines — they are not turns.
       if (parsed.type === "session-end") continue;
       if (parsed.type === "session-meta") {
         if (typeof parsed.title === "string") {
           title = parsed.title;
+        }
+        if (typeof parsed.modelRef === "string") {
+          modelRef = parsed.modelRef;
         }
         continue;
       }
@@ -789,7 +844,7 @@ async function readTranscript(
       // Skip corrupt lines silently.
     }
   }
-  return { turns, title };
+  return { turns, title, modelRef };
 }
 
 /**
@@ -801,7 +856,8 @@ async function readTranscript(
 function reconstructIndexEntry(
   sessionId: string,
   turns: SessionTurn[],
-  title?: string
+  title?: string,
+  modelRef?: string
 ): SessionIndexEntry {
   const totals: SessionTokenTotals = {
     inputTokens: 0,
@@ -845,6 +901,7 @@ function reconstructIndexEntry(
     tokenTotals: totals,
     title: title ?? `Recovered Session ${sessionId.slice(-6)}`,
     status: "idle",
+    modelRef,
   };
 }
 
@@ -874,8 +931,8 @@ async function reconstructSessionsFromTranscripts(
         if (!file.endsWith(".jsonl")) continue;
         const sessionId = file.slice(0, -".jsonl".length);
         const tPath = join(dateDir, file);
-        const { turns, title } = await readTranscript(tPath);
-        entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
+        const { turns, title, modelRef } = await readTranscript(tPath);
+        entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title, modelRef));
       }
     }
 
@@ -885,8 +942,8 @@ async function reconstructSessionsFromTranscripts(
       if (!file.name.endsWith(".jsonl")) continue;
       const sessionId = file.name.slice(0, -".jsonl".length);
       const tPath = join(paths.sessions, file.name);
-      const { turns, title } = await readTranscript(tPath);
-      entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title));
+      const { turns, title, modelRef } = await readTranscript(tPath);
+      entries.set(sessionId, reconstructIndexEntry(sessionId, turns, title, modelRef));
     }
   } catch {
     // Directory may not exist yet.
@@ -916,13 +973,13 @@ export async function readSession(
   const tPath = await findTranscriptPath(paths, sessionId);
   if (!tPath) return null;
 
-  const { turns, title } = await readTranscript(tPath);
+  const { turns, title, modelRef } = await readTranscript(tPath);
 
   // Fallback: if the session is not in the index (e.g. the index file is
   // corrupt or the entry was lost), reconstruct a minimal index entry from
   // the transcript so the session remains visible.
   if (!entry) {
-    entry = reconstructIndexEntry(sessionId, turns, title);
+    entry = reconstructIndexEntry(sessionId, turns, title, modelRef);
   }
 
   return { session: entry, turns };
@@ -1152,6 +1209,8 @@ export async function loadSession(
     status: loaded.session.status,
     endedAt: loaded.session.endedAt,
     profile: loaded.session.profile,
+    origin: loaded.session.origin,
+    modelRef: loaded.session.modelRef,
   };
 
   const messages = turnsToMessages(loaded.turns);

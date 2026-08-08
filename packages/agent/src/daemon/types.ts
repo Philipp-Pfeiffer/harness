@@ -1,5 +1,5 @@
 import type { Message } from "@mariozechner/pi-ai";
-import type { SessionStatus } from "../core/session.js";
+import type { SessionStatus, SessionOrigin } from "../core/session.js";
 
 /* ─── Gateway Adapter Interface ─── */
 
@@ -173,7 +173,7 @@ export interface SessionScope {
 
 /* ─── Session Origin ─── */
 
-export type SessionOrigin = "tui" | "cron" | "whatsapp" | "api";
+export type { SessionStatus, SessionOrigin } from "../core/session.js";
 
 /* ─── IPC Protocol (Unix socket) ─── */
 

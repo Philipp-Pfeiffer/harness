@@ -162,6 +162,40 @@ describe("session", () => {
     });
   });
 
+  describe("origin persistence", () => {
+    it("persists the origin on the session and restores it on load", async () => {
+      const session = await createSession(paths, {
+        model: "minimax-m2.7",
+        title: "WhatsApp: 491701234567",
+        origin: "whatsapp",
+      });
+      expect(session.origin).toBe("whatsapp");
+
+      // Origin is stored in the index entry.
+      const index = await readIndex(paths);
+      expect(index[0]).toMatchObject({ sessionId: session.id, origin: "whatsapp" });
+
+      // Simulated daemon restart: loadSession reads the persisted origin back.
+      const loaded = await loadSession(session.id, paths);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.session.origin).toBe("whatsapp");
+    });
+
+    it("treats sessions without an origin as api (fallback for old sessions)", async () => {
+      const session = await createSession(paths, { model: "minimax-m2.7" });
+      expect(session.origin).toBeUndefined();
+
+      const loaded = await loadSession(session.id, paths);
+      expect(loaded).not.toBeNull();
+      // Sessions created before the origin field existed have no origin —
+      // callers fall back to "api".
+      expect(loaded!.session.origin).toBeUndefined();
+
+      const listed = await listSessions(paths);
+      expect(listed[0]!.origin).toBeUndefined();
+    });
+  });
+
   describe("createSubAgentSession", () => {
     it("creates a session referencing its parent", async () => {
       const parent = await createSession(paths, { model: "minimax-m2.7" });

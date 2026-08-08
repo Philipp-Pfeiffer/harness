@@ -602,6 +602,36 @@ describe("Agent", () => {
       await agent.run(history);
     });
 
+    it("appends systemPromptAddendum to the effective system prompt for the turn", async () => {
+      const history: Message[] = [];
+      const response = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe(
+          "You are a test agent\n\n## WhatsApp formatting\n\nReply over WhatsApp.",
+        );
+        return mockStream(response);
+      });
+
+      const agent = createAgent({ tools: [], model, systemPrompt: "You are a test agent" });
+      history.push(makeUserMessage("Test"));
+      await agent.run(history, { systemPromptAddendum: "## WhatsApp formatting\n\nReply over WhatsApp." });
+    });
+
+    it("leaves the base system prompt unchanged when no addendum is given", async () => {
+      const history: Message[] = [];
+      const response = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+
+      vi.mocked(stream).mockImplementationOnce((_, context) => {
+        expect(context.systemPrompt).toBe("You are a test agent");
+        return mockStream(response);
+      });
+
+      const agent = createAgent({ tools: [], model, systemPrompt: "You are a test agent" });
+      history.push(makeUserMessage("Test"));
+      await agent.run(history);
+    });
+
     it("removes dangling assistant message when aborted before tool execution", async () => {
       const history: Message[] = [];
       const mockToolCall = makeAssistantMessage(
