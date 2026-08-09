@@ -115,6 +115,8 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
       printQRInTerminal: false,
       browser: ["Harness", "Chrome", "1.0.0"],
       logger: pino({ level: "warn" }),
+      syncFullHistory: false,
+      markOnlineOnConnect: false,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -168,6 +170,18 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
           pushName: msg.pushName ?? "",
           rawJid: msg.key.remoteJid ?? "",
         });
+      }
+    });
+
+    sock.ev.on("messages.update", (updates) => {
+      for (const update of updates) {
+        const status = update.update?.status;
+        if (status !== undefined) {
+          opts.log(
+            `msg-update id=${update.key.id} remoteJid=${update.key.remoteJid} status=${status} participant=${update.key.participant ?? "-"}`,
+            "info",
+          );
+        }
       }
     });
 

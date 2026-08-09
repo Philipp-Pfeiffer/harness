@@ -8,9 +8,10 @@
  * - other → "document" message type
  * - asSticker=true → "sticker" (overrides MIME)
  * - WhatsApp client mock exposes sendFile
+ * - createWhatsAppClient calls makeWASocket with syncFullHistory:false, markOnlineOnConnect:false
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { baileysMessageType, createMockWhatsAppClient } from "../../src/whatsapp/client.js";
 
 describe("Baileys MIME → Message Type Mapping", () => {
