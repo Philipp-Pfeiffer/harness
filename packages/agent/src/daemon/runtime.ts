@@ -100,6 +100,7 @@ import {
   readPendingRestart,
   scheduleRestart,
   sendRestartPing,
+  RESTART_FOLLOWUP_PROMPT,
 } from "./selfModify.js";
 import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
 
@@ -227,6 +228,8 @@ export class DaemonRuntime {
   private selfModifyInFlight = false;
   /** Whether any turn is currently running (used to defer restarts). */
   private turnActive = false;
+  /** True while a post-restart follow-up turn is running (restart loop breaker). */
+  private postRestartFollowUpActive = false;
 
   constructor(opts?: { config?: Partial<DaemonConfig> }) {
     this.paths = resolveHarnessPaths();
@@ -351,12 +354,16 @@ export class DaemonRuntime {
       const plugin = this.channelPlugins.get("whatsapp");
       if (plugin) {
         try {
-          await sendRestartPing(marker, (target, payload) =>
-            plugin.sendMessage(target, payload),
+          await sendRestartPing(
+            marker,
+            (target, payload) => plugin.sendMessage(target, payload),
             (msg, level, data) => {
               if (level === "warn") log.warn(msg, data);
               else log.info(msg, data);
             },
+            marker.followUp === true && marker.replyTarget
+              ? () => this.runRestartFollowUp(marker.replyTarget, marker.reason)
+              : undefined,
           );
         } catch (err) {
           log.warn("restart ping send failed — marker already consumed", {
@@ -476,11 +483,13 @@ export class DaemonRuntime {
     grund: string,
     benachrichtigeSession?: string,
     gitHeadOverride?: string,
+    followUp?: boolean,
   ): Promise<void> {
     const log = this.logger.child("self");
     log.info("requestRestartAfterTurn", {
       grund,
       replyTarget: benachrichtigeSession ?? "(none)",
+      followUp: followUp === true ? true : undefined,
     });
 
     // Write the restart marker immediately — the shutdown path must not
@@ -495,7 +504,7 @@ export class DaemonRuntime {
         });
       }
     }
-    await scheduleRestart(grund, benachrichtigeSession ?? "", gitHead);
+    await scheduleRestart(grund, benachrichtigeSession ?? "", gitHead, followUp);
 
     this.pendingRestartReason = grund;
 
@@ -513,6 +522,137 @@ export class DaemonRuntime {
     setImmediate(() => {
       void this.shutdownWithExit("self-restart", 1);
     });
+  }
+
+  /**
+   * Builds the deferred-restart capability for the `request_restart` tool.
+   * The tool calls it with a reason; the restart is scheduled for after
+   * the current turn, targeted at the session that invoked the tool.
+   *
+   * Guards: while a restart/deploy is already pending or in flight, the
+   * capability refuses (no double scheduling); while a post-restart
+   * follow-up turn is running, it refuses too (loop breaker).
+   */
+  private makeRequestRestartCapability(sessionId: string) {
+    return async (reason: string): Promise<{ ok: boolean; error?: string }> => {
+      if (this.postRestartFollowUpActive) {
+        return { ok: false, error: "restart not allowed during post-restart follow-up" };
+      }
+      if (this.selfModifyInFlight || this.pendingRestartReason) {
+        return {
+          ok: false,
+          error: "restart already scheduled — a restart or deploy is already pending",
+        };
+      }
+      try {
+        const replyTarget = this.whatsappSessionToSource.get(sessionId) ?? "";
+        await this.requestRestartAfterTurn(reason, replyTarget, undefined, true);
+        return { ok: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.child("self").error("request_restart failed", { error: msg });
+        return { ok: false, error: msg };
+      }
+    };
+  }
+
+  /**
+   * Runs the post-restart follow-up: a short agent turn on the reply-target
+   * session (same path as an incoming WhatsApp turn, including provenance
+   * context). Throws on failure so sendRestartPing falls back to the
+   * static ping.
+   */
+  private async runRestartFollowUp(
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const log = this.logger.child("self");
+    log.info("running post-restart follow-up turn", { sessionId, reason });
+
+    const entry = this.sessions.get(sessionId);
+    if (!entry) {
+      throw new Error(`follow-up session not found: ${sessionId}`);
+    }
+
+    let turnCtx: ProfileAgentContext;
+    try {
+      const turnProfile = this.resolveProfile(entry.profile);
+      if (!turnProfile) throw new Error(`unknown agent profile "${entry.profile}"`);
+      turnCtx = this.agentContextFor(turnProfile);
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    turnCtx = this.applyTurnModel(turnCtx, entry.modelRef);
+
+    const userMessage = {
+      role: "user" as const,
+      content: RESTART_FOLLOWUP_PROMPT(reason),
+      timestamp: Date.now(),
+    };
+    entry.messages.push(userMessage as Message);
+
+    let finalMessage = "";
+    this.postRestartFollowUpActive = true;
+    try {
+      const result = await turnCtx.agent.run(entry.messages, {
+        metricsRecorder: entry.metricsRecorder,
+        memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
+        compaction: {
+          paths: this.paths,
+          sessionId,
+          threshold: DEFAULT_COMPACTION_THRESHOLD,
+        },
+        mailbox: entry.mailbox,
+        channelFileSender: this.channelFileSender,
+        requestRestart: this.makeRequestRestartCapability(sessionId),
+        postRestartFollowUp: true,
+        systemPromptAddendum: channelAddendum(entry.origin),
+      });
+
+      entry.turnsCompleted++;
+      entry.lastActiveAt = new Date().toISOString();
+
+      finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+      const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
+      const turnSlice = entry.messages.slice(turnStartIndex);
+      const { tool_calls, tool_results } = extractToolData(turnSlice);
+      const turn = {
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        content: finalMessage,
+        userContent: userMessage.content,
+        tool_calls,
+        tool_results,
+        tokens: {
+          input: result.usage.inputTokens,
+          output: result.usage.outputTokens,
+          total: result.usage.totalTokens,
+          cacheRead: result.usage.cacheRead,
+          cacheWrite: result.usage.cacheWrite,
+        },
+        timing: {
+          startedAt: new Date().toISOString(),
+          latencyMs: 0,
+        },
+        model: turnCtx.model?.name ?? "unknown",
+        timestamp: new Date().toISOString(),
+        messages: turnSlice,
+      };
+      entry.session = await recordTurn(entry.session, turn, this.paths);
+    } finally {
+      this.postRestartFollowUpActive = false;
+    }
+
+    // Outbound: route the follow-up answer to the session's channel.
+    const source = this.whatsappSessionToSource.get(sessionId);
+    if (source) {
+      const plugin = this.channelPlugins.get("whatsapp");
+      if (plugin) {
+        const target = formatJid(source);
+        await plugin.sendMessage(target, { text: finalMessage });
+        log.info("post-restart follow-up sent", { sessionId, target });
+      }
+    }
   }
 
   /**
@@ -1519,6 +1659,7 @@ export class DaemonRuntime {
         },
         mailbox: entry.mailbox,
         channelFileSender: this.channelFileSender,
+        requestRestart: this.makeRequestRestartCapability(sessionId),
         systemPromptAddendum: channelAddendum(entry.origin),
       });
 

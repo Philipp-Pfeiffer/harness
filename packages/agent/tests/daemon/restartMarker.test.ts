@@ -43,6 +43,31 @@ describe("restart marker", () => {
     expect(await consumeRestartMarker(TEST_DIR)).toBeNull();
   });
 
+  it("round-trips the optional followUp flag", async () => {
+    await writeRestartMarker(TEST_DIR, {
+      timestamp: "2026-08-08T10:00:00.000Z",
+      reason: "config change",
+      replyTarget: "491701234567",
+      gitHead: "abc1234",
+      followUp: true,
+    });
+
+    const marker = await consumeRestartMarker(TEST_DIR);
+    expect(marker?.followUp).toBe(true);
+  });
+
+  it("treats a missing followUp flag as absent (legacy markers)", async () => {
+    await writeRestartMarker(TEST_DIR, {
+      timestamp: "2026-08-08T10:00:00.000Z",
+      reason: "deploy feat/foo",
+      replyTarget: "491701234567",
+      gitHead: "abc1234",
+    });
+
+    const marker = await consumeRestartMarker(TEST_DIR);
+    expect(marker?.followUp).toBeUndefined();
+  });
+
   it("consumes and ignores a corrupt marker", async () => {
     await writeFile(join(TEST_DIR, RESTART_MARKER_FILE), "NOT-JSON", "utf-8");
     const marker = await consumeRestartMarker(TEST_DIR);

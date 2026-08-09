@@ -17,6 +17,12 @@ export interface RestartMarker {
   replyTarget: string;
   /** Commit the daemon was running when the restart was requested. */
   gitHead: string;
+  /**
+   * When true, the boot handler runs a short agent follow-up turn on the
+   * reply-target session instead of a static ping. Set by the
+   * request_restart tool; /restart and /deploy leave it absent/false.
+   */
+  followUp?: boolean;
 }
 
 /** File name of the restart marker inside $HARNESS_STATE. */
@@ -73,6 +79,7 @@ export async function consumeRestartMarker(
       reason: parsed.reason,
       replyTarget: parsed.replyTarget,
       gitHead: parsed.gitHead,
+      followUp: parsed.followUp === true ? true : undefined,
     };
   } catch {
     return null;

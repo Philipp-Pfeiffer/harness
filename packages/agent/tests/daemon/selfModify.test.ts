@@ -2,11 +2,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Agent, RunResult, Model } from "@harness/core";
+import type { Agent, RunResult, Model, HarnessPaths } from "@harness/core";
+import type { Message } from "@mariozechner/pi-ai";
 import type { Api } from "@mariozechner/pi-ai";
 import { DaemonRuntime } from "../../src/daemon/runtime.js";
 import type { ConfigModel } from "../../src/config.js";
 import { RESTART_MARKER_FILE } from "../../src/daemon/restartMarker.js";
+import { createSession, type Session } from "../../src/core/session.js";
 import * as deployModule from "../../src/daemon/deploy.js";
 import * as selfModifyModule from "../../src/daemon/selfModify.js";
 
@@ -67,6 +69,71 @@ function createFakeAgent(): Agent {
     },
   } as unknown as Agent;
 }
+
+/**
+ * Fake agent that records the RunOptions of each run() call. The follow-up
+ * handler can then inspect/attach the injected requestRestart capability.
+ */
+function createRecordingFakeAgent(): {
+  agent: Agent;
+  captured: Array<Record<string, unknown>>;
+} {
+  const captured: Array<Record<string, unknown>> = [];
+  const agent: Agent = {
+    setModel() {},
+    setSystemPrompt() {},
+    async run(_messages: Message[], options: Record<string, unknown>): Promise<RunResult> {
+      captured.push(options);
+      return {
+        aborted: false,
+        turns: 1,
+        finalMessage: "Follow-up OK",
+        toolCallCount: 0,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+      };
+    },
+  } as unknown as Agent;
+  return { agent, captured };
+}
+
+/** Registers a session entry (WhatsApp origin + source mapping) on the runtime. */
+async function registerWhatsAppSession(
+  runtime: DaemonRuntime,
+  phone: string,
+): Promise<string> {
+  const paths = (runtime as unknown as { paths: HarnessPaths }).paths;
+  const session = await createSession(paths, {
+    model: "fake-default",
+    title: `WhatsApp: ${phone}`,
+    origin: "whatsapp",
+  });
+  const internals = runtime as unknown as {
+    sessions: Map<string, unknown>;
+    whatsappSessionToSource: Map<string, string>;
+    whatsappSessions: Map<string, string>;
+  };
+  internals.sessions.set(session.id, {
+    session,
+    messages: [],
+    turnsCompleted: 0,
+    metricsRecorder: { recordTurn() {}, recordToolCall() {}, recordRetry() {} },
+    origin: "whatsapp",
+    title: `WhatsApp: ${phone}`,
+    createdAt: session.createdAt,
+    lastActiveAt: session.lastActivityAt,
+    profile: "default",
+    mailbox: { push() {}, drainAll: () => [] },
+    turnQueue: Promise.resolve(),
+  });
+  internals.whatsappSessionToSource.set(session.id, phone);
+  internals.whatsappSessions.set(phone, session.id);
+  return session.id;
+}
+
+type RuntimeWithInternals = DaemonRuntime & {
+  sessions: Map<string, { session: Session; messages: Message[]; turnQueue: Promise<unknown> }>;
+  whatsappSessionToSource: Map<string, string>;
+};
 
 const MODELS: ConfigModel[] = [
   { provider: "openai", model: "gpt-5.2", alias: "GPT 5.2" },
@@ -309,5 +376,211 @@ describe("/restart channel command", () => {
 
     const marker = await readMarker();
     expect(marker?.reason).toBe("manual /restart");
+  });
+});
+
+describe("request_restart tool capability (daemon side)", () => {
+  it("schedules a deferred restart with reason + current session as replyTarget, followUp marker", async () => {
+    vi.spyOn(selfModifyModule, "currentGitHead").mockResolvedValue("mockhead");
+    const runtime = makeRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    const shutdownSpy = mockShutdown(runtime);
+    internals.turnActive = true;
+
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+
+    const cap = (runtime as unknown as {
+      makeRequestRestartCapability: (sid: string) => (reason: string) => Promise<{ ok: boolean; error?: string }>;
+    }).makeRequestRestartCapability(sessionId);
+
+    const result = await cap("new API key added to ~/harness/.env");
+    expect(result.ok).toBe(true);
+    // Turn still active → no immediate exit.
+    expect(shutdownSpy).not.toHaveBeenCalled();
+
+    const marker = await readMarker();
+    expect(marker?.reason).toBe("new API key added to ~/harness/.env");
+    expect(marker?.replyTarget).toBe("491701234567");
+    expect(marker?.gitHead).toBe("mockhead");
+    expect(marker?.followUp).toBe(true);
+  });
+
+  it("rejects with 'already scheduled' when a restart is already pending", async () => {
+    vi.spyOn(selfModifyModule, "currentGitHead").mockResolvedValue("mockhead");
+    const runtime = makeRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.turnActive = true;
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+    const cap = (runtime as unknown as {
+      makeRequestRestartCapability: (sid: string) => (reason: string) => Promise<{ ok: boolean; error?: string }>;
+    }).makeRequestRestartCapability(sessionId);
+
+    // First scheduling succeeds.
+    await cap("first reason");
+    // Second attempt must be refused — no double scheduling.
+    const second = await cap("second reason");
+    expect(second.ok).toBe(false);
+    expect(second.error).toContain("already scheduled");
+  });
+
+  it("rejects with 'already scheduled' while a deploy is in flight", async () => {
+    vi.spyOn(selfModifyModule, "currentGitHead").mockResolvedValue("mockhead");
+    const runtime = makeRuntime();
+    const internals = runtime as unknown as RuntimeInternals & { selfModifyInFlight: boolean };
+    internals.selfModifyInFlight = true;
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+    const cap = (runtime as unknown as {
+      makeRequestRestartCapability: (sid: string) => (reason: string) => Promise<{ ok: boolean; error?: string }>;
+    }).makeRequestRestartCapability(sessionId);
+
+    const result = await cap("config change");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("already scheduled");
+  });
+});
+
+describe("post-restart follow-up", () => {
+  it("boot with followUp marker → runs an agent turn on the reply-target session, no static ping", async () => {
+    await writeFile(
+      markerFile(),
+      JSON.stringify({
+        timestamp: "2026-08-08T10:00:00.000Z",
+        reason: "new API key",
+        replyTarget: "491701234567",
+        gitHead: "abc1234",
+        followUp: true,
+      }),
+      "utf-8",
+    );
+
+    const runtime = makeRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createRecordingFakeAgent().agent;
+    internals.model = createFakeModel();
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
+
+    const marker = await selfModifyModule.readPendingRestart();
+    expect(marker?.followUp).toBe(true);
+
+    await selfModifyModule.sendRestartPing(
+      marker!,
+      (t, p) => sendMock(t, p),
+      vi.fn(),
+      () => (runtime as unknown as { runRestartFollowUp: (sid: string, reason: string) => Promise<void> }).runRestartFollowUp(sessionId, marker!.reason),
+    );
+
+    // Follow-up answer routed via the channel plugin, no static ping text.
+    expect(sendMock).toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: "Follow-up OK" }),
+    );
+    expect(sendMock).not.toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: expect.stringContaining("Back online") }),
+    );
+    // Marker consumed.
+    await expect(readFile(markerFile())).rejects.toThrow();
+  });
+
+  it("follow-up turn fails → static ping sent as fallback, marker still consumed", async () => {
+    await writeFile(
+      markerFile(),
+      JSON.stringify({
+        timestamp: "2026-08-08T10:00:00.000Z",
+        reason: "new API key",
+        replyTarget: "491701234567",
+        gitHead: "abc1234",
+        followUp: true,
+      }),
+      "utf-8",
+    );
+
+    const runtime = makeRuntime();
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
+
+    const marker = await selfModifyModule.readPendingRestart();
+    await selfModifyModule.sendRestartPing(
+      marker!,
+      (t, p) => sendMock(t, p),
+      vi.fn(),
+      async () => {
+        throw new Error("follow-up session not found");
+      },
+    );
+
+    expect(sendMock).toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: expect.stringContaining("Back online") }),
+    );
+    await expect(readFile(markerFile())).rejects.toThrow();
+  });
+
+  it("marker without followUp → static ping unchanged", async () => {
+    await writeFile(
+      markerFile(),
+      JSON.stringify({
+        timestamp: "2026-08-08T10:00:00.000Z",
+        reason: "manual /restart",
+        replyTarget: "491701234567",
+        gitHead: "abc1234",
+      }),
+      "utf-8",
+    );
+
+    const runtime = makeRuntime();
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
+
+    const marker = await selfModifyModule.readPendingRestart();
+    expect(marker?.followUp).toBeUndefined();
+
+    const followUpRunner = vi.fn();
+    await selfModifyModule.sendRestartPing(
+      marker!,
+      (t, p) => sendMock(t, p),
+      vi.fn(),
+      followUpRunner,
+    );
+
+    expect(followUpRunner).not.toHaveBeenCalled();
+    expect(sendMock).toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: expect.stringContaining("Back online") }),
+    );
+    await expect(readFile(markerFile())).rejects.toThrow();
+  });
+
+  it("request_restart inside a follow-up turn → error, no second restart", async () => {
+    vi.spyOn(selfModifyModule, "currentGitHead").mockResolvedValue("mockhead");
+    const runtime = makeRuntime();
+    const internals = runtime as unknown as RuntimeInternals & {
+      postRestartFollowUpActive: boolean;
+      makeRequestRestartCapability: (sid: string) => (reason: string) => Promise<{ ok: boolean; error?: string }>;
+    };
+    internals.postRestartFollowUpActive = true;
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+
+    const cap = internals.makeRequestRestartCapability(sessionId);
+    const result = await cap("loop attempt");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("post-restart follow-up");
+    // No marker written.
+    expect(await readMarker()).toBeNull();
   });
 });
