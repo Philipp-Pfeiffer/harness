@@ -203,12 +203,10 @@ export function parseCronJobFile(filePath: string, content: string): CronJob {
     }
   }
 
-  if (!body) {
+  if (!body && type === "script") {
     throw new CronJobParseError(
       filePath,
-      type === "agent"
-        ? "empty body — agent jobs need a prompt"
-        : "empty body — script jobs need a function name",
+      "empty body — script jobs need a function name",
     );
   }
 

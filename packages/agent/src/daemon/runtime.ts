@@ -767,8 +767,38 @@ export class DaemonRuntime {
    * turn. The job's optional `agent` field selects the agent profile for
    * the session (default: "default"). Returns the new session id.
    * Throws on failure — the scheduler catches and logs it.
+   *
+   * When the job has no body (bodyless agent job), a default trigger
+   * prompt is sent as the first turn — the profile describes the task.
    */
-  async runCronAgentJob(job: CronJob): Promise<string> {
+  async runCronAgentJob(job: CronJob): Promise<string>;
+  /**
+   * Ad-hoc agent run: like runCronAgentJob(CronJob), but the agent
+   * profile is given directly and the first turn is built from `input`.
+   * Used by internal hooks (e.g. session-end after a session closes).
+   */
+  async runCronAgentJob(
+    agent: string,
+    input: { transcript: string },
+  ): Promise<string>;
+  async runCronAgentJob(
+    jobOrAgent: CronJob | string,
+    input?: { transcript: string },
+  ): Promise<string> {
+    const job: CronJob =
+      typeof jobOrAgent === "string"
+        ? {
+            name: jobOrAgent,
+            schedule: "* * * * * *",
+            enabled: true,
+            type: "agent",
+            jitterMs: 0,
+            agent: jobOrAgent,
+            body: this.buildAdHocJobBody(jobOrAgent, input),
+            filePath: "(hook)",
+          }
+        : jobOrAgent;
+
     const created = await this.handleIpcRequest({
       type: "create-session",
       origin: "cron",
@@ -784,13 +814,59 @@ export class DaemonRuntime {
     }
     const resp = await this.handleIpcRequest({
       type: "submit-turn",
-      text: job.body,
+      text: job.body || `Starte den Auftrag "${job.name}" gemäß deinem Agent-Profil.`,
       sessionId: created.sessionId,
     });
     if (resp.type === "error") {
       throw new Error(resp.message);
     }
     return created.sessionId;
+  }
+
+  /**
+   * Builds the first-turn prompt for an ad-hoc agent run from its input.
+   * The session-end agent reads the transcript and writes the protocol
+   * next to it (`<transcript>.protocol.md`).
+   */
+  private buildAdHocJobBody(
+    agent: string,
+    input?: { transcript: string },
+  ): string {
+    if (!input) {
+      throw new Error(
+        `runCronAgentJob("${agent}") requires an input object`,
+      );
+    }
+    if (agent === "session-end") {
+      return [
+        `Lies das Session-Transkript unter ${input.transcript} vollständig.`,
+        `Schreibe daraus das Session-Protokoll gemäß deinem Agent-Profil (Session-End — Protokollant) nach ${input.transcript}.protocol.md.`,
+      ].join("\n");
+    }
+    return [
+      `Starte den Auftrag "${agent}" gemäß deinem Agent-Profil.`,
+      ...Object.entries(input).map(
+        ([key, value]) => `- ${key}: ${value}`,
+      ),
+    ].join("\n");
+  }
+
+  /**
+   * Fire-and-forget session-end hook: after a session ends, start the
+   * session-end agent with the transcript path as input. Errors are
+   * logged, never propagated — a protocol failure must not block the
+   * session close.
+   */
+  private triggerSessionEndJob(transcriptPath: string): void {
+    void this.runCronAgentJob("session-end", { transcript: transcriptPath }).catch(
+      (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.child("session-end").warn("session-end job failed", {
+          transcript: transcriptPath,
+          error: msg,
+        });
+      },
+    );
   }
 
   /**
@@ -1299,10 +1375,12 @@ export class DaemonRuntime {
           // If session is in memory, end it and remove from active map
           const entry = this.sessions.get(sessionId);
           if (entry) {
+            const transcriptPath = entry.session.transcriptPath;
             entry.session = await endSession(entry.session, this.paths);
             this.sessions.delete(sessionId);
             const log = this.logger.child("session");
             log.info("session ended via IPC", { id: sessionId });
+            this.triggerSessionEndJob(transcriptPath);
           } else {
             // Session not in memory — end it on disk directly
             const loaded = await loadSession(sessionId, this.paths);
@@ -1310,6 +1388,7 @@ export class DaemonRuntime {
               await endSession(loaded.session, this.paths);
               const log = this.logger.child("session");
               log.info("session ended via IPC (disk-only)", { id: sessionId });
+              this.triggerSessionEndJob(loaded.session.transcriptPath);
             } else {
               return { type: "error", message: `Session not found: ${sessionId}`, sessionId };
             }
@@ -1881,8 +1960,10 @@ export class DaemonRuntime {
 
     const oldEntry = this.sessions.get(oldSessionId);
     if (oldEntry) {
+      const transcriptPath = oldEntry.session.transcriptPath;
       await endSession(oldEntry.session, this.paths);
       this.sessions.delete(oldSessionId);
+      this.triggerSessionEndJob(transcriptPath);
     }
     this.whatsappSessionToSource.delete(oldSessionId);
     this.whatsappSessions.delete(phone);
@@ -2064,9 +2145,28 @@ export class DaemonRuntime {
       throw new Error("Daemon not fully initialized (model missing)");
     }
     const fm = profile.frontmatter;
-    const model = fm.model
-      ? resolveModel(fm.model.provider, fm.model.model)
-      : this.model;
+    // Profile model refs may be OpenRouter presets (`@preset/deepseek-flash`
+    // configured in `config.json`). `resolveModel` cannot resolve those —
+    // the preset is resolved via the config model list instead. Any other
+    // provider/model goes through plain `resolveModel`, which throws for
+    // unknown providers.
+    let model = this.model;
+    if (fm.model) {
+      if (fm.model.provider === "@preset") {
+        const preset = `${fm.model.provider}/${fm.model.model}`;
+        const fromConfig = this.configModels.find(
+          (m) => m.model === preset || `${m.provider}/${m.model}` === preset,
+        );
+        if (!fromConfig) {
+          throw new Error(
+            `Unknown OpenRouter preset "${preset}" in profile "${profile.name}". Add it to config.models in $HARNESS_HOME/config.json.`,
+          );
+        }
+        model = resolveModelFromConfig(fromConfig);
+      } else {
+        model = resolveModel(fm.model.provider, fm.model.model);
+      }
+    }
     const zones = fm.memory ?? ALL_MEMORY_ZONES;
     const tools = this.applyProfileToolPolicy(this.allTools, fm.tools, zones);
     const promptText = composeProfilePrompt({
@@ -2543,11 +2643,16 @@ export class DaemonRuntime {
       const oldOrigin = entry?.origin ?? "api";
       const oldTitle = entry?.title ?? "Channel Session";
       if (entry) {
+        const transcriptPath = entry.session.transcriptPath;
         entry.session = await endSession(entry.session, this.paths);
         this.sessions.delete(sessionId);
+        this.triggerSessionEndJob(transcriptPath);
       } else {
         const loaded = await loadSession(sessionId, this.paths);
-        if (loaded) await endSession(loaded.session, this.paths);
+        if (loaded) {
+          await endSession(loaded.session, this.paths);
+          this.triggerSessionEndJob(loaded.session.transcriptPath);
+        }
       }
       const session = await createSession(this.paths, {
         model: this.model?.name ?? "unknown",
@@ -2574,11 +2679,16 @@ export class DaemonRuntime {
     if (trimmed === "/end") {
       const entry = this.sessions.get(sessionId);
       if (entry) {
+        const transcriptPath = entry.session.transcriptPath;
         entry.session = await endSession(entry.session, this.paths);
         this.sessions.delete(sessionId);
+        this.triggerSessionEndJob(transcriptPath);
       } else {
         const loaded = await loadSession(sessionId, this.paths);
-        if (loaded) await endSession(loaded.session, this.paths);
+        if (loaded) {
+          await endSession(loaded.session, this.paths);
+          this.triggerSessionEndJob(loaded.session.transcriptPath);
+        }
       }
       const log = this.logger.child("session");
       log.info("session ended via /end", { id: sessionId });
@@ -2649,8 +2759,10 @@ export class DaemonRuntime {
       const currentEntry = this.sessions.get(sessionId);
       const oldPhone = this.whatsappSessionToSource.get(sessionId);
       if (currentEntry) {
+        const transcriptPath = currentEntry.session.transcriptPath;
         currentEntry.session = await endSession(currentEntry.session, this.paths);
         this.sessions.delete(sessionId);
+        this.triggerSessionEndJob(transcriptPath);
       }
       if (oldPhone) {
         this.whatsappSessionToSource.delete(sessionId);

@@ -19,6 +19,34 @@ import type { CronJob } from "../../src/daemon/jobs.js";
 interface RuntimeInternals {
   agent: unknown;
   model: unknown;
+  profiles: Map<
+    string,
+    {
+      name: string;
+      frontmatter: {
+        name: string;
+        model?: { provider: string; model: string };
+        thinking?: boolean;
+        tools?: string[];
+        memory?: string[];
+        skills: boolean;
+      };
+      body: string;
+      filePath: string;
+      dir: string;
+      builtin: boolean;
+    }
+  >;
+  profileAgents: Map<
+    string,
+    {
+      agent: unknown;
+      model: { name: string } | null;
+      tools: unknown[];
+      prompt: string;
+      memoryZones: unknown[];
+    }
+  >;
   handleIpcRequest(req: IpcRequest): Promise<IpcResponse>;
 }
 
@@ -115,5 +143,123 @@ describe("DaemonRuntime.runCronAgentJob", () => {
     await expect(runtime.runCronAgentJob(AGENT_JOB)).rejects.toThrow(
       /not fully initialized/,
     );
+  });
+});
+
+describe("DaemonRuntime.runCronAgentJob overload", () => {
+  it("runs the session-end agent with the transcript path as input", async () => {
+    const { runtime, internals } = makeRuntime();
+    const captured: Array<Array<Record<string, unknown>>> = [];
+    internals.agent = stubAgent(captured);
+    internals.model = { name: "test-model" };
+    // Register the session-end profile so create-session accepts it.
+    internals.profiles.set("session-end", {
+      name: "session-end",
+      frontmatter: { name: "session-end", skills: false },
+      body: "Persona of session-end.",
+      filePath: "/agents/session-end/agent.md",
+      dir: "/agents/session-end",
+      builtin: true,
+    });
+    // Warm the session-end profile agent cache — bypasses model resolution.
+    internals.profileAgents.set("session-end", {
+      agent: stubAgent(captured),
+      model: { name: "test-model" },
+      tools: [],
+      prompt: "session-end prompt",
+      memoryZones: [],
+    });
+
+    const sessionId = await runtime.runCronAgentJob("session-end", {
+      transcript: "/tmp/x/session.jsonl",
+    });
+    expect(sessionId).toBeTruthy();
+
+    expect(captured).toHaveLength(1);
+    const firstMsg = captured[0]![0] as { role: string; content: string };
+    expect(firstMsg.role).toBe("user");
+    expect(firstMsg.content).toContain("/tmp/x/session.jsonl");
+    expect(firstMsg.content).toContain(".protocol.md");
+  });
+
+  it("throws when the ad-hoc job input is missing", async () => {
+    const { runtime, internals } = makeRuntime();
+    internals.agent = stubAgent([]);
+    internals.model = { name: "test-model" };
+
+    // @ts-expect-error — missing input on purpose
+    await expect(runtime.runCronAgentJob("session-end")).rejects.toThrow(
+      /requires an input object/,
+    );
+  });
+});
+
+describe("session-end hook after end-session", () => {
+  it("starts the session-end agent after a session ends (fire-and-forget)", async () => {
+    const { runtime, internals } = makeRuntime();
+    internals.agent = stubAgent([]);
+    internals.model = { name: "test-model" };
+    // Register + warm the session-end profile.
+    internals.profiles.set("session-end", {
+      name: "session-end",
+      frontmatter: { name: "session-end", skills: false },
+      body: "Persona of session-end.",
+      filePath: "/agents/session-end/agent.md",
+      dir: "/agents/session-end",
+      builtin: true,
+    });
+
+    // The session-end stub resolves a promise on first run so we can
+    // await the fire-and-forget trigger.
+    let resolveRun: (() => void) | undefined;
+    const ran = new Promise<void>((resolve) => {
+      resolveRun = resolve;
+    });
+    const sessionEndCaptured: Array<Array<Record<string, unknown>>> = [];
+    const sessionEndStub = {
+      run: async (messages: Array<Record<string, unknown>>) => {
+        sessionEndCaptured.push([...messages]);
+        resolveRun?.();
+        return {
+          aborted: false,
+          finalMessage: "protocol written",
+          turns: 1,
+          completedTurns: 1,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            totalTokens: 2,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+        };
+      },
+    };
+    internals.profileAgents.set("session-end", {
+      agent: sessionEndStub,
+      model: { name: "test-model" },
+      tools: [],
+      prompt: "session-end prompt",
+      memoryZones: [],
+    });
+
+    // Create a session, then end it via IPC — the hook must fire.
+    const created = await internals.handleIpcRequest({
+      type: "create-session",
+    });
+    if (created.type !== "session-created") throw new Error("session not created");
+
+    const ended = await internals.handleIpcRequest({
+      type: "end-session",
+      sessionId: created.sessionId,
+    });
+    expect(ended.type).toBe("session-ended");
+
+    await ran;
+    expect(sessionEndCaptured).toHaveLength(1);
+    const firstMsg = sessionEndCaptured[0]![0] as { role: string; content: string };
+    expect(firstMsg.role).toBe("user");
+    expect(firstMsg.content).toContain(".jsonl");
+    expect(firstMsg.content).toContain(".protocol.md");
   });
 });
