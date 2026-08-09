@@ -221,8 +221,17 @@ async function handleInboundMessage(
     if (effectiveJid.includes("@lid") && client) {
       const pn = await client.resolveLidToPn(effectiveJid);
       if (pn) {
-        opts.log(`LID resolved: ${effectiveJid} → ${pn}`, "info");
-        effectiveJid = pn;
+        // Baileys' LID mapping may return a device-specific JID like
+        // "4915110619636:0@s.whatsapp.net". The ":0" suffix selects a
+        // different session key pair which causes decryption issues on
+        // WhatsApp Web. Strip it so outbound messages use the same JID
+        // format as the restart/deploy path.
+        const cleanPun = pn.replace(/:(\d+)@/, "@");
+        if (cleanPun !== pn) {
+          opts.log(`LID PN had device suffix, stripped: ${pn} → ${cleanPun}`, "info");
+        }
+        opts.log(`LID resolved: ${effectiveJid} → ${cleanPun}`, "info");
+        effectiveJid = cleanPun;
         source = extractPhoneNumber(effectiveJid);
       } else {
         opts.log(`LID resolution failed for ${effectiveJid} (pushName: ${msg.pushName})`, "warn");
