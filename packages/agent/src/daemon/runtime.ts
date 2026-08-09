@@ -103,6 +103,7 @@ import {
   RESTART_FOLLOWUP_PROMPT,
 } from "./selfModify.js";
 import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
+import { waitForChannelReady } from "./restartPing.js";
 
 /**
  * Heartbeat hook — periodic self-check interface.
@@ -364,6 +365,10 @@ export class DaemonRuntime {
             marker.followUp === true && marker.replyTarget
               ? () => this.runRestartFollowUp(marker.replyTarget, marker.reason)
               : undefined,
+            () => waitForChannelReady(plugin, (msg, level, data) => {
+              if (level === "warn") log.warn(msg, data);
+              else log.info(msg, data);
+            }),
           );
         } catch (err) {
           log.warn("restart ping send failed — marker already consumed", {
@@ -478,12 +483,20 @@ export class DaemonRuntime {
    *
    * @param gitHeadOverride New HEAD to record in the marker (e.g. after a
    *   deploy merged a branch). Defaults to the current repo HEAD.
+   * @param followUp Whether the boot handler should run a follow-up turn
+   *   instead of the static ping after the restart.
+   * @param awaitBeforeRestart Called right before an immediate restart when
+   *   no turn is running. Lets the caller flush the confirmation message
+   *   ("Deploy prepared, restarting…") through the channel BEFORE the
+   *   shutdown begins — a send queued in the same tick as the shutdown can
+   *   be cut off before it flushes.
    */
   async requestRestartAfterTurn(
     grund: string,
     benachrichtigeSession?: string,
     gitHeadOverride?: string,
     followUp?: boolean,
+    awaitBeforeRestart?: () => Promise<void>,
   ): Promise<void> {
     const log = this.logger.child("self");
     log.info("requestRestartAfterTurn", {
@@ -517,6 +530,12 @@ export class DaemonRuntime {
     }
 
     // No turn running — restart now via the clean shutdown path (exit 1).
+    // If the caller needs to flush a confirmation message first (e.g. the
+    // "Deploy prepared, restarting…" response), await it BEFORE the shutdown
+    // is scheduled — otherwise the send may be cut off mid-flush.
+    if (awaitBeforeRestart) {
+      await awaitBeforeRestart();
+    }
     // Deferred to the next macrotask so the caller's response (socket
     // write / WhatsApp outbound) can flush before the gateways stop.
     setImmediate(() => {
@@ -2294,14 +2313,25 @@ export class DaemonRuntime {
         };
       }
 
-      await this.requestRestartAfterTurn("manual /restart", replyTarget);
+      const immediateResponse = "Restarting — back in a few seconds.";
+      await this.requestRestartAfterTurn(
+        "manual /restart",
+        replyTarget,
+        undefined,
+        false,
+        async () => {
+          await this.sendChannelResponse(sessionId, immediateResponse);
+        },
+      );
 
       if (this.turnActive) {
         return {
           response: "Restart scheduled — will restart after the current turn finishes.",
         };
       }
-      return { response: "Restarting — back in a few seconds." };
+      // No turn running: the confirmation was already flushed to the channel
+      // by awaitBeforeRestart — don't send it twice.
+      return { response: "" };
     }
 
     // /deploy <branch> — merge a branch into main, build/test, restart
@@ -2356,10 +2386,15 @@ export class DaemonRuntime {
       // Erfolg: Marker schreiben + Deferred Restart über den gemeinsamen
       // requestRestartAfterTurn-Pfad. gitHead kommt aus dem Deploy-Ergebnis.
       const replyTarget = this.whatsappSessionToSource.get(sessionId) ?? "";
+      const immediateResponse = "Deploy prepared, restarting…";
       await this.requestRestartAfterTurn(
         `deploy ${branch}`,
         replyTarget,
         result.gitHead,
+        false,
+        async () => {
+          await this.sendChannelResponse(sessionId, immediateResponse);
+        },
       );
 
       if (this.turnActive) {
@@ -2368,13 +2403,42 @@ export class DaemonRuntime {
             "Deploy prepared, restarting… (after the current turn finishes)",
         };
       }
-      return { response: "Deploy prepared, restarting…" };
+      // No turn running: the confirmation was already flushed to the channel
+      // by awaitBeforeRestart — don't send it twice.
+      return { response: "" };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error("deploy command failed", { error: msg });
       return { response: `Deploy failed: ${msg}` };
     } finally {
       this.selfModifyInFlight = false;
+    }
+  }
+
+  /**
+   * Sends a command response to the session's WhatsApp channel, awaiting
+   * the actual send. Used before an immediate (no-turn) restart so the
+   * confirmation message is guaranteed to reach Baileys BEFORE the
+   * shutdown begins. Falls back to a warn log if no channel/session is
+   * available — the restart still proceeds.
+   */
+  private async sendChannelResponse(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const source = this.whatsappSessionToSource.get(sessionId);
+    if (!source) return;
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (!plugin) return;
+    const log = this.logger.child("self");
+    try {
+      await plugin.sendMessage(formatJid(source), { text });
+      log.info("pre-restart confirmation sent", { sessionId, target: source });
+    } catch (err) {
+      log.warn("pre-restart confirmation send failed", {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

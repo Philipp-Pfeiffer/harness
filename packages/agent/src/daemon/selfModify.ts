@@ -72,14 +72,36 @@ export const RESTART_FOLLOWUP_PROMPT = (reason: string): string =>
  * is called first — it triggers a short agent turn on the reply-target
  * session. If the follow-up fails (throws or rejects), the static ping is
  * sent as a fallback so the user always learns that the daemon is back.
+ *
+ * `waitForReady` (optional) is awaited before ANY send — the WhatsApp
+ * connection may still be establishing right after boot, and sending
+ * before it is open fails with "Connection Closed". It applies to the
+ * static ping AND the follow-up turn.
  */
 export async function sendRestartPing(
   marker: RestartMarker,
   sendMessage: (target: string, payload: { text: string }) => Promise<void>,
   log: (msg: string, level?: "info" | "warn" | "error", data?: Record<string, unknown>) => void,
   runFollowUp?: () => Promise<void>,
+  waitForReady?: () => Promise<void>,
 ): Promise<void> {
   const text = `Back online. Reason: ${marker.reason}. HEAD: ${marker.gitHead}`;
+
+  try {
+    await waitForReady?.();
+  } catch (err) {
+    // Deadline exceeded: connection never came up. Consume the marker and
+    // give up — the user is not reachable right now, retrying would only
+    // produce a retry storm on every boot.
+    log(
+      `restart ping skipped — WhatsApp not connected: ${
+        err instanceof Error ? err.message : String(err)
+      } (marker consumed)`,
+      "warn",
+      { target: marker.replyTarget },
+    );
+    return;
+  }
 
   if (marker.followUp === true && runFollowUp) {
     try {

@@ -280,21 +280,75 @@ describe("/deploy channel command", () => {
     exitSpy.mockRestore();
   });
 
-  it("success path: marker + requestRestartAfterTurn, no turn → restart now", async () => {
+  it("success path: marker + requestRestartAfterTurn, no turn → confirmation sent to channel first, then restart", async () => {
     const runtime = makeRuntime();
     const shutdownSpy = mockShutdown(runtime);
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
     vi.spyOn(deployModule, "runDeploy").mockResolvedValue({
       ok: true,
       message: "Deploy prepared.",
       gitHead: "newhash123",
     });
 
-    const result = await runtime.handleChannelSlashCommand("s1", "/deploy feat/x");
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/deploy feat/x");
     expect(result).not.toBeNull();
-    expect(result!.response).toContain("Deploy prepared, restarting");
+    // No turn running → the confirmation is flushed to the channel and
+    // the response slot is empty (nothing left to send via outbound).
+    expect(result!.response).toBe("");
+    // Confirmation was sent through the channel BEFORE the shutdown.
+    expect(sendMock).toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: "Deploy prepared, restarting…" }),
+    );
     const marker = await readMarker();
     expect(marker?.reason).toBe("deploy feat/x");
     expect(marker?.gitHead).toBe("newhash123");
+    await flushImmediate();
+    expect(shutdownSpy).toHaveBeenCalledWith("self-restart", 1);
+  });
+
+  it("no turn: pre-restart confirmation send completes before the shutdown signal", async () => {
+    const runtime = makeRuntime();
+    const shutdownSpy = mockShutdown(runtime);
+    // The send resolves only when explicitly released — proves the restart
+    // is NOT scheduled until the confirmation message has fully flushed.
+    let releaseSend!: () => void;
+    const sendMock = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseSend = resolve;
+        }),
+    );
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
+    vi.spyOn(deployModule, "runDeploy").mockResolvedValue({
+      ok: true,
+      message: "Deploy prepared.",
+      gitHead: "newhash123",
+    });
+
+    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+    const command = runtime.handleChannelSlashCommand(sessionId, "/deploy feat/x");
+
+    // Give the handler a tick to reach the send; the shutdown must still
+    // be pending because the send has not resolved yet.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(shutdownSpy).not.toHaveBeenCalled();
+    expect(sendMock).toHaveBeenCalledTimes(1);
+
+    // Release the send — only now may the restart be scheduled.
+    releaseSend();
+    const result = await command;
+    expect(result!.response).toBe("");
     await flushImmediate();
     expect(shutdownSpy).toHaveBeenCalledWith("self-restart", 1);
   });
@@ -351,7 +405,9 @@ describe("/restart channel command", () => {
 
     const result = await runtime.handleChannelSlashCommand("s1", "/restart");
     expect(result).not.toBeNull();
-    expect(result!.response).toContain("Restarting");
+    // No turn running → confirmation went to the channel (no WhatsApp
+    // session registered here, so nothing to send), response slot empty.
+    expect(result!.response).toBe("");
     expect(deploySpy).not.toHaveBeenCalled();
     await flushImmediate();
     expect(shutdownSpy).toHaveBeenCalledWith("self-restart", 1);
