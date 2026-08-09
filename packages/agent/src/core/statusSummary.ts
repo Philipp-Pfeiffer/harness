@@ -64,6 +64,10 @@ export interface StatusSummary {
   sessionTokensOut: string;
   /** Context fill percentage (current context estimate / context window). */
   contextFill: string;
+  /** Estimated tokens currently in context (for the fill percentage). */
+  contextTokens: string;
+  /** Model context window in tokens (for the fill percentage). */
+  contextWindow: string;
   cacheHitRate: string;
   toolCalls: string;
   errors: string;
@@ -260,6 +264,9 @@ export async function buildStatusSummary(
     ? `${Math.min(100, Math.round((contextTokens / context.contextWindow) * 100))}%`
     : "n/a";
 
+  const contextTokensStr = contextTokens !== undefined ? formatTokens(contextTokens) : "n/a";
+  const contextWindowStr = context.contextWindow !== undefined ? formatTokens(context.contextWindow) : "n/a";
+
   const cacheHitRate = metrics
     ? formatCacheHitRate(metrics.inputTokens, metrics.cacheRead, metrics.cacheWrite)
     : "n/a";
@@ -276,6 +283,8 @@ export async function buildStatusSummary(
     sessionTokensIn,
     sessionTokensOut,
     contextFill,
+    contextTokens: contextTokensStr,
+    contextWindow: contextWindowStr,
     cacheHitRate,
     toolCalls,
     errors,
@@ -300,7 +309,7 @@ export function formatStatusSummary(summary: StatusSummary): string {
     `Session ID:   ${summary.sessionId}`,
     `Tokens today: ${summary.tokensIn} in / ${summary.tokensOut} out`,
     `Session:      ${summary.sessionTokensIn} in / ${summary.sessionTokensOut} out`,
-    `Context fill: ${summary.contextFill}`,
+    `Context fill: ${summary.contextFill} (${summary.contextTokens} / ${summary.contextWindow})`,
     `Cache hit:    ${summary.cacheHitRate}`,
     `Session total: ${summary.sessionTokens}`,
     `Tool calls:   ${summary.toolCalls} today`,

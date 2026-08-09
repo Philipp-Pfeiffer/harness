@@ -359,6 +359,8 @@ describe("context fill", () => {
       null,
     );
     expect(summary.contextFill).toBe("50%");
+    expect(summary.contextTokens).toBe("64.0k");
+    expect(summary.contextWindow).toBe("128.0k");
   });
 
   it("caps context fill at 100%", async () => {
@@ -405,7 +407,7 @@ describe("context fill", () => {
     expect(summary.contextFill).toBe("n/a");
   });
 
-  it("includes context fill in formatted output", async () => {
+  it("includes context fill with concrete numbers in formatted output", async () => {
     const summary = await buildStatusSummary(
       {
         ...baseContext,
@@ -415,8 +417,7 @@ describe("context fill", () => {
       null,
     );
     const output = formatStatusSummary(summary);
-    expect(output).toContain("Context fill:");
-    expect(output).toContain("75%");
+    expect(output).toContain("Context fill: 75% (96.0k / 128.0k)");
   });
 });
 

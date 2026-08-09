@@ -25,12 +25,14 @@ aktuellen Session, und wann droht Kompaktierung?**
 
 - `StatusContext` um `contextWindow` (Modell-Context-Limit) und `contextTokens`
   (Live-Schätzung des Kontexts) erweitert.
-- `StatusSummary` um `sessionTokensIn`, `sessionTokensOut` und `contextFill`
-  erweitert.
+- `StatusSummary` um `sessionTokensIn`, `sessionTokensOut`, `contextFill`,
+  `contextTokens` und `contextWindow` erweitert.
 - `buildStatusSummary` berechnet:
   - `Session: <in> in / <out> out` aus `sessionUsage` (input + cacheRead +
     cacheWrite als "in", output als "out") — diese Session, nicht heute.
-  - `Context fill: X%` = `contextTokens / contextWindow`, gekappt bei 100 %.
+  - `Context fill: X% (Y / Z)` — Prozentwert plus konkrete Zahlen:
+    geschätzte Kontextgröße `Y` und Modell-Context-Window `Z`, beide als
+    Tokens formatiert (z. B. `75% (96.0k / 128.0k)`). Gekappt bei 100 %.
     Ohne `contextTokens` fällt es auf die Session-Input-Summe zurück.
 - `Tokens today` bleibt als eigene Zeile erhalten.
 - `formatStatusSummary` um die zwei neuen Zeilen erweitert.
