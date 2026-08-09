@@ -319,3 +319,61 @@ describe("EXEC_NO_FLY_PATTERNS export", () => {
     expect(reasons).toContain("Fork bomb pattern blocked");
   });
 });
+
+describe("exec no-fly: daemon self-restart/suicide blocking", () => {
+  const blockedCommands = [
+    // systemctl against the daemon (user and system scope)
+    "systemctl --user restart harness-daemon.service",
+    "systemctl --user stop harness-daemon",
+    "systemctl --user kill harness-daemon.service",
+    "systemctl restart harness-daemon",
+    "systemctl stop harness-daemon.service",
+    "systemctl --user restart harness-daemon",
+    // nested via nohup + bash -c + sleep chain + background/disown
+    "nohup bash -c 'sleep 20 && systemctl --user restart harness-daemon.service' >/tmp/x 2>&1 & disown",
+    "nohup bash -c 'sleep 20 && systemctl --user stop harness-daemon' >/tmp/x 2>&1 & disown",
+    "nohup bash -c 'sleep 20 && systemctl --user kill harness-daemon' >/tmp/x 2>&1 & disown",
+    // kill/pkill/killall against the daemon process (incl. $()/pgrep indirection)
+    "kill $(pgrep -f harness-daemon)",
+    "kill $(pgrep harness)",
+    "pkill -f harness",
+    "pkill -f 'harness daemon'",
+    "pkill -9 -f harness",
+    "killall harness-daemon",
+    "killall harness",
+    // nested variant
+    "nohup bash -c 'sleep 20 && pkill -f harness' >/tmp/x 2>&1 & disown",
+  ];
+
+  for (const cmd of blockedCommands) {
+    it(`blocks: ${cmd}`, async () => {
+      const result = await executeExec({ command: cmd });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("Blocked destructive command");
+      expect(result.content).toContain("request_restart");
+    });
+  }
+
+  const allowedCommands = [
+    // harmless systemctl usage against unrelated units
+    "systemctl --user status harness-daemon",
+    "systemctl --user status harness-daemon.service",
+    "systemctl status sshd",
+    "systemctl list-units",
+    "systemctl list-unit-files",
+    "systemctl --user daemon-reload",
+    // unrelated or read-only process listing
+    "ps aux | grep harness",
+    "echo harness",
+    "pkill -f sshd",
+    "killall sshd",
+    "kill 12345",
+  ];
+
+  for (const cmd of allowedCommands) {
+    it(`does not block: ${cmd}`, async () => {
+      const result = await executeExec({ command: cmd });
+      expect(result.isError).toBe(false);
+    });
+  }
+});

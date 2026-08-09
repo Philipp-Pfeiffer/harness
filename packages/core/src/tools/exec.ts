@@ -505,18 +505,18 @@ export async function executeExec(
   }
 
   if (args.background) {
-    return executeExecBackground(args);
+    return await executeExecBackground(args);
   }
 
   if (args.yieldMs !== undefined) {
     if (args.pty) {
-      return executeExecPty({ ...args, yieldMs: args.yieldMs }, logger);
+      return await executeExecPty({ ...args, yieldMs: args.yieldMs }, logger);
     }
-    return executeExecSyncWithYield({ ...args, yieldMs: args.yieldMs });
+    return await executeExecSyncWithYield({ ...args, yieldMs: args.yieldMs });
   }
 
   if (args.pty) {
-    return executeExecPty({
+    return await executeExecPty({
       command: args.command,
       cwd: args.cwd,
       env: args.env,
@@ -525,13 +525,13 @@ export async function executeExec(
     }, logger);
   }
 
-  return executeExecSync({ ...args, abortSignal });
+  return await executeExecSync({ ...args, abortSignal });
 }
 
 export const execTool: Tool<typeof ExecArgs> = {
   name: "exec",
   description:
-    "Execute a CLI command. Supports pipes, redirects, globs, environment overrides, stdin, configurable timeout, PTY mode for interactive CLIs (vim, htop, claude, gemini, codex), and elevated execution via passwordless sudo. Returns combined output with exit code. Default timeout 30s, output capped at 64 KB. With yieldMs (default 10000), processes running longer than the yield threshold transition to background and return a handle for later polling. Some destructive commands (e.g. rm -rf /) are blocked.",
+    "Execute a CLI command. Supports pipes, redirects, globs, environment overrides, stdin, configurable timeout, PTY mode for interactive CLIs (vim, htop, claude, gemini, codex), and elevated execution via passwordless sudo. Returns combined output with exit code. Default timeout 30s, output capped at 64 KB. With yieldMs (default 10000), processes running longer than the yield threshold transition to background and return a handle for later polling. Some destructive commands (e.g. rm -rf /) are blocked. Daemon restarts run exclusively through the request_restart tool — never restart the harness daemon via systemctl or kill.",
   parameters: ExecArgs,
   async execute(args, context) {
     return executeExec(args, context?.logger, context?.signal);
