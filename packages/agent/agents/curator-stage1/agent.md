@@ -1,6 +1,6 @@
 ---
 name: curator-stage1
-model: deepseek/v4-flash
+model: @preset/deepseek-flash
 thinking: true
 tools: readFile, write, search_memory
 memory: notes
