@@ -46,6 +46,20 @@ export interface ToolCallContext {
    */
   channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional deferred-restart capability for the `request_restart` tool.
+   * Injected by the daemon for running sessions; the tool calls it with a
+   * reason and the daemon schedules the restart for after the turn. When
+   * absent (e.g. TUI in-process without a daemon), `request_restart`
+   * returns an error.
+   */
+  requestRestart?: (reason: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * When true, this turn is a post-restart follow-up turn. The
+   * `request_restart` tool refuses to schedule another restart while this
+   * flag is set — otherwise an agent-initiated restart could loop.
+   */
+  postRestartFollowUp?: boolean;
+  /**
    * Optional status callback for long-running tools (e.g. browser sub-agent).
    * When present, tools may emit progress updates that reach the TUI via IPC.
    */

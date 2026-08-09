@@ -122,6 +122,17 @@ export interface RunOptions {
    */
   channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional deferred-restart capability for the `request_restart` tool.
+   * Injected by the daemon for running sessions; passed through to the
+   * ToolCallContext so the tool can schedule a graceful daemon restart.
+   */
+  requestRestart?: (reason: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Marks this run as a post-restart follow-up turn. The `request_restart`
+   * tool refuses to schedule another restart while this flag is set.
+   */
+  postRestartFollowUp?: boolean;
+  /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
    * per-agent-instance default. Never a process-global scope.
@@ -410,7 +421,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, systemPromptAddendum } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, requestRestart, postRestartFollowUp, systemPromptAddendum } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -430,6 +441,8 @@ export function createAgent(config: AgentConfig): Agent {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
         logger: logger,
         channelFileSender,
+        requestRestart,
+        postRestartFollowUp,
         onStatus: (status) => onEvent?.({ type: "status", status }),
         signal,
       };
