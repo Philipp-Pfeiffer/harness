@@ -72,9 +72,26 @@ Jeder andere Exit-Code wird vom Daemon als `BUILD_FAILED` (Rollback erwartet) be
 |---------|-----------|
 | **Config** (`~/harness/.env`, `~/harness/config.json`) | Autonom änderbar — das ist HOME, nicht CODE. |
 | **Config-Reload** | Über `harness reload-config` (hot-reload) — ohne Neustart, wo möglich. |
-| **Restart** | Nur über Deferred Restart: `/restart` (WhatsApp) oder Restart-Marker (`$HARNESS_STATE/pending-restart.json`). Niemals direkt killen. |
+| **Restart** | Nur über Deferred Restart: `/restart` (WhatsApp), Restart-Marker (`$HARNESS_STATE/pending-restart.json`) oder das `request_restart`-Tool. Niemals direkt killen. |
 
 Regel: **Code** (Repo) → nur nach Philipps Bestätigung via `/deploy`. **Config** → autonom, Restart nur über den Deferred-Restart-Pfad.
+
+### Config-Änderung mit Neustart-Bedarf (agent-seitig)
+
+Braucht eine Config-Änderung einen Neustart (z. B. neue API-Keys in
+`~/harness/.env`, Modell-/Provider-/Gateway-Änderungen in `config.json`),
+löst der Agent den Restart **selbst** über das `request_restart`-Tool aus:
+
+- **`request_restart(reason)` verwenden** — nie `/restart` beim User
+  erbetteln, nie `systemctl`/`kill` nutzen.
+- Das Tool plant den Restart nach Ende des aktuellen Turns (Deferred
+  Restart, gleicher Marker-Pfad wie `/restart`). Der User bekommt vorher die
+  Bestätigungsantwort des Turns, nach dem Neustart die Rückmeldung des
+  FollowUp-Turns (Verifikation, dass die Änderung gegriffen hat).
+- Falls ein Restart/Deploy bereits ansteht, antwortet das Tool mit
+  "restart already scheduled" — dann ist nichts weiter zu tun.
+- Während des FollowUp-Turns nach einem agent-initiierten Restart ist
+  `request_restart` gesperrt (Loop-Breaker).
 
 ---
 
