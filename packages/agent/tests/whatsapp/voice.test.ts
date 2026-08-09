@@ -33,7 +33,7 @@ beforeEach(async () => {
   await mkdir(TEST_DIR, { recursive: true });
   await writeFile(AUDIO_FILE, "fake-audio-data");
   delete process.env.ASSEMBLYAI_API_KEY;
-  vi.useFakeTimers();
+  vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
 afterEach(async () => {
@@ -43,20 +43,6 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
-
-/** Runs a promise while advancing fake timers, so sleep(3000) resolves quickly. */
-async function withTimers<T>(fn: () => Promise<T>): Promise<T> {
-  const promise = fn();
-  let done = false;
-  void promise.finally(() => {
-    done = true;
-  });
-  // Each advance fires pending sleep() timeouts, letting the poll loop proceed.
-  for (let i = 0; i < 200 && !done; i++) {
-    await vi.advanceTimersByTimeAsync(3000);
-  }
-  return promise;
-}
 
 describe("transcribeVoice", () => {
   it("returns missing-api-key when ASSEMBLYAI_API_KEY is not set", async () => {
@@ -114,16 +100,14 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "error", error: "Account quota exceeded" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() =>
-      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
-    );
+    const result = await transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("transcription-error");
       expect(result.detail).toBe("Account quota exceeded");
     }
-  }, 20_000);
+  });
 
   it("returns timeout when polling never completes", async () => {
     process.env.ASSEMBLYAI_API_KEY = "test-key";
@@ -133,15 +117,13 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "queued" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() =>
-      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
-    );
+    const result = await transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 });
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toBe("timeout");
     }
-  }, 20_000);
+  });
 
   it("returns the transcript text on success", async () => {
     process.env.ASSEMBLYAI_API_KEY = "test-key";
@@ -151,10 +133,8 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "completed", text: "Hallo Welt" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() =>
-      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
-    );
+    const result = await transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 });
 
     expect(result).toEqual({ ok: true, text: "Hallo Welt" });
-  }, 20_000);
+  });
 });
