@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { rm, mkdir, readFile } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Agent, RunResult, Model } from "@harness/core";
@@ -122,6 +122,89 @@ describe("modelRef persistence via /model", () => {
     expect(fresh!.newSessionId).toBeDefined();
     const newEntry = internals.sessions.get(fresh!.newSessionId!);
     expect(newEntry?.session.modelRef).toBeUndefined();
+  });
+});
+
+describe("resolveWhatsAppSession after daemon restart", () => {
+  function makeRuntime() {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as {
+      agent: Agent;
+      model: Model<Api>;
+      configModels: ConfigModel[];
+      sessions: Map<string, unknown>;
+      whatsappSessions: Map<string, string>;
+      whatsappSessionToSource: Map<string, string>;
+      channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+    };
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS;
+    return { runtime, internals };
+  }
+
+  /** Creates a persisted WhatsApp session via the IPC path and backdates its index entry. */
+  async function createPersistedSession(
+    runtime: DaemonRuntime,
+    phone: string,
+    lastActivity: string,
+  ): Promise<string> {
+    const created = await (runtime as unknown as {
+      handleIpcRequest: (r: { type: "create-session"; origin: "whatsapp"; title?: string }) => Promise<{ type: string; sessionId?: string }>;
+    }).handleIpcRequest({ type: "create-session", origin: "whatsapp", title: `WhatsApp: ${phone}` });
+    if (created.type !== "session-created" || !created.sessionId) {
+      throw new Error("session creation failed");
+    }
+    const sessionId = created.sessionId;
+
+    // Backdate lastActivity in the index so the resolution sees the requested age.
+    const indexPath = join(resolveHarnessPaths().sessions, "sessions.json");
+    const index = JSON.parse(await readFile(indexPath, "utf-8")) as Array<{ sessionId: string; lastActivity: string }>;
+    const entry = index.find((e) => e.sessionId === sessionId);
+    if (!entry) throw new Error("session missing from index");
+    entry.lastActivity = lastActivity;
+    await writeFile(indexPath, JSON.stringify(index, null, 2) + "\n", "utf-8");
+
+    return sessionId;
+  }
+
+  it("returns rotated=true when the persisted session is older than 8h and sends the reset notice", async () => {
+    const { runtime } = makeRuntime();
+    const phone = "491701234567";
+    await createPersistedSession(runtime, phone, new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString());
+
+    // Fresh runtime with empty in-memory maps simulates the daemon restart.
+    const { runtime: fresh, internals } = makeRuntime();
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    internals.channelPlugins.set("whatsapp", { sendMessage: sendMock });
+
+    const resolved = await (fresh as unknown as {
+      resolveWhatsAppSession: (s: string) => Promise<{ sessionId: string; rotated: boolean }>;
+    }).resolveWhatsAppSession(phone);
+
+    expect(resolved.rotated).toBe(true);
+    expect(resolved.sessionId).not.toBe("");
+    // Reset notice was sent for the new session.
+    expect(sendMock).toHaveBeenCalledWith(
+      `${phone}@s.whatsapp.net`,
+      expect.objectContaining({ text: expect.stringContaining("Neue Session gestartet") }),
+    );
+    // Maps point at the new session.
+    expect(internals.whatsappSessions.get(phone)).toBe(resolved.sessionId);
+  });
+
+  it("returns rotated=false when the persisted session is recent", async () => {
+    const { runtime } = makeRuntime();
+    const phone = "491701234567";
+    const sessionId = await createPersistedSession(runtime, phone, new Date().toISOString());
+
+    const { runtime: fresh } = makeRuntime();
+    const resolved = await (fresh as unknown as {
+      resolveWhatsAppSession: (s: string) => Promise<{ sessionId: string; rotated: boolean }>;
+    }).resolveWhatsAppSession(phone);
+
+    expect(resolved.rotated).toBe(false);
+    expect(resolved.sessionId).toBe(sessionId);
   });
 });
 

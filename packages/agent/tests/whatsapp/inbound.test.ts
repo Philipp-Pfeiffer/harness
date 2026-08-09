@@ -6,7 +6,9 @@
  * - Abort-and-Restart: new message <5s after turn start, before first tool call
  *   → restart with combined context (max 2 restarts, then steer)
  * - After first tool call: only steer, no restart
- * - 8h inactivity: compaction triggered before turn
+ * - 8h inactivity: compaction triggered before turn; after rotation the
+ *   current message is submitted immediately (no debounce) as first turn
+ * - First turn after resolution-rotation (daemon restart): immediate turn
  * - Test-Mode: echo instead of agent turns, structured log events
  * - Partial output of aborted turn is discarded
  * - pushAbortAnnotation does NOT fire (internal abort ≠ user abort)
@@ -34,6 +36,7 @@ function createEvent(source: string, text: string, extra?: Partial<ChannelInboun
 function createMockCallbacks() {
   let toolExecuted = false;
   let resolveTurn: ((result: { finalResponse: string }) => void) | null = null;
+  let resolveResult = { sessionId: "", rotated: false };
 
   return {
     callbacks: {
@@ -44,13 +47,19 @@ function createMockCallbacks() {
       }),
       compactSession: vi.fn(async () => {}),
       rotateSessionForInactivity: vi.fn(async (source: string, _oldSessionId: string) => `session-rotated-${source}`),
-      resolveSession: vi.fn(async (source: string) => `session-${source}`),
+      resolveSession: vi.fn(async (source: string) => {
+        if (!resolveResult.sessionId) resolveResult.sessionId = `session-${source}`;
+        return { ...resolveResult };
+      }),
       sendOutbound: vi.fn(async (_target: string, _text: string) => {}),
       steer: vi.fn(),
       checkToolExecuted: vi.fn(() => toolExecuted),
       executeCommand: vi.fn(async (_sessionId: string, _text: string) => {
         return { response: `OK: ${_text}` };
       }),
+    },
+    setResolveResult: (result: { sessionId: string; rotated: boolean }) => {
+      resolveResult = result;
     },
     completeTurn: (response: string = "Agent response") => {
       resolveTurn?.({ finalResponse: response });
@@ -244,7 +253,7 @@ describe("WhatsApp Inbound Processor", () => {
   // ─── 8h Inactivity ───
 
   describe("8h Inactivity Session Rotation", () => {
-    it("rotates session when inactive >8h while daemon is running", async () => {
+    it("rotates session when inactive >8h while daemon is running, then submits immediately", async () => {
       const processor = new WhatsAppInboundProcessor({
         log: () => {},
         testMode: false,
@@ -276,14 +285,17 @@ describe("WhatsApp Inbound Processor", () => {
         "session-491701234567",
       );
 
-      // Then the debounce → turn should fire on the rotated session
-      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
-      await vi.advanceTimersByTimeAsync(10);
+      // The turn must be submitted IMMEDIATELY (no debounce wait) on the
+      // rotated session, containing the original text with provenance prefix
       expect(mock.callbacks.submitTurn).toHaveBeenLastCalledWith(
         "session-rotated-491701234567",
-        expect.stringContaining("New message after long break"),
+        "[WhatsApp · 491701234567] New message after long break",
         [],
       );
+
+      // No debounce timer should have been armed for the rotated message
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
     });
 
     it("does not rotate session within 8h", async () => {
@@ -309,6 +321,78 @@ describe("WhatsApp Inbound Processor", () => {
       await processor.processInbound(createEvent("491701234567", "Short break message"));
 
       expect(mock.callbacks.rotateSessionForInactivity).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── First Turn After Rotation ───
+
+  describe("First Turn After Session Rotation", () => {
+    it("resolves a rotated session and submits the message immediately as first turn", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Simulate daemon restart after >8h: resolveSession reports a rotated session
+      mock.setResolveResult({ sessionId: "session-rotated-491701234567", rotated: true });
+
+      await processor.processInbound(createEvent("491701234567", "My task"));
+
+      // Turn submitted immediately — no debounce timer wait
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledWith(
+        "session-rotated-491701234567",
+        "[WhatsApp · 491701234567] My task",
+        [],
+      );
+
+      // No debounce arm afterwards → exactly one turn even after the window
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps debouncing when session resolve reports no rotation", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "First"));
+      await vi.advanceTimersByTimeAsync(200);
+      await processor.processInbound(createEvent("491701234567", "Second"));
+
+      // No rotation → turn must NOT be submitted before the debounce window
+      expect(mock.callbacks.submitTurn).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn.mock.calls[0]![1]).toContain("First");
+      expect(mock.callbacks.submitTurn.mock.calls[0]![1]).toContain("Second");
+    });
+
+    it("routes slash commands through the command path even after rotation", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      mock.setResolveResult({ sessionId: "session-rotated-491701234567", rotated: true });
+
+      await processor.processInbound(createEvent("491701234567", "/help"));
+
+      // Command path: no agent turn, no debounce
+      expect(mock.callbacks.submitTurn).not.toHaveBeenCalled();
+      expect(mock.callbacks.executeCommand).toHaveBeenCalledWith(
+        "session-rotated-491701234567",
+        "/help",
+      );
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        expect.stringContaining("OK"),
+      );
     });
   });
 

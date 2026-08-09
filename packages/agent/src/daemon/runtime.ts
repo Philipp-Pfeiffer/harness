@@ -1750,7 +1750,7 @@ export class DaemonRuntime {
     }
   }
 
-  private async resolveWhatsAppSession(source: string): Promise<string> {
+  private async resolveWhatsAppSession(source: string): Promise<{ sessionId: string; rotated: boolean }> {
     const phone = extractPhoneNumber(source);
     return this.whatsappSessionLock.run(phone, () => this.resolveWhatsAppSessionInner(phone));
   }
@@ -1760,8 +1760,12 @@ export class DaemonRuntime {
    * On daemon restart: searches the session index for an existing WhatsApp
    * session matching this source. Resumes if found and <8h inactive,
    * otherwise creates a new session (notify only after >8h inactivity).
+   *
+   * Returns `{ sessionId, rotated }` where `rotated` is true when a stale
+   * (>8h inactive) session was replaced by a fresh one. The caller submits
+   * the current message immediately as the first turn instead of debouncing.
    */
-  private async resolveWhatsAppSessionInner(phone: string): Promise<string> {
+  private async resolveWhatsAppSessionInner(phone: string): Promise<{ sessionId: string; rotated: boolean }> {
     // 1. Check in-memory map first
     const existing = this.whatsappSessions.get(phone);
     if (existing) {
@@ -1781,10 +1785,10 @@ export class DaemonRuntime {
           this.sessions.set(existing, entry);
         } else {
           // Session was ended or not found — create a new one (no reset notice)
-          return this.createWhatsAppSession(phone, false);
+          return { sessionId: await this.createWhatsAppSession(phone, false), rotated: false };
         }
       }
-      return existing;
+      return { sessionId: existing, rotated: false };
     }
 
     // 2. Map is empty → search session index for existing WhatsApp session
@@ -1818,7 +1822,7 @@ export class DaemonRuntime {
             this.sessions.set(match.sessionId, entry);
             this.whatsappSessions.set(phone, match.sessionId);
             this.whatsappSessionToSource.set(match.sessionId, phone);
-            return match.sessionId;
+            return { sessionId: match.sessionId, rotated: false };
           }
         } else {
           // Session is too old (>8h) — create new one, notify in chat
@@ -1830,7 +1834,8 @@ export class DaemonRuntime {
     }
 
     // 3. Create new session
-    return this.createWhatsAppSession(phone, notifySessionReset);
+    const sessionId = await this.createWhatsAppSession(phone, notifySessionReset);
+    return { sessionId, rotated: notifySessionReset };
   }
 
   /**

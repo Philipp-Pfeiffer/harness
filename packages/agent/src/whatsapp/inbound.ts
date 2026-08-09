@@ -57,8 +57,8 @@ export interface InboundProcessorCallbacks {
   compactSession: (sessionId: string) => Promise<void>;
   /** End inactive session and start a fresh one after the 8h boundary. */
   rotateSessionForInactivity: (source: string, sessionId: string) => Promise<string>;
-  /** Resolve or create a session for a source identifier. */
-  resolveSession: (source: string) => Promise<string>;
+  /** Resolve or create a session for a source identifier. Returns whether the session was rotated (>8h). */
+  resolveSession: (source: string) => Promise<{ sessionId: string; rotated: boolean }>;
   /** Send an outbound message (rendered text) to a target JID. */
   sendOutbound: (target: string, text: string) => Promise<void>;
   /** Steer a running turn by pushing to the mailbox. */
@@ -119,7 +119,10 @@ export class WhatsAppInboundProcessor {
     try {
       // Resolve session (same logic as handleNormalMode would use)
       let state = this.sourceStates.get(event.source);
-      const sessionId = state?.sessionId ?? await this.callbacks.resolveSession(event.source);
+      const resolved = state?.sessionId
+        ? { sessionId: state.sessionId, rotated: false }
+        : await this.callbacks.resolveSession(event.source);
+      const sessionId = resolved.sessionId;
       const result = await this.callbacks.executeCommand(sessionId, event.text);
       await this.callbacks.sendOutbound(event.source, result.response);
 
@@ -181,9 +184,10 @@ export class WhatsAppInboundProcessor {
 
   private async handleNormalMode(event: ChannelInboundEvent): Promise<void> {
     let state = this.sourceStates.get(event.source);
+    let rotated = false;
 
     if (!state) {
-      const sessionId = await this.callbacks.resolveSession(event.source);
+      const resolved = await this.callbacks.resolveSession(event.source);
       state = {
         lastActivityMs: Date.now(),
         currentAbort: null,
@@ -193,12 +197,13 @@ export class WhatsAppInboundProcessor {
         debounceTimer: null,
         pendingEvents: [],
         turnRunning: false,
-        sessionId,
+        sessionId: resolved.sessionId,
         currentTurnText: "",
         currentTurnImageBlocks: [],
         currentTurnAnnotations: [],
       };
       this.sourceStates.set(event.source, state);
+      rotated = resolved.rotated;
     }
 
     // Check 8h inactivity — rotate to a fresh session before the turn
@@ -210,9 +215,26 @@ export class WhatsAppInboundProcessor {
       );
       try {
         state.sessionId = await this.callbacks.rotateSessionForInactivity(event.source, state.sessionId);
+        // A rotated session has no prior context — submit the current message
+        // immediately as the first turn instead of debouncing it.
+        rotated = true;
       } catch (err) {
         this.log(`Session rotation failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
+    }
+
+    // After a session rotation (8h inactivity): skip debounce and submit the
+    // current message immediately as the first turn of the fresh session.
+    // Guarded by !turnRunning so a message arriving mid-turn keeps using the
+    // existing abort-and-restart / steer path.
+    if (rotated && !state.turnRunning) {
+      state.pendingEvents.push(event);
+      // Fire-and-forget like the debounce path — a turn must not block the
+      // inbound pipeline; the reset notice was already sent by the rotation.
+      this.flushDebounced(event.source).catch((err) => {
+        this.log(`Immediate turn after rotation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      });
+      return;
     }
 
     // If a turn is running, check abort-and-restart conditions
