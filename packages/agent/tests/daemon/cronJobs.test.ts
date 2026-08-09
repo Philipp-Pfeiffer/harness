@@ -146,13 +146,24 @@ describe("parseCronJobFile", () => {
     ).toThrow(/duration/);
   });
 
-  it("rejects missing frontmatter and empty body", () => {
+  it("rejects missing frontmatter", () => {
     expect(() => parseCronJobFile("/jobs/plain.md", "just text")).toThrow(
       CronJobParseError,
     );
+  });
+
+  it("rejects an empty script job body", () => {
     expect(() =>
-      parseCronJobFile("/jobs/empty.md", jobFile("name: e\nschedule: 0 0 * * *\ntype: agent", "")),
+      parseCronJobFile("/jobs/empty-script.md", jobFile("name: e\nschedule: 0 0 * * *\ntype: script", "")),
     ).toThrow(/body/);
+  });
+
+  it("accepts an empty agent job body", () => {
+    const job = parseCronJobFile(
+      "/jobs/empty-agent.md",
+      jobFile("name: e\nschedule: 0 0 * * *\ntype: agent", ""),
+    );
+    expect(job.body).toBe("");
   });
 
   it("parses the optional agent profile field", () => {

@@ -32,6 +32,13 @@ interface RuntimeInternals {
   model: unknown;
   profiles: Map<string, AgentProfile>;
   profileAgents: Map<string, ProfileAgentCtx>;
+  configModels: Array<{
+    provider: string;
+    model: string;
+    alias?: string;
+    baseUrl?: string;
+    apiKey?: string;
+  }>;
   allTools: Tool[];
   defaultTools: Tool[];
   basePrompt: string;
@@ -255,6 +262,39 @@ describe("create-session with agent profiles", () => {
     if (resp.type === "error") {
       expect(resp.message).toContain("no-such-provider");
     }
+  });
+
+  it("resolves a @preset profile model via configModels", async () => {
+    const preset = makeProfile({
+      name: "worker",
+      frontmatter: {
+        model: { provider: "@preset", model: "deepseek-flash" },
+      },
+    });
+    const { internals } = makeRuntime([preset]);
+    internals.configModels = [
+      {
+        provider: "openrouter",
+        model: "@preset/deepseek-flash",
+        alias: "DeepSeek Flash",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKey: "sk-test",
+      },
+    ];
+    internals.model = { name: "fallback-model" };
+
+    const resp = await internals.handleIpcRequest({
+      type: "create-session",
+      profile: "worker",
+    });
+    expect(resp.type).toBe("session-created");
+    if (resp.type !== "session-created") return;
+
+    // The profile agent was created with the config preset, not a
+    // "Unknown provider '@preset'" error from plain resolveModel.
+    const ctx = internals.profileAgents.get("worker");
+    expect(ctx).toBeDefined();
+    expect(ctx!.model?.name).toBe("DeepSeek Flash");
   });
 
   it("runs turns of a profile session on the profile's agent", async () => {

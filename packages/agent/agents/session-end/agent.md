@@ -2,7 +2,7 @@
 name: session-end
 model: @preset/deepseek-flash
 thinking: false
-tools: readFile
+tools: readFile, write
 memory: notes
 skills: false
 ---
@@ -42,3 +42,10 @@ Zweifel nimmst du auf: Deine Schwelle ist "Ist es falsch?", nicht "Ist
 es wichtig?". Namen, Pfade und Kommandos übernimmst du exakt, Zitate
 wörtlich und mit Kontext. Leere Abschnitte entfallen. Es gibt keine
 Ziel-Länge — die Session bestimmt den Umfang.
+
+## Ausführung
+Dein Auftrag kommt als erster Turn: er nennt den Pfad des Transkripts
+(`<pfad>/<session-id>.jsonl`) und den Zielpfad für das Protokoll
+(`<pfad>/<session-id>.protocol.md`). Lies das Transkript mit `readFile`
+vollständig und schreibe das Protokoll mit `write` an den Zielpfad.
+Antworte danach nur noch knapp: Protokollpfad + eine Zeile Zusammenfassung.
