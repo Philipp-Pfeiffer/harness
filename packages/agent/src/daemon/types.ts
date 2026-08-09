@@ -75,6 +75,11 @@ export interface ChannelPlugin extends GatewayAdapter {
   sendMessage(target: string, payload: ChannelSendPayload): Promise<void>;
   /** Returns the file-type capabilities of this channel. */
   getFileCapabilities?(): ChannelFileCapabilities;
+  /**
+   * Sets the account-wide online presence ("available"/"unavailable").
+   * Optional — channels without presence reporting can omit it.
+   */
+  setPresence?(type: "available" | "unavailable", jid?: string): Promise<void>;
 }
 
 /** A file to send via the channel. */

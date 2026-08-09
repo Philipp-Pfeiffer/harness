@@ -17,6 +17,7 @@ import {
   ABORT_RESTART_WINDOW_MS,
   MAX_RESTARTS_PER_TURN,
   SESSION_INACTIVITY_THRESHOLD_MS,
+  PRESENCE_COMPOSING_REFRESH_MS,
 } from "./limits.js";
 
 type LogFn = (msg: string, level?: "info" | "warn" | "error") => void;
@@ -47,6 +48,8 @@ interface SourceState {
   currentTurnImageBlocks: InboundImageBlock[];
   /** Annotations of the currently running turn (for restart). */
   currentTurnAnnotations: string[];
+  /** Composing-indicator refresh timer for the currently running turn. */
+  presenceTimer: ReturnType<typeof setInterval> | null;
 }
 
 /** Callbacks provided by the daemon. */
@@ -67,6 +70,8 @@ export interface InboundProcessorCallbacks {
   checkToolExecuted: (sessionId: string) => boolean;
   /** Execute a slash command and return {response, newSessionId?}. */
   executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
+  /** Sends a WhatsApp presence update: "composing"/"paused" for a chat. */
+  setPresence: (type: "composing" | "paused", jid?: string) => void;
 }
 
 /** Constructor options. */
@@ -201,6 +206,7 @@ export class WhatsAppInboundProcessor {
         currentTurnText: "",
         currentTurnImageBlocks: [],
         currentTurnAnnotations: [],
+        presenceTimer: null,
       };
       this.sourceStates.set(event.source, state);
       rotated = resolved.rotated;
@@ -283,6 +289,7 @@ export class WhatsAppInboundProcessor {
         const abortController = new AbortController();
         state.currentAbort = abortController;
 
+        // Turn keeps running (abort-and-restart) — composing indicator stays active.
         this.callbacks.submitTurn(state.sessionId, fullText, combinedImageBlocks)
           .then((result) => {
             this.handleTurnComplete(event.source, state!, result.finalResponse);
@@ -364,6 +371,8 @@ export class WhatsAppInboundProcessor {
     const abortController = new AbortController();
     state.currentAbort = abortController;
 
+    this.startComposingPresence(source);
+
     try {
       const result = await this.callbacks.submitTurn(
         state.sessionId,
@@ -397,6 +406,7 @@ export class WhatsAppInboundProcessor {
     state.currentTurnText = "";
     state.currentTurnImageBlocks = [];
     state.currentTurnAnnotations = [];
+    this.stopComposingPresence(source, state);
 
     // Send the response back via the channel
     if (response) {
@@ -404,6 +414,32 @@ export class WhatsAppInboundProcessor {
         this.log(`Outbound failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       });
     }
+  }
+
+  /**
+   * Starts the composing indicator for a turn on `source` and arms a refresh
+   * interval (WhatsApp's composing state expires after ~20-30s). Sending is
+   * fire-and-forget — presence failures must never fail a turn.
+   */
+  private startComposingPresence(source: string): void {
+    const state = this.sourceStates.get(source);
+    if (!state) return;
+    this.callbacks.setPresence("composing", source);
+    state.presenceTimer = setInterval(() => {
+      this.callbacks.setPresence("composing", source);
+    }, PRESENCE_COMPOSING_REFRESH_MS);
+  }
+
+  /**
+   * Stops the composing refresh interval and clears the indicator ("paused").
+   * Called when the turn completes (response sent) or fails.
+   */
+  private stopComposingPresence(source: string, state: SourceState): void {
+    if (state.presenceTimer) {
+      clearInterval(state.presenceTimer);
+      state.presenceTimer = null;
+    }
+    this.callbacks.setPresence("paused", source);
   }
 
   /** Detects message type from the event for test-mode logging. */

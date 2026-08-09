@@ -118,3 +118,36 @@ describe("createWhatsAppClient socket options", () => {
     });
   });
 });
+
+describe("createWhatsAppClient presence updates", () => {
+  function setupClient() {
+    const sock = fakeSock();
+    makeWASocketSpy.mockReturnValue(sock);
+    useMultiFileAuthStateSpy.mockResolvedValue({
+      state: { creds: { registered: true }, keys: { get: vi.fn(), set: vi.fn() } },
+      saveCreds: vi.fn(),
+    });
+    fetchLatestBaileysVersionSpy.mockResolvedValue({ version: [2, 3000, 100] });
+
+    const client = createWhatsAppClient({
+      authDir: "/tmp/test-auth",
+      phoneNumber: "1234567890",
+      log: () => {},
+      onMessage: () => {},
+      onConnectionUpdate: () => {},
+    });
+
+    return { sock, client };
+  }
+
+  it("sendPresenceUpdate forwards type and jid to the Baileys socket", async () => {
+    const { sock, client } = setupClient();
+    await client.start();
+
+    await client.sendPresenceUpdate("composing", "491701234567");
+    expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("composing", "491701234567");
+
+    await client.sendPresenceUpdate("available");
+    expect(sock.sendPresenceUpdate).toHaveBeenCalledWith("available", undefined);
+  });
+});

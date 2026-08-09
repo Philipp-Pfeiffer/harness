@@ -22,6 +22,13 @@ export const MAX_RESTARTS_PER_TURN = 2;
 /** Inactivity threshold for session compaction (8 hours in ms). */
 export const SESSION_INACTIVITY_THRESHOLD_MS = 8 * 60 * 60 * 1_000;
 
+/**
+ * Interval for refreshing the WhatsApp composing indicator while a turn is
+ * running. WhatsApp's composing state expires after ~20-30s, so it must be
+ * re-sent well within that window.
+ */
+export const PRESENCE_COMPOSING_REFRESH_MS = 15_000;
+
 /** Reconnect backoff base (ms). */
 export const RECONNECT_BACKOFF_BASE_MS = 1_000;
 
