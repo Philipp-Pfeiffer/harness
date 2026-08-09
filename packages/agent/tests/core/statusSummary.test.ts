@@ -275,7 +275,7 @@ describe("formatStatusSummary", () => {
     const summary = await buildStatusSummary(baseContext, null);
     const output = formatStatusSummary(summary);
     const lines = output.split("\n");
-    expect(lines.length).toBe(17);
+    expect(lines.length).toBe(19);
   });
 });
 
@@ -344,5 +344,120 @@ describe("cache hit rate", () => {
     const output = formatStatusSummary(summary);
     expect(output).toContain("Cache hit:");
     expect(output).toContain("41.0%");
+  });
+});
+
+describe("context fill", () => {
+  it("computes context fill from contextTokens and contextWindow", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        contextTokens: 64_000,
+        sessionUsage: { inputTokens: 10_000, outputTokens: 5_000, totalTokens: 15_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("50%");
+    expect(summary.contextTokens).toBe("64.0k");
+    expect(summary.contextWindow).toBe("128.0k");
+  });
+
+  it("caps context fill at 100%", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        contextTokens: 200_000,
+        sessionUsage: { inputTokens: 200_000, outputTokens: 0, totalTokens: 200_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("100%");
+  });
+
+  it("falls back to session input spend when contextTokens is absent", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        sessionUsage: { inputTokens: 32_000, outputTokens: 1_000, totalTokens: 33_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("25%");
+  });
+
+  it("returns n/a when contextWindow is missing", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        sessionUsage: { inputTokens: 32_000, outputTokens: 1_000, totalTokens: 33_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("n/a");
+  });
+
+  it("returns n/a when no session usage and no contextTokens", async () => {
+    const summary = await buildStatusSummary(
+      { ...baseContext, contextWindow: 128_000 },
+      null,
+    );
+    expect(summary.contextFill).toBe("n/a");
+  });
+
+  it("includes context fill with concrete numbers in formatted output", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        contextTokens: 96_000,
+      },
+      null,
+    );
+    const output = formatStatusSummary(summary);
+    expect(output).toContain("Context fill: 75% (96.0k / 128.0k)");
+  });
+});
+
+describe("session tokens", () => {
+  it("exposes session in/out tokens separately from today", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        sessionUsage: { inputTokens: 12_400, outputTokens: 3_100, totalTokens: 15_500, cacheRead: 500, cacheWrite: 200 },
+      },
+      {
+        inputTokens: 100_000, outputTokens: 20_000, totalTokens: 120_000, cacheRead: 50_000, cacheWrite: 10_000,
+        toolCalls: 18, errors: 0, lastTurnLatencyMs: 8400,
+      },
+    );
+    // Session: input + cacheRead + cacheWrite = 12400 + 500 + 200 = 13100
+    expect(summary.sessionTokensIn).toBe("13.1k");
+    expect(summary.sessionTokensOut).toBe("3.1k");
+    expect(summary.sessionTokens).toBe("15.5k");
+    // Today remains separate
+    expect(summary.tokensIn).toBe("160.0k");
+    expect(summary.tokensOut).toBe("20.0k");
+  });
+
+  it("shows n/a for session tokens when no sessionUsage", async () => {
+    const summary = await buildStatusSummary(baseContext, null);
+    expect(summary.sessionTokensIn).toBe("n/a");
+    expect(summary.sessionTokensOut).toBe("n/a");
+  });
+
+  it("includes session tokens in formatted output", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        sessionUsage: { inputTokens: 12_400, outputTokens: 3_100, totalTokens: 15_500, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    const output = formatStatusSummary(summary);
+    expect(output).toContain("Session:      12.4k in / 3.1k out");
+    expect(output).toContain("Session total: 15.5k");
   });
 });

@@ -18,6 +18,8 @@ export interface MetricsAggregate {
 export interface StatusContext {
   /** Active model ID, e.g. "minimax-m2.7" */
   model?: string;
+  /** Model context window in tokens, used for the context-fill percentage. */
+  contextWindow?: number;
   /** Current workspace / cwd */
   workspace?: string;
   /** "active" if agent is running, "ready" otherwise */
@@ -26,6 +28,12 @@ export interface StatusContext {
   sessionId?: string;
   /** Accumulated session token usage */
   sessionUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
+  /**
+   * Estimated tokens currently in the session context (message history
+   * + system prompt + tool definitions). Falls back to the session's
+   * total input spend when not provided.
+   */
+  contextTokens?: number;
   /** Memory backend availability */
   memoryReady?: boolean;
   /** Tool calls in current session (from past turns) */
@@ -51,6 +59,15 @@ export interface StatusSummary {
   tokensIn: string;
   tokensOut: string;
   sessionTokens: string;
+  /** Tokens spent by the current session, split in/out. */
+  sessionTokensIn: string;
+  sessionTokensOut: string;
+  /** Context fill percentage (current context estimate / context window). */
+  contextFill: string;
+  /** Estimated tokens currently in context (for the fill percentage). */
+  contextTokens: string;
+  /** Model context window in tokens (for the fill percentage). */
+  contextWindow: string;
   cacheHitRate: string;
   toolCalls: string;
   errors: string;
@@ -227,6 +244,29 @@ export async function buildStatusSummary(
     ? formatTokens(context.sessionUsage.totalTokens)
     : "n/a";
 
+  const sessionTokensIn = context.sessionUsage
+    ? formatTokens(context.sessionUsage.inputTokens + context.sessionUsage.cacheRead + context.sessionUsage.cacheWrite)
+    : "n/a";
+
+  const sessionTokensOut = context.sessionUsage
+    ? formatTokens(context.sessionUsage.outputTokens)
+    : "n/a";
+
+  // Context fill: prefer the live context estimate (messages + prompt + tools,
+  // matching the compaction trigger), fall back to the session's input spend.
+  const contextTokens =
+    context.contextTokens ??
+    (context.sessionUsage
+      ? context.sessionUsage.inputTokens + context.sessionUsage.cacheRead + context.sessionUsage.cacheWrite
+      : undefined);
+
+  const contextFill = context.contextWindow && contextTokens !== undefined
+    ? `${Math.min(100, Math.round((contextTokens / context.contextWindow) * 100))}%`
+    : "n/a";
+
+  const contextTokensStr = contextTokens !== undefined ? formatTokens(contextTokens) : "n/a";
+  const contextWindowStr = context.contextWindow !== undefined ? formatTokens(context.contextWindow) : "n/a";
+
   const cacheHitRate = metrics
     ? formatCacheHitRate(metrics.inputTokens, metrics.cacheRead, metrics.cacheWrite)
     : "n/a";
@@ -240,6 +280,11 @@ export async function buildStatusSummary(
     tokensIn,
     tokensOut,
     sessionTokens,
+    sessionTokensIn,
+    sessionTokensOut,
+    contextFill,
+    contextTokens: contextTokensStr,
+    contextWindow: contextWindowStr,
     cacheHitRate,
     toolCalls,
     errors,
@@ -263,8 +308,10 @@ export function formatStatusSummary(summary: StatusSummary): string {
     `Memory:       ${summary.memory}`,
     `Session ID:   ${summary.sessionId}`,
     `Tokens today: ${summary.tokensIn} in / ${summary.tokensOut} out`,
+    `Session:      ${summary.sessionTokensIn} in / ${summary.sessionTokensOut} out`,
+    `Context fill: ${summary.contextFill} (${summary.contextTokens} / ${summary.contextWindow})`,
     `Cache hit:    ${summary.cacheHitRate}`,
-    `Session:      ${summary.sessionTokens}`,
+    `Session total: ${summary.sessionTokens}`,
     `Tool calls:   ${summary.toolCalls} today`,
     `Errors today: ${summary.errors}`,
     `Last turn:    ${summary.lastTurn}`,

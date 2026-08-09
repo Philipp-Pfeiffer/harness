@@ -19,6 +19,7 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   compactSession,
   estimateTokens,
+  estimateContextOverhead,
   loadSkills,
   validateRequires,
   readTelemetry,
@@ -2253,11 +2254,60 @@ export class DaemonRuntime {
       const entry = this.sessions.get(sessionId);
       const activeModel = entry?.session.model ?? this.model?.name ?? "unknown";
       const modelRefLabel = entry?.modelRef ? ` (ref: ${entry.modelRef})` : "";
+
+      // Resolve the model that owns this session's context window. Prefers
+      // the model switched via /model, then the session's profile model.
+      let turnModel: Model<Api> | null = null;
+      if (entry) {
+        const profile = this.resolveProfile(entry.profile) ?? this.resolveProfile("default");
+        if (profile) {
+          try {
+            turnModel = this.resolveModelRef(entry.modelRef, this.agentContextFor(profile).model ?? this.model);
+          } catch {
+            turnModel = this.model;
+          }
+        }
+      }
+      const modelForContext = turnModel ?? this.model;
+
+      // Live context estimate: message history + system prompt + tool defs.
+      // Mirrors the compaction trigger (shouldCompact) so the fill % answers
+      // "when will compaction happen?".
+      let contextTokens: number | undefined;
+      if (entry) {
+        try {
+          let promptText = this.defaultPrompt;
+          let toolSet = this.defaultTools;
+          const profile = this.resolveProfile(entry.profile) ?? this.resolveProfile("default");
+          if (profile) {
+            const ctx = this.agentContextFor(profile);
+            promptText = ctx.prompt;
+            toolSet = ctx.tools;
+          }
+          contextTokens =
+            estimateTokens(entry.messages) +
+            estimateContextOverhead(promptText, toolSet);
+        } catch {
+          // Profile model unresolvable — leave contextTokens undefined.
+        }
+      }
+
       const summary = await buildStatusSummary({
         sessionState: entry ? "active" : "ready",
         model: `${activeModel}${modelRefLabel}`,
+        contextWindow: modelForContext?.contextWindow,
         workspace: process.cwd(),
         sessionId,
+        sessionUsage: entry?.session.tokenTotals
+          ? {
+              inputTokens: entry.session.tokenTotals.inputTokens,
+              outputTokens: entry.session.tokenTotals.outputTokens,
+              totalTokens: entry.session.tokenTotals.totalTokens,
+              cacheRead: entry.session.tokenTotals.cacheRead,
+              cacheWrite: entry.session.tokenTotals.cacheWrite,
+            }
+          : undefined,
+        contextTokens,
         memoryReady: this.memoryService ? !this.memoryService.degraded : false,
         toolCalls: entry?.turnsCompleted ?? 0,
         errors: this.errorBuffer.snapshot().length,

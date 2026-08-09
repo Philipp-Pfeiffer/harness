@@ -1401,6 +1401,7 @@ export default function App({
       if (isStatusCommand(trimmed)) {
         const statusText = await handleStatusCommand(trimmed, {
           model: activeModel.id,
+          contextWindow: activeModel.contextWindow,
           workspace: paths.home,
           sessionState: isRunningRef.current ? "active" : "ready",
           sessionId: sessionIdRef.current ?? undefined,
