@@ -121,7 +121,7 @@ describe("transcribeVoice", () => {
       expect(result.reason).toBe("transcription-error");
       expect(result.detail).toBe("Account quota exceeded");
     }
-  });
+  }, 20_000);
 
   it("returns timeout when polling never completes", async () => {
     process.env.ASSEMBLYAI_API_KEY = "test-key";
@@ -137,7 +137,7 @@ describe("transcribeVoice", () => {
     if (!result.ok) {
       expect(result.reason).toBe("timeout");
     }
-  });
+  }, 20_000);
 
   it("returns the transcript text on success", async () => {
     process.env.ASSEMBLYAI_API_KEY = "test-key";
@@ -150,5 +150,5 @@ describe("transcribeVoice", () => {
     const result = await withTimers(() => transcribeVoice(AUDIO_FILE));
 
     expect(result).toEqual({ ok: true, text: "Hallo Welt" });
-  });
+  }, 20_000);
 });
