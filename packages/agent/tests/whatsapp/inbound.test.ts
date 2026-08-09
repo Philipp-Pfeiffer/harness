@@ -21,6 +21,7 @@ import {
   INBOUND_DEBOUNCE_MS,
   ABORT_RESTART_WINDOW_MS,
   SESSION_INACTIVITY_THRESHOLD_MS,
+  PRESENCE_COMPOSING_REFRESH_MS,
 } from "../../src/whatsapp/limits.js";
 
 function createEvent(source: string, text: string, extra?: Partial<ChannelInboundEvent>): ChannelInboundEvent {
@@ -57,6 +58,7 @@ function createMockCallbacks() {
       executeCommand: vi.fn(async (_sessionId: string, _text: string) => {
         return { response: `OK: ${_text}` };
       }),
+      setPresence: vi.fn(),
     },
     setResolveResult: (result: { sessionId: string; rotated: boolean }) => {
       resolveResult = result;
@@ -533,6 +535,109 @@ describe("WhatsApp Inbound Processor", () => {
       const logEntry = logCalls.find((l) => l.includes("[test] Inbound"));
       expect(logEntry).toBeDefined();
       expect(logEntry).toContain("type=sticker");
+    });
+  });
+
+  // ─── Composing Presence ───
+
+  describe("Composing Presence", () => {
+    it("starts composing at turn start and sends paused at turn end", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      // composing fired at turn start (target = phone number source)
+      expect(mock.callbacks.setPresence).toHaveBeenCalledWith("composing", "491701234567");
+
+      // Complete the turn → paused
+      mock.completeTurn("Agent response");
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.setPresence).toHaveBeenLastCalledWith("paused", "491701234567");
+      // The final call must be paused — no composing after it
+      const calls = mock.callbacks.setPresence.mock.calls;
+      expect(calls[calls.length - 1]![0]).toBe("paused");
+    });
+
+    it("refreshes composing every 15s while the turn is running", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      const composingCallsBefore = mock.callbacks.setPresence.mock.calls.filter(
+        (c) => c[0] === "composing",
+      ).length;
+      expect(composingCallsBefore).toBe(1);
+
+      // One refresh interval passes → composing sent again
+      await vi.advanceTimersByTimeAsync(PRESENCE_COMPOSING_REFRESH_MS);
+      expect(
+        mock.callbacks.setPresence.mock.calls.filter((c) => c[0] === "composing").length,
+      ).toBe(2);
+
+      // A second interval → composing sent again
+      await vi.advanceTimersByTimeAsync(PRESENCE_COMPOSING_REFRESH_MS);
+      expect(
+        mock.callbacks.setPresence.mock.calls.filter((c) => c[0] === "composing").length,
+      ).toBe(3);
+
+      // No paused yet — turn still running
+      expect(mock.callbacks.setPresence).not.toHaveBeenCalledWith("paused", expect.anything());
+    });
+
+    it("stops refreshing after the turn completes", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Complete the turn
+      mock.completeTurn("Agent response");
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mock.callbacks.setPresence).toHaveBeenLastCalledWith("paused", "491701234567");
+
+      // Even after several refresh windows, composing must NOT be sent again
+      const callsAfterPaused = mock.callbacks.setPresence.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(PRESENCE_COMPOSING_REFRESH_MS * 3);
+      expect(mock.callbacks.setPresence.mock.calls.length).toBe(callsAfterPaused);
+    });
+
+    it("does not send composing when the turn is empty (no text)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Empty turn (media-only, no text) is skipped
+      await processor.processInbound(createEvent("491701234567", "", {
+        media: [{
+          filePath: "/tmp/media/test.jpg",
+          mimeType: "image/jpeg",
+          size: 1024,
+          type: "image",
+        }],
+      }));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+
+      expect(mock.callbacks.setPresence).not.toHaveBeenCalled();
     });
   });
 

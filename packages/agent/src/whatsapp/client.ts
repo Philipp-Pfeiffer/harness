@@ -26,10 +26,10 @@ import {
   RECONNECT_BACKOFF_MAX_MS,
 } from "./limits.js";
 import { isRealtimeInboundUpsert } from "./sessionPolicy.js";
-import type { MessageUpsertType } from "baileys";
+import type { MessageUpsertType, WAPresence } from "baileys";
 
 /** Re-export WAMessage as the message type (Baileys' WebMessageInfo equivalent). */
-export type { WAMessage, DisconnectReason };
+export type { WAMessage, DisconnectReason, WAPresence };
 
 /** Prints a QR code to the terminal as ANSI art and saves PNG to ~/Downloads. */
 function printQRCode(qr: string): void {
@@ -88,6 +88,11 @@ export interface WhatsAppClient {
   resolveLidToPn(lid: string): Promise<string | null>;
   /** Marks messages as read (blue ticks). */
   markAsRead(jid: string, messageKeys: string[]): Promise<void>;
+  /**
+   * Sends a presence update to a chat or — without jid — the account-wide
+   * presence ("available"/"unavailable" = online status of the device).
+   */
+  sendPresenceUpdate(type: WAPresence, jid?: string): Promise<void>;
 }
 
 /**
@@ -299,6 +304,15 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
         opts.log(`Failed to mark as read: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
     },
+
+    async sendPresenceUpdate(type: WAPresence, jid?: string): Promise<void> {
+      if (!sock) return;
+      try {
+        await sock.sendPresenceUpdate(type, jid);
+      } catch (err) {
+        opts.log(`Failed to send presence update (${type}): ${err instanceof Error ? err.message : String(err)}`, "warn");
+      }
+    },
   };
 }
 
@@ -323,6 +337,7 @@ export function createMockWhatsAppClient(): WhatsAppClient {
       return null;
     },
     async markAsRead(_jid: string, _messageKeys: string[]): Promise<void> {},
+    async sendPresenceUpdate(_type: WAPresence, _jid?: string): Promise<void> {},
   };
 }
 

@@ -59,6 +59,11 @@ export interface WhatsAppPluginOptions {
     steer: (sessionId: string, text: string) => void;
     checkToolExecuted: (sessionId: string) => boolean;
     executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
+    /**
+     * Sends a WhatsApp presence update: "available"/"unavailable" for the
+     * account-wide online status (no jid), "composing"/"paused" for a chat.
+     */
+    setPresence: (type: "available" | "unavailable" | "composing" | "paused", jid?: string) => void;
   };
 }
 
@@ -86,6 +91,12 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
           compactSession: opts.callbacks.compactSession,
           rotateSessionForInactivity: opts.callbacks.rotateSessionForInactivity,
           resolveSession: opts.callbacks.resolveSession,
+          setPresence: (type, jid) => {
+            if (!client) return;
+            client.sendPresenceUpdate(type, jid).catch((err) => {
+              opts.log(`Presence update failed (${type}): ${err instanceof Error ? err.message : String(err)}`, "warn");
+            });
+          },
           sendOutbound: async (target, markdown) => {
             if (!client) return;
             try {
@@ -127,8 +138,10 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         onConnectionUpdate: (update) => {
           if (update.status === "open") {
             opts.log("WhatsApp connected", "info");
+            void opts.callbacks.setPresence("available");
           } else if (update.status === "close") {
             opts.log(`WhatsApp disconnected (reason: ${update.disconnectReason ?? "unknown"})`, "warn");
+            void opts.callbacks.setPresence("unavailable");
           } else if (update.pairingCode) {
             opts.log(`WhatsApp pairing code: ${update.pairingCode}`, "info");
           }
@@ -143,6 +156,15 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         await client.stop();
         client = null;
       }
+    },
+
+    /**
+     * Sets the account-wide online presence ("available"/"unavailable").
+     * Called by the daemon on connect/disconnect/shutdown.
+     */
+    async setPresence(type: "available" | "unavailable"): Promise<void> {
+      if (!client) return;
+      await client.sendPresenceUpdate(type);
     },
 
     async healthCheck(): Promise<boolean> {

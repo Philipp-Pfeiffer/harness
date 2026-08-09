@@ -438,6 +438,10 @@ export class DaemonRuntime {
         }
       }
 
+      // Report offline presence after the gateways stopped — the WhatsApp
+      // socket is still usable for a short window before the process exits.
+      await this.setWhatsAppPresence("unavailable");
+
       // Stop IPC server
       if (this.ipcServer) {
         await stopIpcServer(this.ipcServer, this.paths.socketFile);
@@ -1609,11 +1613,39 @@ export class DaemonRuntime {
           }
           return result;
         },
+        setPresence: (type, jid) => {
+          void this.setWhatsAppPresence(type, jid);
+        },
       },
     });
 
     await this.registerGateway(plugin);
     this.channelPlugins.set("whatsapp", plugin as ChannelPlugin);
+  }
+
+  /**
+   * Forwards a WhatsApp presence update to the plugin: "available"/"unavailable"
+   * for the account-wide online status, "composing"/"paused" for a chat.
+   * Non-critical — failures are logged by the plugin, never fatal.
+   */
+  private async setWhatsAppPresence(
+    type: "available" | "unavailable" | "composing" | "paused",
+    jid?: string,
+  ): Promise<void> {
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (!plugin || typeof plugin.setPresence !== "function") return;
+    try {
+      // "composing"/"paused" are handled by the processor callbacks — only
+      // the account-wide status goes through the plugin's public setPresence.
+      if (type === "available" || type === "unavailable") {
+        await plugin.setPresence(type, jid);
+      }
+    } catch (err) {
+      this.logger.child("whatsapp").warn("presence update failed", {
+        type,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /** Channel plugin registry for outbound routing. */
