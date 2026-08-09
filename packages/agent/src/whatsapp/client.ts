@@ -88,8 +88,6 @@ export interface WhatsAppClient {
   resolveLidToPn(lid: string): Promise<string | null>;
   /** Marks messages as read (blue ticks). */
   markAsRead(jid: string, messageKeys: string[]): Promise<void>;
-  /** Shows typing indicator ("composing") in a chat. */
-  sendTyping(jid: string): Promise<void>;
 }
 
 /**
@@ -301,15 +299,6 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
         opts.log(`Failed to mark as read: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
     },
-
-    async sendTyping(jid: string): Promise<void> {
-      if (!sock) return;
-      try {
-        await sock.sendPresenceUpdate("composing", jid);
-      } catch (err) {
-        opts.log(`Failed to send typing: ${err instanceof Error ? err.message : String(err)}`, "warn");
-      }
-    },
   };
 }
 
@@ -334,7 +323,6 @@ export function createMockWhatsAppClient(): WhatsAppClient {
       return null;
     },
     async markAsRead(_jid: string, _messageKeys: string[]): Promise<void> {},
-    async sendTyping(_jid: string): Promise<void> {},
   };
 }
 

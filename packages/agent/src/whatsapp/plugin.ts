@@ -194,7 +194,7 @@ async function handleInboundMessage(
   msg: BaileysMessage,
   opts: WhatsAppPluginOptions,
   processor: WhatsAppInboundProcessor | null,
-  client: { resolveLidToPn: (lid: string) => Promise<string | null>; markAsRead: (jid: string, messageKeys: string[]) => Promise<void>; sendTyping: (jid: string) => Promise<void> } | null,
+  client: { resolveLidToPn: (lid: string) => Promise<string | null>; markAsRead: (jid: string, messageKeys: string[]) => Promise<void> } | null,
 ): Promise<void> {
   if (!processor) return;
 
@@ -245,15 +245,6 @@ async function handleInboundMessage(
       await client.markAsRead(jid, [msg.key.id]);
     } catch {
       // Non-critical — don't fail the turn
-    }
-  }
-
-  // Send typing indicator immediately (before media download / transcription)
-  if (client) {
-    try {
-      await client.sendTyping(jid);
-    } catch {
-      // Non-critical
     }
   }
 
