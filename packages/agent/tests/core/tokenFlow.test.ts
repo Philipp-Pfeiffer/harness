@@ -248,6 +248,8 @@ describe("token usage pipeline end-to-end", () => {
     expect(summary.tokensIn).toBe("3.1k"); // 1565 + 1500 + 0 = 3065
     expect(summary.tokensOut).toBe("70");
     expect(summary.sessionTokens).toBe("3.1k"); // 3135
+    expect(summary.sessionTokensIn).toBe("3.1k"); // 1565 + 1500 + 0 = 3065
+    expect(summary.sessionTokensOut).toBe("70");
     expect(summary.cacheHitRate).toBe("48.9%"); // 1500 / (1565+1500+0) = 48.94%
   });
 
