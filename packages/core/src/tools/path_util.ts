@@ -47,6 +47,21 @@ export const EXEC_NO_FLY_PATTERNS: { pattern: RegExp; reason: string; hint?: str
     pattern: /\bchmod\s+-R\s+0*0+\s+\//,
     reason: "Recursive chmod 000 on root is blocked",
   },
+  {
+    pattern: /systemctl(\s+--user)?\s+(restart|stop|kill)\s+["']?harness-daemon(\.[a-z]+)?["']?(\s|$)/i,
+    reason: "systemctl restart/stop/kill of the harness daemon is blocked",
+    hint: "Use the request_restart tool instead — it restarts the daemon gracefully after the current turn.",
+  },
+  {
+    pattern: /(?:^|\s|\||;|&&)(?:kill|pkill|killall)(?:\s+-[a-zA-Z0-9]+)*(?:\s+\(?\s*(?:\$\(|`))?\s*["']?[^"'\s]*harness[^"'\s]*["']?/i,
+    reason: "kill/pkill/killall targeting the harness daemon is blocked",
+    hint: "Use the request_restart tool instead — it restarts the daemon gracefully after the current turn.",
+  },
+  {
+    pattern: /\b(?:pkill|pgrep|killall)\b(?=[^|;&]*harness)/i,
+    reason: "Signaling processes matching 'harness' is blocked (daemon suicide)",
+    hint: "Use the request_restart tool instead — it restarts the daemon gracefully after the current turn.",
+  },
 ];
 
 export function checkNoFly(command: string): { blocked: true; message: string } | { blocked: false } {
