@@ -1,6 +1,6 @@
 ---
 name: distillation-daily
-model: minimax/MiniMax-M2.7
+model: @preset/deepseek-flash
 thinking: false
 tools: readFile, write
 memory: notes
