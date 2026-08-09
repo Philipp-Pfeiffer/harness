@@ -40,12 +40,26 @@ export interface VoiceTranscriptionFailed {
 export type VoiceTranscriptionResult = VoiceTranscriptionOk | VoiceTranscriptionFailed;
 
 /**
+ * Options for tuning the AssemblyAI polling loop (tests use small values).
+ */
+export interface VoiceTranscriptionOptions {
+  /** Delay between polling attempts (default: 3000 ms). */
+  pollIntervalMs?: number;
+  /** Total wall-clock budget for polling (default: 60 * 3000 ms). */
+  pollTimeoutMs?: number;
+}
+
+/**
  * Transcribes an audio file via AssemblyAI.
  *
  * @param filePath Local path to the audio file.
+ * @param options Optional polling tuning; defaults preserve the original 3s / 60-attempt behavior.
  * @returns `{ ok: true, text }` on success, or `{ ok: false, reason, detail? }` on failure.
  */
-export async function transcribeVoice(filePath: string): Promise<VoiceTranscriptionResult> {
+export async function transcribeVoice(
+  filePath: string,
+  options: VoiceTranscriptionOptions = {},
+): Promise<VoiceTranscriptionResult> {
   const apiKey = ASSEMBLYAI_API_KEY();
   if (!apiKey) {
     return { ok: false, reason: "missing-api-key" };
@@ -121,9 +135,14 @@ export async function transcribeVoice(filePath: string): Promise<VoiceTranscript
   // Step 3: Poll for completion
   const transcriptId = transcriptResult.id;
   const pollUrl = `${TRANSCRIPT_URL}/${transcriptId}`;
+  const pollIntervalMs = options.pollIntervalMs ?? 3000;
+  const pollTimeoutMs = options.pollTimeoutMs ?? 60 * 3000;
+  const pollStart = Date.now();
 
-  for (let attempt = 0; attempt < 60; attempt++) {
-    await sleep(3000);
+  // do-while: always poll at least once, even with a zero/negative timeout budget
+  // (matches the old 60-attempt loop at the timeout boundary).
+  do {
+    await sleep(pollIntervalMs);
 
     let pollResponse: Response;
     try {
@@ -158,7 +177,7 @@ export async function transcribeVoice(filePath: string): Promise<VoiceTranscript
       };
     }
     // status === "processing" or "queued" → keep polling
-  }
+  } while (Date.now() - pollStart < pollTimeoutMs);
 
   // Timeout after ~3 minutes
   return { ok: false, reason: "timeout" };

@@ -114,7 +114,9 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "error", error: "Account quota exceeded" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() => transcribeVoice(AUDIO_FILE));
+    const result = await withTimers(() =>
+      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -131,7 +133,9 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "queued" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() => transcribeVoice(AUDIO_FILE));
+    const result = await withTimers(() =>
+      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -147,7 +151,9 @@ describe("transcribeVoice", () => {
       .mockResolvedValue(jsonResponse({ status: "completed", text: "Hallo Welt" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await withTimers(() => transcribeVoice(AUDIO_FILE));
+    const result = await withTimers(() =>
+      transcribeVoice(AUDIO_FILE, { pollIntervalMs: 5, pollTimeoutMs: 50 }),
+    );
 
     expect(result).toEqual({ ok: true, text: "Hallo Welt" });
   }, 20_000);
