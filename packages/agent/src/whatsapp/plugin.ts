@@ -35,7 +35,7 @@ import {
   isVisionCapableModel,
   MediaTooLargeError,
 } from "./media.js";
-import { transcribeVoice } from "./voice.js";
+import { transcribeVoice, type VoiceErrorReason } from "./voice.js";
 import { sendAgentResponse } from "./outbound.js";
 import { WhatsAppInboundProcessor } from "./inbound.js";
 import { getCapabilities } from "../output/capabilities.js";
@@ -276,8 +276,9 @@ async function handleInboundMessage(
 /**
  * Parses a Baileys message into a ChannelInboundEvent.
  * Handles text, image, video, audio (voice), document, sticker.
+ * Exported for tests.
  */
-async function parseBaileysMessage(
+export async function parseBaileysMessage(
   message: NonNullable<WAMessage["message"]>,
   source: string,
   timestamp: string,
@@ -350,18 +351,19 @@ async function parseBaileysMessage(
 
       if (ptt) {
         // Voice note → transcribe
-        const transcript = await transcribeVoice(media.filePath);
-        if (transcript) {
+        const result = await transcribeVoice(media.filePath);
+        if (result.ok) {
           // Transkript als Text liefern, Media NICHT zu mediaArray hinzufügen
           // (Agent bekommt den Text, nicht die Datei-Annotation)
-          text = `[Voice-Nachricht] ${transcript}`;
+          text = `[Voice-Nachricht] ${result.text}`;
           isVoiceTranscript = true;
         } else {
-          // Transkription fehlgeschlagen → Datei-Annotation
-          mediaArray.push(media);
-          annotations.push(
-            `Voice-Nachricht empfangen, Transkription nicht verfügbar. Datei: ${media.filePath}`,
-          );
+          // Transkription fehlgeschlagen → warn-Log + Annotation im User-Turn,
+          // damit der Agent den Grund kennt und dem Nutzer Bescheid sagen kann.
+          // (inbound.ts appended annotations an den Turn-Text)
+          log(`Voice transcription failed (${result.reason})${result.detail ? `: ${result.detail}` : ""}`, "warn");
+          text = "[Voice-Nachricht]";
+          annotations.push(voiceErrorAnnotation(result.reason, result.detail));
         }
       } else {
         // Audio-Datei (kein Voice-Note) → normale Media-Behandlung
@@ -461,4 +463,34 @@ async function downloadFromBaileys(
     chunks.push(Buffer.from(chunk));
   }
   return Buffer.concat(chunks);
+}
+
+/**
+ * Builds a machine-readable annotation describing why a voice note could not
+ * be transcribed. The annotation is part of the user turn so the model can
+ * inform the user naturally.
+ */
+function voiceErrorAnnotation(reason: VoiceErrorReason, detail?: string): string {
+  switch (reason) {
+    case "missing-api-key":
+      return "Voice note could not be transcribed: missing ASSEMBLYAI_API_KEY — set it in ~/harness/.env and /restart.";
+    case "upload-failed": {
+      if (detail === "401" || detail === "402" || detail === "429") {
+        return `Voice note could not be transcribed: AssemblyAI rejected the upload (HTTP ${detail}) — check your ASSEMBLYAI_API_KEY and quota in ~/harness/.env, then /restart.`;
+      }
+      return `Voice note could not be transcribed: audio upload to AssemblyAI failed${detail ? ` (HTTP ${detail})` : ""}.`;
+    }
+    case "submit-failed": {
+      if (detail === "401" || detail === "402" || detail === "429") {
+        return `Voice note could not be transcribed: AssemblyAI rejected the request (HTTP ${detail}) — check your ASSEMBLYAI_API_KEY and quota in ~/harness/.env, then /restart.`;
+      }
+      return `Voice note could not be transcribed: transcription request to AssemblyAI failed${detail ? ` (HTTP ${detail})` : ""}.`;
+    }
+    case "transcription-error":
+      return `Voice note could not be transcribed: AssemblyAI reported an error${detail ? `: ${detail}` : ""}.`;
+    case "timeout":
+      return "Voice note could not be transcribed: transcription timed out.";
+    case "read-error":
+      return `Voice note could not be transcribed: the audio file could not be read${detail ? ` (${detail})` : ""}.`;
+  }
 }
