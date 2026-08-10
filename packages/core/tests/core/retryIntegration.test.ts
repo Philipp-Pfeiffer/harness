@@ -171,20 +171,21 @@ describe("Agent retry integration", () => {
   });
 
   // 2. Permanent error — no retry
-  it("does not retry permanent errors (401) — throws immediately", async () => {
+  it("injects permanent errors (401) as system message, does not retry", async () => {
     const error = Object.assign(new Error("Unauthorized"), { status: 401 });
-    const factory = makeFailingThenSucceedingStream(
-      makeAssistantMessage([{ type: "text", text: "should not reach" }], "stop"),
-      1,
-      error,
-    );
+    const stopMsg = makeAssistantMessage([{ type: "text", text: "should not reach" }], "stop");
+    const factory = makeFailingThenSucceedingStream(stopMsg, 1, error);
 
     vi.mocked(stream).mockImplementation(() => factory());
 
     const agent = createAgent({ tools: [], model, retryPolicy: fastRetryPolicy });
+    const result = await agent.run([makeUserMessage("Hi")]);
 
-    await expect(agent.run([makeUserMessage("Hi")])).rejects.toThrow("Unauthorized");
-    expect(stream).toHaveBeenCalledTimes(1);
+    // Permanent errors are injected as system message, agent continues.
+    // The first call fails (401 → permanent), system message is injected.
+    // The second call succeeds (stopMsg). 2 calls total.
+    expect(result.aborted).toBe(false);
+    expect(stream).toHaveBeenCalledTimes(2);
   });
 
   // 3. 429 with Retry-After then success
@@ -207,11 +208,11 @@ describe("Agent retry integration", () => {
   });
 
   // 4. Max retries exhausted
-  it("exhausts retries then throws", async () => {
+  it("exhausts retries then injects system message and continues", async () => {
     const error = Object.assign(new Error("Service Unavailable"), { status: 503 });
     const factory = makeFailingThenSucceedingStream(
-      makeAssistantMessage([{ type: "text", text: "never" }], "stop"),
-      10, // more than maxRetries
+      makeAssistantMessage([{ type: "text", text: "recovered" }], "stop"),
+      3, // 3 failures, then success
       error,
     );
 
@@ -222,11 +223,13 @@ describe("Agent retry integration", () => {
       maxRetries: 2,
     };
 
-    const agent = createAgent({ tools: [], model, retryPolicy: exhaustPolicy });
+    const agent = createAgent({ tools: [], model, retryPolicy: exhaustPolicy, maxIterations: 3 });
+    const result = await agent.run([makeUserMessage("Hi")]);
 
-    await expect(agent.run([makeUserMessage("Hi")])).rejects.toThrow("Service Unavailable");
-    // 1 initial + 2 retries = 3 calls
-    expect(stream).toHaveBeenCalledTimes(3);
+    // 3 calls fail (initial + 2 retries) → injected system message → next iteration
+    // 4th call succeeds after factory exhausted its failures
+    expect(result.aborted).toBe(false);
+    expect(stream).toHaveBeenCalledTimes(4);
   });
 
   // 5. User abort during retry wait

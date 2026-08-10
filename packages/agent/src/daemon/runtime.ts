@@ -639,7 +639,7 @@ export class DaemonRuntime {
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();
 
-      finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+      finalMessage = result.aborted ? `[Turn aborted: ${result.reason}]` : result.finalMessage;
       const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
       const turnSlice = entry.messages.slice(turnStartIndex);
       const { tool_calls, tool_results } = extractToolData(turnSlice);
@@ -1802,7 +1802,8 @@ export class DaemonRuntime {
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();
 
-      const finalMessage = result.aborted ? "Aborted" : result.finalMessage;
+      const finalMessage = result.aborted ?
+        `[Turn aborted: ${result.reason}]` : result.finalMessage;
       const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
       const turnSlice = entry.messages.slice(turnStartIndex);
       const { tool_calls, tool_results } = extractToolData(turnSlice);

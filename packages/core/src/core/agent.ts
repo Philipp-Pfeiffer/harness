@@ -176,8 +176,8 @@ export interface TokenUsage {
 }
 
 export type RunResult =
-  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted"; message: string } }
-  | { aborted: true; completedTurns: number; reason: "signal" | "maxTurns" | "internal_restart"; usage: TokenUsage; toolCallCount: number };
+  | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted" | "max_turns_exhausted"; message: string } }
+  | { aborted: true; completedTurns: number; reason: "signal" | "internal_restart"; usage: TokenUsage; toolCallCount: number };
 
 /**
  * Events emitted during a streaming run.
@@ -407,7 +407,8 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, maxIterations = 10, model, logger, inlineThinking = false, temperature, maxTokens, retryPolicy } = config;
+  const { tools, maxIterations: configMaxIterations = 100, model, logger, inlineThinking = false, temperature, maxTokens, retryPolicy } = config;
+  const maxIterations = configMaxIterations;
   // Caller must set a system prompt via setSystemPrompt(). Empty default
   // is intentional — the prompt template requires `inboxPath`; calling
   // prompt("system-prompt") without vars triggers a missing-variable warning.
@@ -430,6 +431,21 @@ export function createAgent(config: AgentConfig): Agent {
       const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, requestRestart, postRestartFollowUp, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
+
+      // Hoisted for catch-block access: track the current turn index and
+      // context messages so we can inject an error annotation on crash.
+      let currentTurnIndex = 0;
+      let contextMessages = messages;
+
+      // Accumulators — hoisted so catch block can reference them.
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalTokens = 0;
+      let totalCacheRead = 0;
+      let totalCacheWrite = 0;
+      let toolCallCount = 0;
+
+      try {
 
       // Effective system prompt for THIS turn: base prompt plus the
       // channel addendum (if any). Computed per run() — the shared agent
@@ -490,19 +506,14 @@ export function createAgent(config: AgentConfig): Agent {
         };
       };
 
-      let totalInput = 0;
-      let totalOutput = 0;
-      let totalTokens = 0;
-      let totalCacheRead = 0;
-      let totalCacheWrite = 0;
-      let toolCallCount = 0;
-
       // Compaction cooldown: if a compaction attempt fails, skip retries
       // for 60s to avoid an error loop (shouldCompact stays true after
       // a failed compactSession, which would retry every iteration).
       let compactionCooldownUntil = 0;
 
-      for (let i = 0; i < maxIterations; i++) {
+      main_loop: for (let i = 0; i < maxIterations; i++) {
+        currentTurnIndex = i;
+        contextMessages = context.messages;
         // Check 0: Internal abort (gateway restart) — BEFORE user signal check.
         // Must not call pushAbortAnnotation or discardMailbox.
         if (internalAbortSignal?.aborted) {
@@ -514,6 +525,16 @@ export function createAgent(config: AgentConfig): Agent {
           discardMailbox(mailbox);
           pushAbortAnnotation(context.messages, options.abortCommand);
           return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+        }
+
+        // Last turn: inject a hard warning that this is the final iteration.
+        // The agent must produce a final response — no more tool calls.
+        if (i === maxIterations - 1) {
+          context.messages.push({
+            role: "user",
+            content: [{ type: "text", text: `[SYSTEM] Dies ist dein letzter Turn (${maxIterations} Iterationen verbraucht). Du MUSST jetzt eine finale Antwort an den User schreiben — keine Tool-Calls mehr. Falls du Ergebnisse gesammelt hast, fasse sie zusammen. Falls etwas nicht geklappt hat, erkläre dem User warum und was er tun kann.` }],
+            timestamp: Date.now(),
+          } as Message);
         }
 
         drainMailbox(mailbox, context.messages);
@@ -647,14 +668,28 @@ export function createAgent(config: AgentConfig): Agent {
 
             // Check if retryable
             if (!effectiveRetryPolicy.retryableClasses.includes(errorClass)) {
-              // Permanent or user_abort error — fail immediately
-              throw err;
+              // Permanent or user_abort error — inject as tool_error, continue loop
+              const errMsg = err instanceof Error ? err.message : String(err);
+              logger?.(`[API ERROR] ${errorClass}: ${errMsg}`);
+              context.messages.push({
+                role: "user",
+                content: [{ type: "text", text: `[SYSTEM] API call failed (${errorClass}): ${errMsg}. Please either try a different approach, respond with what you have, or tell the user about the issue.` }],
+                timestamp: Date.now(),
+              } as Message);
+              continue main_loop; // skip to next turn iteration
             }
 
             // Check max retries
             if (retryCount >= effectiveRetryPolicy.maxRetries) {
-              // Exhausted retries — throw the last error
-              throw err;
+              // Exhausted retries — inject as tool_error, continue loop
+              const errMsg = err instanceof Error ? err.message : String(err);
+              logger?.(`[API ERROR] Retries exhausted (${errorClass}): ${errMsg}`);
+              context.messages.push({
+                role: "user",
+                content: [{ type: "text", text: `[SYSTEM] API call failed after ${retryCount} retries (${errorClass}): ${errMsg}. Please either try a different approach, respond with what you have, or tell the user about the issue.` }],
+                timestamp: Date.now(),
+              } as Message);
+              continue main_loop; // skip to next turn iteration
             }
 
             // Record retry metric
@@ -718,7 +753,13 @@ export function createAgent(config: AgentConfig): Agent {
             cacheRead: response.usage.cacheRead,
             cacheWrite: response.usage.cacheWrite,
           });
-          throw new Error(response.errorMessage ?? "Unbekannter Fehler");
+          logger?.(`[API ERROR] Provider returned stopReason=error: ${response.errorMessage ?? "Unbekannter Fehler"}`);
+          context.messages.push({
+            role: "user",
+            content: [{ type: "text", text: `[SYSTEM] Der LLM-Provider meldet einen Fehler: ${response.errorMessage ?? "Unbekannter Fehler"}. Versuche es mit einem anderen Ansatz oder antworte dem User mit dem was du hast.` }],
+            timestamp: Date.now(),
+          } as Message);
+          continue main_loop; // skip to next turn iteration
         }
 
         context.messages.push(response);
@@ -978,10 +1019,13 @@ export function createAgent(config: AgentConfig): Agent {
       }
 
       discardMailbox(mailbox);
+      // maxIterations exhausted: return aborted:false with a summary.
+      // The last-turn warning should have produced a natural stopReason=stop.
+      // If the agent ignored it and produced toolUse anyway, extract what we have.
       metricsRecorder?.recordTurn({
         latencyMs: 0,
         toolCallCount: 0,
-        status: "aborted",
+        status: "error",
         model: resolvedModel.name,
         inputTokens: 0,
         outputTokens: 0,
@@ -989,7 +1033,30 @@ export function createAgent(config: AgentConfig): Agent {
         cacheRead: 0,
         cacheWrite: 0,
       });
-      return { aborted: true, completedTurns: maxIterations, reason: "maxTurns", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+      return { aborted: false, turns: maxIterations, finalMessage: `Turn-Limit von ${maxIterations} Iterationen erreicht.`, usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+
+      } catch (err) {
+        // Top-level crash catch: any unexpected exception in the loop
+        // is injected as a tool_error annotation and the turn returns
+        // aborted:false with the error message.
+        logger?.(`[CRASH] Unhandled exception at turn ${currentTurnIndex}: ${err instanceof Error ? err.message : String(err)}`);
+        const errMsg = err instanceof Error ? `${err.name}: ${err.message}\n\n\`\`\`\n${err.stack ?? ""}\n\`\`\`` : String(err);
+        try {
+          contextMessages.push({
+            role: "user",
+            content: [{ type: "text", text: `[SYSTEM] Interner Fehler im Agent-Loop: ${errMsg}` }],
+            timestamp: Date.now(),
+          } as Message);
+        } catch { /* ignore push failures */ }
+        return {
+          aborted: false,
+          turns: currentTurnIndex + 1,
+          finalMessage: `Fehler: ${err instanceof Error ? err.message : String(err)}`,
+          usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite },
+          toolCallCount,
+          error: { type: "max_turns_exhausted", message: err instanceof Error ? err.message : String(err) },
+        };
+      }
     },
   };
 }

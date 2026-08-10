@@ -191,13 +191,17 @@ describe("Agent", () => {
     expect(capturedSession).not.toBe(defaultScope);
   });
 
-  it("throws when stopReason is error", async () => {
+  it("returns system message when stopReason is error", async () => {
     const errorResponse = makeAssistantMessage([], "error", "Rate limit exceeded");
-    vi.mocked(stream).mockReturnValueOnce(mockStream(errorResponse));
+    const stopResponse = makeAssistantMessage([{ type: "text", text: "Entschuldigung, es gab einen Fehler." }], "stop");
+    vi.mocked(stream)
+      .mockReturnValueOnce(mockStream(errorResponse))
+      .mockReturnValueOnce(mockStream(stopResponse));
 
     const agent = createAgent({ tools: [], model });
 
-    await expect(agent.run([makeUserMessage("Hi")])).rejects.toThrow("Rate limit exceeded");
+    const result = await agent.run([makeUserMessage("Hi")]);
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Entschuldigung, es gab einen Fehler.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 0 });
   });
 
   it("returns message when stopReason is aborted", async () => {
@@ -262,7 +266,7 @@ describe("Agent", () => {
     expect(resultText).not.toBe('Argumente für Tool "echo" sind ungültig.');
   });
 
-  it("returns max turns message when limit is reached", async () => {
+  it("returns turn limit message when max iterations reached", async () => {
     const mockToolCall = makeAssistantMessage(
       [{ type: "toolCall", id: "tc_loop", name: "echo", arguments: { text: "loop" } }],
       "toolUse"
@@ -280,7 +284,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Keep calling tool")]);
 
-    expect(result).toEqual({ aborted: true, completedTurns: 2, reason: "maxTurns", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 2 });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Turn-Limit von 2 Iterationen erreicht.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 2 });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
