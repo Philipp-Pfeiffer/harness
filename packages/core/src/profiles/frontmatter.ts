@@ -26,6 +26,7 @@ const KNOWN_KEYS = new Set([
   "skills",
   "temperature",
   "maxTokens",
+  "cwd",
 ]);
 
 export class AgentProfileFrontmatterError extends Error {
@@ -218,6 +219,10 @@ export function parseAgentProfileFile(
   const temperature = parseNumber(filePath, "temperature", fields.get("temperature"), { integer: false });
   const maxTokens = parseNumber(filePath, "maxTokens", fields.get("maxTokens"), { integer: true });
 
+  // cwd (optional, null when absent)
+  const cwdRaw = fields.get("cwd");
+  const cwd = cwdRaw === undefined || cwdRaw.trim() === "" ? null : cwdRaw.trim();
+
   const body = substituteVars(rawBody, vars).trim();
   if (!body) {
     throw new AgentProfileFrontmatterError(
@@ -227,7 +232,7 @@ export function parseAgentProfileFile(
   }
 
   return {
-    frontmatter: { name, model, thinking, tools, memory, skills, temperature, maxTokens },
+    frontmatter: { name, model, thinking, tools, memory, skills, temperature, maxTokens, cwd },
     body,
   };
 }

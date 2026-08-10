@@ -1,8 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { homedir } from "node:os";
-import { cwd } from "node:process";
+import { resolveExpandedPathFrom } from "./path_util.js";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { Tool, ToolCallContext } from "./types.js";
 import { ok, err } from "./types.js";
@@ -16,13 +14,6 @@ const ReadFileArgs = Type.Object({
 });
 
 const MAX_EXTRACTED_BYTES = TEXT_EXTRACT_CAP;
-
-function expandTilde(path: string): string {
-  if (path.startsWith("~/") || path === "~") {
-    return path.replace(/^~/, homedir());
-  }
-  return path;
-}
 
 function isPdf(buffer: Buffer): boolean {
   return buffer.length >= 5 &&
@@ -106,8 +97,7 @@ export const readFileTool: Tool<typeof ReadFileArgs> = {
   description: "Read the contents of a file from the local filesystem. Supports plain UTF-8 text and PDF (text extraction). Returns text content. For large files, use lineStart/lineEnd to read a specific range.",
   parameters: ReadFileArgs,
   async execute(args, context) {
-    const expanded = expandTilde(args.path);
-    const resolvedPath = resolve(cwd(), expanded);
+    const resolvedPath = resolveExpandedPathFrom(context?.cwd, args.path);
 
     let buffer: Buffer;
     try {

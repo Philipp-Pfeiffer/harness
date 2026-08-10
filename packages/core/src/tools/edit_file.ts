@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { readFile } from "node:fs/promises";
-import { resolveExpandedPath } from "./path_util.js";
+import { resolveExpandedPath, resolveExpandedPathFrom } from "./path_util.js";
 import { atomicWrite } from "./atomic_write.js";
 import { markRead, wasRead } from "./file_state.js";
 import { isSensitivePath } from "./write_file.js";
@@ -27,7 +27,7 @@ export const editTool: Tool<typeof EditArgs> = {
     return resolveExpandedPath(args.path);
   },
   async execute(args, context) {
-    const absolutePath = resolveExpandedPath(args.path);
+    const absolutePath = resolveExpandedPathFrom(context?.cwd, args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {

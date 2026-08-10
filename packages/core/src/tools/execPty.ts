@@ -50,8 +50,9 @@ export async function executeExecPty(args: {
   elevated?: boolean;
   timeout?: number;
   yieldMs?: number;
+  baseCwd?: string;
 }, logger?: (msg: string, level?: "warn" | "debug") => void): Promise<ExecToolResult> {
-  const resolvedCwdResult = await resolveCwd(args.cwd);
+  const resolvedCwdResult = await resolveCwd(args.cwd, args.baseCwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
     return { isError: true, content: "cwd does not exist or is not a directory" };
   }

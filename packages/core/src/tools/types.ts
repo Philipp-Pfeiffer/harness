@@ -38,6 +38,12 @@ export function err(content: string): ToolResult {
  */
 export interface ToolCallContext {
   sessionId?: string;
+  /**
+   * Optional working directory for the profile's tool calls. When set,
+   * relative paths in exec/readFile/write/edit resolve against it instead
+   * of the process cwd. Supports ~ (expanded against the home directory).
+   */
+  cwd?: string;
   logger?: (msg: string, level?: "warn" | "debug") => void;
   /**
    * Optional channel file sender. When present, enables the `send_file` tool

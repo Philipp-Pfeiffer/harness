@@ -15,6 +15,9 @@
  *               absent = all zones, present-but-empty = no memory access
  * - skills      (optional, default true) true|false — include the skill hot-set
  * - temperature (optional) sampling parameter
+ * - cwd         (optional) working directory for the profile's tool calls
+ *               (exec/readFile/write/edit base for relative paths). Supports ~.
+ *               Absent = daemon process cwd.
  * - maxTokens   (optional) sampling parameter
  *
  * Body = persona prompt, appended after the bare base prompt.
@@ -47,6 +50,11 @@ export interface AgentProfileFrontmatter {
   temperature?: number;
   /** Sampling parameter passed through to the provider. */
   maxTokens?: number;
+  /**
+   * Working directory for the profile's tool calls (exec/readFile/write/
+   * edit base for relative paths). Supports ~. Absent = daemon process cwd.
+   */
+  cwd?: string | null;
 }
 
 export interface AgentProfile {

@@ -1,5 +1,5 @@
 import { Type } from "@sinclair/typebox";
-import { resolveExpandedPath } from "./path_util.js";
+import { resolveExpandedPath, resolveExpandedPathFrom } from "./path_util.js";
 import { atomicWrite } from "./atomic_write.js";
 import { markRead } from "./file_state.js";
 import type { Tool } from "./types.js";
@@ -37,7 +37,7 @@ export const writeTool: Tool<typeof WriteArgs> = {
     return resolveExpandedPath(args.path);
   },
   async execute(args, context) {
-    const absolutePath = resolveExpandedPath(args.path);
+    const absolutePath = resolveExpandedPathFrom(context?.cwd, args.path);
 
     const sensitiveCheck = isSensitivePath(absolutePath);
     if (sensitiveCheck.blocked) {

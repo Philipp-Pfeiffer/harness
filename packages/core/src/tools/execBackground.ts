@@ -12,8 +12,9 @@ export async function executeExecBackground(args: {
   cwd?: string;
   env?: Record<string, string>;
   elevated?: boolean;
+  baseCwd?: string;
 }): Promise<ExecToolResult> {
-  const resolvedCwdResult = await resolveCwd(args.cwd);
+  const resolvedCwdResult = await resolveCwd(args.cwd, args.baseCwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
     return { isError: true, content: "cwd does not exist or is not a directory" };
   }

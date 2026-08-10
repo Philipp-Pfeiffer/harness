@@ -81,6 +81,7 @@ describe("parseAgentProfileFile", () => {
       skills: false,
       temperature: 0.7,
       maxTokens: 4096,
+      cwd: null,
     });
     expect(parsed.body).toBe("You are a worker.");
   });
@@ -101,7 +102,39 @@ describe("parseAgentProfileFile", () => {
       skills: true,
       temperature: undefined,
       maxTokens: undefined,
+      cwd: null,
     });
+  });
+
+  it("parses the optional cwd field (with ~ and absolute paths)", () => {
+    const parsed = parseAgentProfileFile(
+      "/agents/distillation-daily/agent.md",
+      makeProfileContent({
+        name: "distillation-daily",
+        frontmatter: ["cwd: ~/harness"],
+      }),
+      "distillation-daily",
+    );
+    expect(parsed.frontmatter.cwd).toBe("~/harness");
+
+    const absolute = parseAgentProfileFile(
+      "/agents/worker/agent.md",
+      makeProfileContent({
+        name: "worker",
+        frontmatter: ["cwd: /srv/harness"],
+      }),
+      "worker",
+    );
+    expect(absolute.frontmatter.cwd).toBe("/srv/harness");
+  });
+
+  it("treats an absent cwd as null", () => {
+    const parsed = parseAgentProfileFile(
+      "/agents/default/agent.md",
+      makeProfileContent({ name: "default" }),
+      "default",
+    );
+    expect(parsed.frontmatter.cwd).toBeNull();
   });
 
   it("treats present-but-empty tools and memory as explicit empty lists", () => {
@@ -301,6 +334,25 @@ describe("loadAgentProfiles", () => {
     expect(result.profiles[0]!.body).toBe("Inbox at /h/memory/_inbox.md.");
   });
 
+  it("loads the cwd field from profile frontmatter", async () => {
+    makeProfileDir(
+      profilesDir,
+      "worker",
+      makeProfileContent({
+        name: "worker",
+        frontmatter: ["cwd: ~/harness"],
+      }),
+    );
+    makeProfileDir(profilesDir, "plain", makeProfileContent({ name: "plain" }));
+
+    const result = await loadAgentProfiles({ profilesDir, builtinDir });
+    expect(result.errors).toEqual([]);
+    expect(result.profiles.find((p) => p.name === "worker")!.frontmatter.cwd).toBe(
+      "~/harness",
+    );
+    expect(result.profiles.find((p) => p.name === "plain")!.frontmatter.cwd).toBeNull();
+  });
+
   it("loads all shipped built-in profiles without errors", async () => {
     const builtinAgentsDir = join(
       dirname(fileURLToPath(import.meta.url)),
@@ -327,6 +379,31 @@ describe("loadAgentProfiles", () => {
     for (const profile of result.profiles) {
       expect(profile.body.length).toBeGreaterThan(0);
       expect(profile.builtin).toBe(true);
+    }
+  });
+
+  it("ships cwd on the pipeline profiles and none on browser/default", async () => {
+    const builtinAgentsDir = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "..",
+      "agent",
+      "agents",
+    );
+    const result = await loadAgentProfiles({
+      profilesDir: join(baseDir, "empty-user-agents"),
+      builtinDir: builtinAgentsDir,
+    });
+    expect(result.errors).toEqual([]);
+
+    const withCwd = new Set(
+      ["distillation-daily", "distillation-wiki", "session-end", "curator-stage1", "curator-stage2"],
+    );
+    for (const profile of result.profiles) {
+      expect(profile.frontmatter.cwd).toBe(
+        withCwd.has(profile.name) ? "~/harness" : null,
+      );
     }
   });
 });

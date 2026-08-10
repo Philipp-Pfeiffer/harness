@@ -14,6 +14,17 @@ export function resolveExpandedPath(pathStr: string): string {
   return resolve(expandTilde(pathStr));
 }
 
+/**
+ * Resolves a path against an explicit base directory (e.g. a profile's
+ * cwd) instead of the process cwd. The base itself supports `~`.
+ * When `base` is undefined, behaves exactly like `resolveExpandedPath`.
+ */
+export function resolveExpandedPathFrom(base: string | undefined, pathStr: string): string {
+  const expanded = expandTilde(pathStr);
+  if (!base) return resolve(expanded);
+  return resolve(expandTilde(base), expanded);
+}
+
 export const EXEC_NO_FLY_PATTERNS: { pattern: RegExp; reason: string; hint?: string }[] = [
   {
     pattern: /\brm\b(?=\s+(--recursive\s+--force|--force\s+--recursive|-rf\b|-fr\b|-Rf\b|-fR\b|-[a-zA-Z]*[rR][a-zA-Z]*\s+-[a-zA-Z]*[fF]|-[a-zA-Z]*[fF][a-zA-Z]*\s+-[a-zA-Z]*[rR]))/,
@@ -76,11 +87,13 @@ export function checkNoFly(command: string): { blocked: true; message: string } 
   return { blocked: false };
 }
 
-export async function resolveCwd(cwdArg?: string): Promise<string> {
+export async function resolveCwd(cwdArg?: string, baseCwd?: string): Promise<string> {
   let resolvedCwd = cwd();
   if (cwdArg) {
     const expanded = expandTilde(cwdArg);
-    resolvedCwd = resolve(cwd(), expanded);
+    resolvedCwd = baseCwd
+      ? resolve(expandTilde(baseCwd), expanded)
+      : resolve(cwd(), expanded);
     try {
       const statResult = await stat(resolvedCwd);
       if (!statResult.isDirectory()) {

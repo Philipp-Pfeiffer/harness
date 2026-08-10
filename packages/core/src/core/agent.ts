@@ -152,6 +152,12 @@ export interface RunOptions {
    * byte-identical across turns and daemon restarts.
    */
   systemPromptAddendum?: string;
+  /**
+   * Optional working directory for the profile's tool calls. When set,
+   * relative paths in exec/readFile/write/edit resolve against it instead
+   * of the process cwd. Supports ~.
+   */
+  cwd?: string;
 }
 
 /**
@@ -421,7 +427,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, requestRestart, postRestartFollowUp, systemPromptAddendum } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, requestRestart, postRestartFollowUp, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -439,6 +445,7 @@ export function createAgent(config: AgentConfig): Agent {
       // own scope. Never a process-global scope.
       const toolContext: ToolCallContext = {
         sessionId: options.sessionId ?? compaction?.sessionId ?? defaultToolSessionScope,
+        cwd,
         logger: logger,
         channelFileSender,
         requestRestart,

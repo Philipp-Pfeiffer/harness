@@ -114,8 +114,9 @@ export async function executeExecSync(args: {
   timeout?: number;
   elevated?: boolean;
   abortSignal?: AbortSignal;
+  baseCwd?: string;
 }): Promise<ExecToolResult> {
-  const resolvedCwdResult = await resolveCwd(args.cwd);
+  const resolvedCwdResult = await resolveCwd(args.cwd, args.baseCwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
     return { isError: true, content: "cwd does not exist or is not a directory" };
   }
@@ -326,8 +327,9 @@ export async function executeExecSyncWithYield(args: {
   timeout?: number;
   elevated?: boolean;
   yieldMs: number;
+  baseCwd?: string;
 }): Promise<ExecToolResult> {
-  const resolvedCwdResult = await resolveCwd(args.cwd);
+  const resolvedCwdResult = await resolveCwd(args.cwd, args.baseCwd);
   if (resolvedCwdResult === "cwd does not exist or is not a directory") {
     return { isError: true, content: "cwd does not exist or is not a directory" };
   }
@@ -481,6 +483,7 @@ export async function executeExec(
   args: ExecArgsType,
   logger?: (msg: string, level?: "warn" | "debug") => void,
   abortSignal?: AbortSignal,
+  baseCwd?: string,
 ): Promise<ExecToolResult> {
   if (!Value.Check(ExecArgs, args)) {
     const errors = Array.from(Value.Errors(ExecArgs, args));
@@ -505,14 +508,14 @@ export async function executeExec(
   }
 
   if (args.background) {
-    return await executeExecBackground(args);
+    return await executeExecBackground({ ...args, baseCwd });
   }
 
   if (args.yieldMs !== undefined) {
     if (args.pty) {
       return await executeExecPty({ ...args, yieldMs: args.yieldMs }, logger);
     }
-    return await executeExecSyncWithYield({ ...args, yieldMs: args.yieldMs });
+    return await executeExecSyncWithYield({ ...args, yieldMs: args.yieldMs, baseCwd });
   }
 
   if (args.pty) {
@@ -525,7 +528,7 @@ export async function executeExec(
     }, logger);
   }
 
-  return await executeExecSync({ ...args, abortSignal });
+  return await executeExecSync({ ...args, abortSignal, baseCwd });
 }
 
 export const execTool: Tool<typeof ExecArgs> = {
@@ -534,6 +537,6 @@ export const execTool: Tool<typeof ExecArgs> = {
     "Execute a CLI command. Supports pipes, redirects, globs, environment overrides, stdin, configurable timeout, PTY mode for interactive CLIs (vim, htop, claude, gemini, codex), and elevated execution via passwordless sudo. Returns combined output with exit code. Default timeout 30s, output capped at 64 KB. With yieldMs (default 10000), processes running longer than the yield threshold transition to background and return a handle for later polling. Some destructive commands (e.g. rm -rf /) are blocked. Daemon restarts run exclusively through the request_restart tool — never restart the harness daemon via systemctl or kill.",
   parameters: ExecArgs,
   async execute(args, context) {
-    return executeExec(args, context?.logger, context?.signal);
+    return executeExec(args, context?.logger, context?.signal, context?.cwd);
   },
 };
