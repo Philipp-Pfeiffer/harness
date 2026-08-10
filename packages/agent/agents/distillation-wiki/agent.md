@@ -1,6 +1,7 @@
 ---
 name: distillation-wiki
 model: @preset/deepseek-flash
+cwd: ~/harness
 thinking: false
 tools: readFile, write, edit, search_memory
 memory: notes

@@ -1,6 +1,7 @@
 ---
 name: curator-stage2
 model: @preset/deepseek-flash
+cwd: ~/harness
 thinking: true
 tools: readFile, search_memory
 memory: notes

@@ -1,6 +1,7 @@
 ---
 name: session-end
 model: @preset/deepseek-flash
+cwd: ~/harness
 thinking: false
 tools: readFile, write
 memory: notes
