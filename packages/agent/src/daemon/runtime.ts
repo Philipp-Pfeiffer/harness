@@ -501,7 +501,7 @@ export class DaemonRuntime {
    * @param followUp Whether the boot handler should run a follow-up turn
    *   instead of the static ping after the restart.
    * @param announceBeforeRestart Called BEFORE the marker is written so the
-   *   user gets immediate feedback ("Restart eingeleitet …") even while a
+   *   user gets immediate feedback ("Restart initiated …") even while a
    *   turn is still running. Awaited; failures are warn-logged and never
    *   block the restart.
    * @param awaitBeforeRestart Called right before an immediate restart when
@@ -600,7 +600,7 @@ export class DaemonRuntime {
         await this.requestRestartAfterTurn(reason, replyTarget, undefined, true, () =>
           this.sendChannelResponse(
             sessionId,
-            "Restart eingeleitet — bin in ~20 Sekunden zurück.",
+            "Restart initiated — back online in ~20 seconds.",
           ),
         );
         return { ok: true };
@@ -2719,7 +2719,7 @@ export class DaemonRuntime {
       // die Nachricht geflusht ist, bevor die langlaufende Deploy-Phase beginnt.
       await this.sendChannelResponse(
         sessionId,
-        `Deploy ${branch} angestoßen — bauen, testen, restarten...`,
+        `Deploy initiated: ${branch}. Building, testing, restarting...`,
       );
 
       const result = await runDeploy(

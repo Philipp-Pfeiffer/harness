@@ -16,14 +16,14 @@
   - Die Announcement-Callback wird **vor dem Schreiben des Restart-Markers** awaited; Fehler werden geloggt, blockieren aber den Restart nicht.
   - JSDoc entsprechend aktualisiert.
 - `makeRequestRestartCapability` übergibt als `announceBeforeRestart` einen `sendChannelResponse`-Aufruf:
-  - `"Restart eingeleitet — bin in ~20 Sekunden zurück."`
+  - `"Restart initiated — back online in ~20 seconds."` (englisch, system-stil wie "Back online.")
   - Wird gesendet, bevor der Marker geschrieben wird — der User bekommt sofort Feedback, auch wenn noch ein Turn aktiv ist.
 - Deploy-Handler (`handleDeployCommand`): direkt **vor** dem `runDeploy`-Aufruf wird per `sendChannelResponse` gesendet:
-  - `"Deploy <branch> angestoßen — bauen, testen, restarten..."`
+  - `"Deploy initiated: <branch>. Building, testing, restarting..."`
   - Das ACK ist awaited, damit es tatsächlich flushed, bevor das Skript startet.
 
 ### `packages/agent/tests/daemon/selfModify.test.ts`
-- Test `request_restart tool capability (daemon side) / schedules a deferred restart...`: mockt jetzt den WhatsApp-Plugin-Send und verifiziert, dass die Nachricht mit `"Restart eingeleitet"` synchron vor dem Marker-Schreiben gesendet wird.
+- Test `request_restart tool capability (daemon side) / schedules a deferred restart...`: mockt jetzt den WhatsApp-Plugin-Send und verifiziert, dass die Nachricht mit `"Restart initiated"` synchron vor dem Marker-Schreiben gesendet wird.
 - Test `no turn: pre-restart confirmation send completes before the shutdown signal`: `sendMock` verwaltet eine Promise-Queue (Deploy-ACK + Restart-Confirmation werden sequenziell freigegeben), sodass der Test das neue Zwei-Nachrichten-Verhalten korrekt abbildet.
 
 ## Dateien
