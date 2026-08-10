@@ -1724,11 +1724,9 @@ export class DaemonRuntime {
     const plugin = this.channelPlugins.get("whatsapp");
     if (!plugin || typeof plugin.setPresence !== "function") return;
     try {
-      // "composing"/"paused" are handled by the processor callbacks — only
-      // the account-wide status goes through the plugin's public setPresence.
-      if (type === "available" || type === "unavailable") {
-        await plugin.setPresence(type, jid);
-      }
+      // Account-wide status ("available"/"unavailable") and chat-level
+      // indicators ("composing"/"paused") both route through the plugin.
+      await plugin.setPresence(type, jid);
     } catch (err) {
       this.logger.child("whatsapp").warn("presence update failed", {
         type,
@@ -1807,6 +1805,13 @@ export class DaemonRuntime {
         try {
           await plugin.sendMessage(formatJid(source), { text: trimmed });
           this.logger.child("whatsapp").info("progressive outbound sent", { sessionId, target: source });
+          // A sent message can reset WhatsApp's composing state. Re-arm the
+          // indicator immediately so the "tippt…" stays visible while the
+          // turn continues (the inbound processor's 15s refresh may be too
+          // slow to counteract it). Fire-and-forget, never fatal.
+          if (this.turnActive) {
+            this.setWhatsAppPresence("composing", formatJid(source)).catch(() => {});
+          }
         } catch (err) {
           this.logger.child("whatsapp").warn("progressive outbound failed", {
             sessionId,

@@ -76,10 +76,11 @@ export interface ChannelPlugin extends GatewayAdapter {
   /** Returns the file-type capabilities of this channel. */
   getFileCapabilities?(): ChannelFileCapabilities;
   /**
-   * Sets the account-wide online presence ("available"/"unavailable").
-   * Optional — channels without presence reporting can omit it.
+   * Sets presence: account-wide "available"/"unavailable" (online status)
+   * or per-chat "composing"/"paused" (typing indicator). Optional — channels
+   * without presence reporting can omit it.
    */
-  setPresence?(type: "available" | "unavailable", jid?: string): Promise<void>;
+  setPresence?(type: "available" | "unavailable" | "composing" | "paused", jid?: string): Promise<void>;
 }
 
 /** A file to send via the channel. */

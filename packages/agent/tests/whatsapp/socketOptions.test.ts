@@ -2,10 +2,11 @@
  * Socket Options Tests.
  *
  * Verifies that createWhatsAppClient passes syncFullHistory:false
- * and markOnlineOnConnect:false to makeWASocket.
+ * and markOnlineOnConnect:true to makeWASocket.
  *
- * These options prevent the bot number from appearing online to the
- * primary device and from pulling the full chat history on connect.
+ * markOnlineOnConnect:true lets Baileys report "available" itself on
+ * connect; with false it would send "unavailable" and hide the online
+ * status. syncFullHistory:false prevents pulling the full chat history.
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";
@@ -65,7 +66,7 @@ afterEach(() => {
 });
 
 describe("createWhatsAppClient socket options", () => {
-  it("passes syncFullHistory:false and markOnlineOnConnect:false to makeWASocket", async () => {
+  it("passes syncFullHistory:false and markOnlineOnConnect:true to makeWASocket", async () => {
     const sock = fakeSock();
     makeWASocketSpy.mockReturnValue(sock);
     useMultiFileAuthStateSpy.mockResolvedValue({
@@ -88,11 +89,11 @@ describe("createWhatsAppClient socket options", () => {
     const config = makeWASocketSpy.mock.calls[0]![0]!;
     expect(config).toMatchObject({
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: true,
     });
   });
 
-  it("passes syncFullHistory:false and markOnlineOnConnect:false when creds not registered", async () => {
+  it("passes syncFullHistory:false and markOnlineOnConnect:true when creds not registered", async () => {
     const sock = fakeSock();
     makeWASocketSpy.mockReturnValue(sock);
     useMultiFileAuthStateSpy.mockResolvedValue({
@@ -114,7 +115,7 @@ describe("createWhatsAppClient socket options", () => {
     const config = makeWASocketSpy.mock.calls[0]![0]!;
     expect(config).toMatchObject({
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: true,
     });
   });
 });

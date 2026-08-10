@@ -8,7 +8,7 @@
  * - other → "document" message type
  * - asSticker=true → "sticker" (overrides MIME)
  * - WhatsApp client mock exposes sendFile
- * - createWhatsAppClient calls makeWASocket with syncFullHistory:false, markOnlineOnConnect:false
+ * - createWhatsAppClient calls makeWASocket with syncFullHistory:false, markOnlineOnConnect:true
  */
 
 import { describe, it, expect, vi, afterEach } from "vitest";

@@ -119,7 +119,11 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
       browser: ["Harness", "Chrome", "1.0.0"],
       logger: pino({ level: "warn" }),
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      // Baileys sends "available" itself on connect (chats.js: sendPresenceUpdate
+      // on connection.open). With markOnlineOnConnect:false it would send
+      // "unavailable" instead — overriding the plugin's explicit "available"
+      // and hiding the online status. Keep the Baileys default.
+      markOnlineOnConnect: true,
     });
 
     sock.ev.on("creds.update", saveCreds);
