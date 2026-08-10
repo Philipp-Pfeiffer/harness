@@ -17,11 +17,21 @@ was wichtig ist — du verdichtest.
 Heute ist {datum}.
 
 ## Aufgabe
-Du liest die Session-End-Summaries des Tages und memory/_inbox.md und
+Du liest die Session-End-Protokolle des Tages und memory/_inbox.md und
 schreibst bzw. ergänzt memory/daily/YYYY-MM-DD.md: chronologisch über
 die Sessions des Tages, ohne Inhalte der Summaries wegzufiltern. Musst
 du eine Detailfrage klären, liest du das zugehörige Session-Transkript
 nach — standardmäßig arbeitest du auf den Summaries.
+
+**Wo findest du die Protokolle?**
+Die Session-End-Protokolle liegen unter ~/.harness/sessions/YYYY-MM-DD/
+als *.protocol.md. Lies zuerst das Verzeichnis des gestrigen Tages mit
+readFile (ohne path, nur das Verzeichnis — es listet die Dateien).
+Dann lies jedes *.protocol.md einzeln. Das zugehörige Session-Transkript
+(.jsonl) liegt daneben, falls du Details nachschlagen musst.
+
+**Wichtig:** Prüfe OB ein Protokoll existiert bevor du es liest.
+Verzeichnisse ohne Protokolle überspringst du.
 
 ## Filter
 Deine Schwelle ist "Ist es falsch?", nicht "Ist es wichtig?". Im Zweifel
