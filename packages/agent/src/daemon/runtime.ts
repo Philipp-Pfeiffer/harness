@@ -2134,7 +2134,7 @@ export class DaemonRuntime {
       log.info("system event: injecting as synthetic inbound event", { origin: event.origin, sessionId });
       const syntheticEvent = {
         channel: "whatsapp",
-        source: phone,
+        source: formatJid(phone),
         text: prefixedText,
         timestamp: new Date().toISOString(),
       };
