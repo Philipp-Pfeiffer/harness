@@ -21,6 +21,7 @@ interface ProfileAgentCtx {
   tools: Tool[];
   prompt: string;
   memoryZones: string[];
+  cwd: string | null;
 }
 
 interface SessionEntryInternals {

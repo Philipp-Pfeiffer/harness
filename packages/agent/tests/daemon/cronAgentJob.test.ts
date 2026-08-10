@@ -30,6 +30,7 @@ interface RuntimeInternals {
         tools?: string[];
         memory?: string[];
         skills: boolean;
+        cwd?: string | null;
       };
       body: string;
       filePath: string;
@@ -45,6 +46,7 @@ interface RuntimeInternals {
       tools: unknown[];
       prompt: string;
       memoryZones: unknown[];
+      cwd: string | null;
     }
   >;
   handleIpcRequest(req: IpcRequest): Promise<IpcResponse>;
@@ -147,8 +149,7 @@ describe("DaemonRuntime.runCronAgentJob", () => {
 });
 
 describe("DaemonRuntime.runCronAgentJob overload", () => {
-  it("runs the session-end agent with the transcript path as input", async () => {
-    const { runtime, internals } = makeRuntime();
+  it("runs the session-end agent with the transcript path as input", async () => {    const { runtime, internals } = makeRuntime();
     const captured: Array<Array<Record<string, unknown>>> = [];
     internals.agent = stubAgent(captured);
     internals.model = { name: "test-model" };
@@ -168,6 +169,7 @@ describe("DaemonRuntime.runCronAgentJob overload", () => {
       tools: [],
       prompt: "session-end prompt",
       memoryZones: [],
+      cwd: null,
     });
 
     const sessionId = await runtime.runCronAgentJob("session-end", {
@@ -191,6 +193,132 @@ describe("DaemonRuntime.runCronAgentJob overload", () => {
     await expect(runtime.runCronAgentJob("session-end")).rejects.toThrow(
       /requires an input object/,
     );
+  });
+});
+
+describe("DaemonRuntime.runCronAgentJob profile cwd", () => {
+  it("passes the profile's cwd into the agent run options", async () => {
+    const { runtime, internals } = makeRuntime();
+    internals.agent = stubAgent([]);
+    internals.model = { name: "test-model" };
+
+    // Register a profile with an explicit cwd and warm its agent cache
+    // with a stub that captures the run() options.
+    internals.profiles.set("cwd-agent", {
+      name: "cwd-agent",
+      frontmatter: { name: "cwd-agent", skills: false, cwd: "~/harness" },
+      body: "Persona with cwd.",
+      filePath: "/agents/cwd-agent/agent.md",
+      dir: "/agents/cwd-agent",
+      builtin: true,
+    });
+    const captured = stubAgent([]);
+    const runOptions: Array<Record<string, unknown>> = [];
+    internals.profileAgents.set("cwd-agent", {
+      agent: {
+        run: async (
+          _messages: Array<Record<string, unknown>>,
+          options: Record<string, unknown>,
+        ) => {
+          runOptions.push(options);
+          return {
+            aborted: false,
+            finalMessage: "done",
+            turns: 1,
+            completedTurns: 1,
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              totalTokens: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+          };
+        },
+      },
+      model: { name: "test-model" },
+      tools: [],
+      prompt: "cwd prompt",
+      memoryZones: [],
+      cwd: "~/harness",
+    });
+
+    const job: CronJob = {
+      name: "cwd-job",
+      schedule: "0 7 * * *",
+      enabled: true,
+      type: "agent",
+      jitterMs: 0,
+      agent: "cwd-agent",
+      body: "Work on the notes.",
+      filePath: "/jobs/cwd-job.md",
+    };
+
+    const sessionId = await runtime.runCronAgentJob(job);
+    expect(sessionId).toBeTruthy();
+    expect(runOptions).toHaveLength(1);
+    expect(runOptions[0]!.cwd).toBe("~/harness");
+    void captured;
+  });
+
+  it("leaves the run options cwd undefined for profiles without cwd", async () => {
+    const { runtime, internals } = makeRuntime();
+    internals.agent = stubAgent([]);
+    internals.model = { name: "test-model" };
+
+    internals.profiles.set("plain-agent", {
+      name: "plain-agent",
+      frontmatter: { name: "plain-agent", skills: false, cwd: null },
+      body: "Persona without cwd.",
+      filePath: "/agents/plain-agent/agent.md",
+      dir: "/agents/plain-agent",
+      builtin: true,
+    });
+    const runOptions: Array<Record<string, unknown>> = [];
+    internals.profileAgents.set("plain-agent", {
+      agent: {
+        run: async (
+          _messages: Array<Record<string, unknown>>,
+          options: Record<string, unknown>,
+        ) => {
+          runOptions.push(options);
+          return {
+            aborted: false,
+            finalMessage: "done",
+            turns: 1,
+            completedTurns: 1,
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              totalTokens: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+            },
+          };
+        },
+      },
+      model: { name: "test-model" },
+      tools: [],
+      prompt: "plain prompt",
+      memoryZones: [],
+      cwd: null,
+    });
+
+    const job: CronJob = {
+      name: "plain-job",
+      schedule: "0 7 * * *",
+      enabled: true,
+      type: "agent",
+      jitterMs: 0,
+      agent: "plain-agent",
+      body: "Do the thing.",
+      filePath: "/jobs/plain-job.md",
+    };
+
+    const sessionId = await runtime.runCronAgentJob(job);
+    expect(sessionId).toBeTruthy();
+    expect(runOptions).toHaveLength(1);
+    expect(runOptions[0]!.cwd).toBeUndefined();
   });
 });
 
@@ -241,6 +369,7 @@ describe("session-end hook after end-session", () => {
       tools: [],
       prompt: "session-end prompt",
       memoryZones: [],
+      cwd: null,
     });
 
     // Create a session, then end it via IPC — the hook must fire.

@@ -179,6 +179,8 @@ interface ProfileAgentContext {
   tools: Tool[];
   prompt: string;
   memoryZones: MemoryZone[];
+  /** Working directory for the profile's tool calls. Null = daemon process cwd. */
+  cwd: string | null;
 }
 
 export class DaemonRuntime {
@@ -621,6 +623,7 @@ export class DaemonRuntime {
       const result = await turnCtx.agent.run(entry.messages, {
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
+        cwd: turnCtx.cwd ?? undefined,
         compaction: {
           paths: this.paths,
           sessionId,
@@ -1237,6 +1240,7 @@ export class DaemonRuntime {
               signal: ctx?.signal,
               metricsRecorder: entry.metricsRecorder,
               memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
+              cwd: turnCtx.cwd ?? undefined,
               compaction: {
                 paths: this.paths,
                 sessionId,
@@ -1783,6 +1787,7 @@ export class DaemonRuntime {
       const result = await turnCtx.agent.run(entry.messages, {
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
+        cwd: turnCtx.cwd ?? undefined,
         compaction: {
           paths: this.paths,
           sessionId,
@@ -2106,7 +2111,7 @@ export class DaemonRuntime {
     if (name === "default") {
       return {
         name: "default",
-        frontmatter: { name: "default", skills: true },
+        frontmatter: { name: "default", skills: true, cwd: null },
         body: "",
         filePath: "",
         dir: "",
@@ -2136,6 +2141,7 @@ export class DaemonRuntime {
         tools: this.defaultTools,
         prompt: this.defaultPrompt,
         memoryZones: profile.frontmatter.memory ?? ALL_MEMORY_ZONES,
+        cwd: profile.frontmatter.cwd ?? null,
       };
       this.profileAgents.set("default", ctx);
       return ctx;
@@ -2187,7 +2193,7 @@ export class DaemonRuntime {
     });
     agent.setSystemPrompt(promptText);
 
-    const ctx: ProfileAgentContext = { agent, model, tools, prompt: promptText, memoryZones: zones };
+    const ctx: ProfileAgentContext = { agent, model, tools, prompt: promptText, memoryZones: zones, cwd: profile.frontmatter.cwd ?? null };
     this.profileAgents.set(profile.name, ctx);
     this.logger.child("agent").info("profile agent created", {
       profile: profile.name,
