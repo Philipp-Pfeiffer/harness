@@ -472,7 +472,7 @@ describe("request_restart tool capability (daemon side)", () => {
     // BEFORE the marker is written — user gets immediate feedback.
     expect(sendMock).toHaveBeenCalledWith(
       "491701234567@s.whatsapp.net",
-      expect.objectContaining({ text: expect.stringContaining("Restart eingeleitet") }),
+      expect.objectContaining({ text: expect.stringContaining("Restart initiated") }),
     );
 
     const marker = await readMarker();
