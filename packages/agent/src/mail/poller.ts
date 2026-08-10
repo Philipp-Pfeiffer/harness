@@ -111,7 +111,10 @@ export class MailPoller {
 
   private async pollOnce(): Promise<void> {
     const creds = await this.loadCredentials();
-    if (!creds) return;
+    if (!creds) {
+      this.log("Mail poller: skipped — no credentials", "info");
+      return;
+    }
 
     const seen = await this.loadSeen();
     const client = new ImapFlow({
@@ -125,6 +128,7 @@ export class MailPoller {
     try {
       await client.connect();
       const mailbox = await client.mailboxOpen("vonPhilipp");
+      this.log(`Mail poller: vonPhilipp has ${mailbox.exists} message(s)`, "info");
       if (mailbox.exists === 0) return;
 
       const newIds: string[] = [];
@@ -138,7 +142,10 @@ export class MailPoller {
         newIds.push(messageId);
       }
 
-      if (newIds.length === 0) return;
+      if (newIds.length === 0) {
+        this.log(`Mail poller: all ${mailbox.exists} message(s) already seen`, "info");
+        return;
+      }
 
       for (const messageId of newIds) {
         try {
