@@ -279,12 +279,11 @@ export async function runBrowserSubAgent(
   let failureReason: string;
   if (runResult.aborted && runResult.reason === "signal" && !ctx.isComplete()) {
     failureReason = "aborted by user";
-  } else if (runResult.aborted && runResult.reason === "maxTurns") {
-    failureReason = `Turn budget exhausted (${resolved.maxTurns} turns). Call submit_report earlier when stuck.`;
   } else if (runResult.aborted && runResult.reason === "signal" && ctx.isComplete()) {
     failureReason = "Session ended without report.";
-  } else if (runResult.usage.totalTokens > resolved.maxTotalTokens) {
-    failureReason = `Token budget exhausted (${runResult.usage.totalTokens} > ${resolved.maxTotalTokens}).`;
+  } else if (!runResult.aborted) {
+    // Agent stopped without calling submit_report — turn budget exhausted.
+    failureReason = `Turn budget exhausted (${resolved.maxTurns} turns). Call submit_report earlier when stuck.`;
   } else {
     failureReason = "Browser sub-agent finished without calling submit_report.";
   }
