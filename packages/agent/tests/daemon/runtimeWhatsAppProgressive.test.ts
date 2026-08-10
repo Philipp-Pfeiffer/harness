@@ -167,15 +167,35 @@ describe("WhatsApp progressive outbound", () => {
     expect(result.finalResponse).toBe("Finale Antwort");
 
     // The final response is sent by the inbound processor, not by the hook.
-    // The progressive hook must have sent the interim text chunks already.
+    // The progressive hook must have sent the text BEFORE the tool call.
     const sentTexts = sendMock.mock.calls.map((c) => c[1]!.text);
     expect(sendMock).toHaveBeenCalledWith(
       "491701234567@s.whatsapp.net",
       expect.objectContaining({ text: expect.stringContaining("Ich schaue kurz nach.") }),
     );
-    expect(sentTexts.join("")).toContain("Ich schaue kurz nach.");
-    expect(sentTexts.join("")).toContain("Ergebnis: 42");
+    expect(sentTexts).toHaveLength(1);
+    expect(sentTexts[0]).toContain("Ich schaue kurz nach.");
+    // Text after the last tool call is the final response — it must NOT be
+    // sent progressively (the inbound processor sends it once).
+    expect(sentTexts.join("")).not.toContain("Ergebnis: 42");
     expect(sentTexts.join("")).not.toContain("Finale Antwort");
+  });
+
+  it("sends each pre-tool segment as a separate message", async () => {
+    const { internals, sendMock, sessionId } = await makeRuntime([
+      { type: "token", text: "Erster Gedanke." },
+      { type: "tool_call_start", name: "search" },
+      { type: "tool_call_done", name: "search" },
+      { type: "token", text: "Zweiter Gedanke." },
+      { type: "tool_call_start", name: "readFile" },
+      { type: "tool_call_done", name: "readFile" },
+      { type: "token", text: "Finale Antwort des Agents." },
+    ]);
+
+    await internals.submitWhatsAppTurn(sessionId, "Mehrere Tools");
+
+    const sentTexts = sendMock.mock.calls.map((c) => c[1]!.text);
+    expect(sentTexts).toEqual(["Erster Gedanke.", "Zweiter Gedanke."]);
   });
 
   it("sends nothing progressive when the agent produces no text before the final response", async () => {
@@ -193,6 +213,8 @@ describe("WhatsApp progressive outbound", () => {
   it("keeps the final response empty when no channel plugin is registered", async () => {
     const { internals, sessionId } = await makeRuntime([
       { type: "token", text: "Zwischentext" },
+      { type: "tool_call_start", name: "readFile" },
+      { type: "tool_call_done", name: "readFile" },
     ]);
     // Remove the plugin — the hook must be a no-op, turn still completes.
     internals.channelPlugins.delete("whatsapp");

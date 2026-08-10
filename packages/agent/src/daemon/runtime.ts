@@ -1783,42 +1783,32 @@ export class DaemonRuntime {
     entry.messages.push(userMessage as Message);
 
     this.turnActive = true;
-    // Progressive outbound: agent text chunks are delivered to the channel
-    // immediately, BEFORE tool execution and BEFORE the final response.
-    // The inbound processor sends the final response itself; this hook only
-    // handles text produced mid-turn (before a tool call or as interim
-    // progress). Fire-and-forget, failures are logged, never fatal.
+    // Progressive outbound: agent text chunks produced BEFORE a tool call
+    // are delivered to the channel immediately, then tool execution runs.
+    // Text of the final response is deliberately NOT sent here — the inbound
+    // processor sends it once after the turn completes (prevents duplicates).
     let progressiveText = "";
-    let progressiveOutbound: (() => Promise<void>) | undefined;
-    try {
+    let sendChain: Promise<void> = Promise.resolve();
+    const queueProgressiveSend = (text: string): void => {
       const source = this.whatsappSessionToSource.get(sessionId);
-      if (source) {
-        const plugin = this.channelPlugins.get("whatsapp");
-        if (plugin) {
-          const progressiveSend = async (text: string): Promise<void> => {
-            try {
-              await plugin.sendMessage(formatJid(source), { text });
-              this.logger.child("whatsapp").info("progressive outbound sent", { sessionId, target: source });
-            } catch (err) {
-              this.logger.child("whatsapp").warn("progressive outbound failed", {
-                sessionId,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-          };
-          progressiveOutbound = () =>
-            progressiveSend(progressiveText)
-              .then(() => {
-                progressiveText = "";
-              })
-              .catch(() => {});
+      if (!source) return;
+      const plugin = this.channelPlugins.get("whatsapp");
+      if (!plugin) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      // Serialize sends so multiple progressive segments keep their order.
+      sendChain = sendChain.then(async () => {
+        try {
+          await plugin.sendMessage(formatJid(source), { text: trimmed });
+          this.logger.child("whatsapp").info("progressive outbound sent", { sessionId, target: source });
+        } catch (err) {
+          this.logger.child("whatsapp").warn("progressive outbound failed", {
+            sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-      }
-    } catch (err) {
-      this.logger.child("whatsapp").warn("progressive outbound setup failed", {
-        error: err instanceof Error ? err.message : String(err),
       });
-    }
+    };
     try {
       const result = await turnCtx.agent.run(entry.messages, {
         metricsRecorder: entry.metricsRecorder,
@@ -1836,16 +1826,19 @@ export class DaemonRuntime {
         onEvent: (event) => {
           if (event.type === "token") {
             progressiveText += event.text;
-            void progressiveOutbound?.();
+          } else if (event.type === "tool_call_start") {
+            // Text before a tool call ships immediately; the buffer is
+            // cleared. Any text after the last tool call is the final
+            // response and is sent once by the inbound processor.
+            queueProgressiveSend(progressiveText);
+            progressiveText = "";
           }
         },
       });
 
-      // Ensure the last progressive segment has flushed before the inbound
-      // processor sends the final response — keeps message order stable.
-      if (progressiveOutbound && progressiveText.trim()) {
-        await progressiveOutbound().catch(() => {});
-      }
+      // Wait for all progressive sends so the inbound processor's final
+      // response (sendOutbound) arrives after them — stable order.
+      await sendChain;
 
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();

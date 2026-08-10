@@ -23,18 +23,29 @@ jedoch nicht.
 ### `packages/agent/src/daemon/runtime.ts`
 
 - `submitWhatsAppTurn` registriert jetzt einen `onEvent`-Hook an
-  `agent.run()`. Bei `token`-Events wird der Text akkumuliert und
-  fire-and-forget über `plugin.sendMessage(formatJid(source), { text })`
-  an den WhatsApp-Kanal gesendet — SOFORT, bevor Tool-Calls ausgeführt werden
-  und bevor die finale Antwort kommt.
-- Ein finaler Flush vor dem Return wartet auf die letzte progressive
-  Segment, damit die Nachrichten-Reihenfolge stabil bleibt (der Inbound-
-  Processor sendet danach die finale Antwort).
-- Fehler beim Senden werden geloggt, nie geworfen — ein Send-Fehler bricht
-  den Turn nicht ab.
+  `agent.run()`. Text, der VOR einem Tool-Call produziert wird, wird bei
+  `tool_call_start` akkumuliert und über `plugin.sendMessage(formatJid(source),
+  { text })` sofort an den WhatsApp-Kanal gesendet — dann läuft der Tool-Call.
+- Sends sind serialisiert (`sendChain`), damit mehrere progressive Segmente
+  ihre Reihenfolge behalten. Fehler beim Senden werden geloggt, nie geworfen —
+  ein Send-Fehler bricht den Turn nicht ab.
+- Text NACH dem letzten Tool-Call wird NICHT progressiv gesendet: Das ist die
+  finale Antwort, die der Inbound-Processor nach Turn-Completion genau einmal
+  via `sendOutbound` sendet.
+- Vor dem Return wird `sendChain` awaited, damit die finale Antwort des
+  Inbound-Processors erst nach allen progressiven Segmenten ankommt.
 - Keine Änderung am Agent-Loop (`agent.ts`), an der Tool-Execution oder am
   TUI-Streaming. Der IPC-Pfad (`submit-turn` mit eigenem `onEvent` für das
   Streaming) bleibt unberührt.
+
+### Fix: Duplikat der finalen Antwort (Deploy-Test, 10.8.2026)
+
+Nach dem ersten Deploy kam die finale Antwort doppelt: Der finale Flush
+sendete den letzten Text-Teil progressiv, der Inbound-Processor sendete
+dieselbe finale Antwort nochmal. Ursache: Der Flush griff auch auf Text nach
+dem letzten Tool-Call zu. Fix: Progressive Delivery stoppt bei
+`tool_call_start` — Text nach dem letzten Tool-Call wird ausschließlich vom
+Inbound-Processor gesendet (siehe oben).
 
 ### Nicht geändert (bewusst)
 
@@ -50,12 +61,13 @@ jedoch nicht.
 
 Neu: `packages/agent/tests/daemon/runtimeWhatsAppProgressive.test.ts`
 
-- "text + tool + text"-Pattern → `sendMessage` wird mit dem Zwischentext
-  vor dem Tool-Call UND mit dem Text nach dem Tool-Call aufgerufen (mehrere
-  Nachrichten pro Turn, nicht nur turn-complete).
+- "text + tool + text"-Pattern → nur der Text VOR dem Tool-Call wird
+  progressiv gesendet; Text nach dem letzten Tool-Call (finale Antwort) wird
+  NICHT gesendet (kein Duplikat).
+- Zwei Tool-Calls → jedes Pre-Tool-Segment wird als eigene Nachricht gesendet.
 - Agent ohne Zwischentext → kein progressiver Send.
 - Kein Channel-Plugin registriert → Hook ist No-Op, Turn schließt normal ab.
 
 Verifikation: `pnpm typecheck` grün, `pnpm build` grün, WhatsApp/daemon-Suite
-(281 Tests) grün. Einzig pre-existing Fail: `exec.test.ts` (sudo-Test ohne
+(282 Tests) grün. Einzig pre-existing Fail: `exec.test.ts` (sudo-Test ohne
 Passwort auf dieser Maschine) — unabhängig von dieser Änderung.
