@@ -225,7 +225,7 @@ describe("/model keyword matching", () => {
     expect(entry?.session.modelRef).toBeUndefined();
   });
 
-  it("/model without argument reports the active model", async () => {
+  it("/model without argument reports the active model and lists all models", async () => {
     const runtime = new DaemonRuntime();
     const internals = runtime as unknown as RuntimeInternals;
     internals.agent = createFakeAgent();
@@ -236,10 +236,20 @@ describe("/model keyword matching", () => {
     const result = await runtime.handleChannelSlashCommand(sessionId, "/model");
     expect(result).not.toBeNull();
     expect(result!.response).toContain("Modell:");
+    expect(result!.response).toContain("Verfügbare Modelle:");
+    expect(result!.response).toContain("GPT 5.2");
+    expect(result!.response).toContain("GPT 5.1");
+    expect(result!.response).toContain("MiniMax M2.7");
+    expect(result!.response).toContain("GPT 4o");
 
     await runtime.handleChannelSlashCommand(sessionId, "/model flash");
     const switched = await runtime.handleChannelSlashCommand(sessionId, "/model");
-    expect(switched!.response).toContain("GPT-5.2");
+    expect(switched!.response).toContain("Modell: GPT-5.2");
+    expect(switched!.response).toMatch(/\* flash — GPT 5\.2/);
+
+    // /model list is an alias for the same output
+    const list = await runtime.handleChannelSlashCommand(sessionId, "/model list");
+    expect(list!.response).toContain("Verfügbare Modelle:");
   });
 });
 

@@ -40,15 +40,16 @@ und es gab keine Möglichkeit, auf das Default-Modell zurückzusetzen.
 
 ### `/model`-Handler
 
-- `/model` (ohne Argument) → zeigt das aktive Modell der Session:
-  `Modell: DeepSeek Flash (128k)` (Modellname + Kontextfenster in k).
+- `/model` (ohne Argument) → zeigt das aktive Modell **und darunter die
+  vollständige Modell-Liste** (aktives mit `*` markiert, Keywords vorangestellt).
+  `/model list` ist ein expliziter Alias dafür.
 - `/model <keyword>` → wechselt das Modell session-gebunden und persistiert den
   Ref (wie bisher via `entry.modelRef` + `setSessionModelRef`).
 - `/model default` → setzt die Session auf das Default-Modell zurück
   (`modelRef` wird entfernt).
 - Kein Match → `Unbekanntes Modell: "x". Verfügbar: flash, pro, ...` (Keyword
   bevorzugt, sonst alias/provider-model).
-- Antwortformat einzeilig und WhatsApp-tauglich:
+- Antwortformat beim Wechsel einzeilig und WhatsApp-tauglich:
   `Modell: DeepSeek Flash (128k)` — kein Menü, keine Liste.
 - `formatContextWindow(n)` — neuer Top-Level-Helper (131072 → `128k`).
 
@@ -71,11 +72,11 @@ und es gab keine Möglichkeit, auf das Default-Modell zurückzusetzen.
 | Datei | Änderung |
 |-------|----------|
 | `packages/core/src/config.ts` | `keyword?: string` auf `ConfigModel` |
-| `packages/agent/src/daemon/runtime.ts` | `findConfigModel`, `/model default`, Anzeige `/model`, Feedback-Format, `currentSessionModel`, `formatContextWindow` |
+| `packages/agent/src/daemon/runtime.ts` | `findConfigModel`, `/model default`, `/model` zeigt aktives Modell + Liste, Feedback-Format, `currentSessionModel`, `formatContextWindow` |
 | `packages/agent/src/core/session.ts` | `setSessionModelRef`-Reset + `readTranscript` ignoriert leere Ref |
 | `~/harness/config.json` | `keyword`-Felder für 5 Modelle |
 | `harness.config.example.json` | Beispiel `keyword` |
-| `packages/agent/tests/daemon/modelRef.test.ts` | +6 Tests für Keyword-Matching |
+| `packages/agent/tests/daemon/modelRef.test.ts` | +6 Tests für Keyword-Matching + Listen-Anzeige |
 
 ## Tests
 
@@ -85,7 +86,8 @@ und es gab keine Möglichkeit, auf das Default-Modell zurückzusetzen.
   - Substring-Fallback + mehrere Keywords.
   - Unbekanntes Modell → verfügbare Keywords im Fehler.
   - `/model default` → `modelRef` entfernt, Daemon-Modell gemeldet.
-  - `/model` ohne Argument → zeigt aktives Modell.
+  - `/model` ohne Argument → zeigt aktives Modell + vollständige Liste
+    (aktives markiert), `/model list` als Alias.
 - `pnpm build` + `pnpm typecheck` grün.
 - `pnpm --filter @harness/agent test` (503 Tests) grün.
 - `pnpm --filter @harness/core test` grün bis auf einen umgebungsbedingten
@@ -97,4 +99,7 @@ und es gab keine Möglichkeit, auf das Default-Modell zurückzusetzen.
 - Kein neues Config-Feld `aliases` (Array) — `keyword` (String) reicht.
 - Der TUI-Modell-Picker (lokaler `/model`-Fluss ohne Argument) bleibt unverändert;
   `/model <arg>` in der TUI geht wie bisher an den Daemon.
-- Kein Push, kein Deploy.
+- **Achtung Regression (gefixt):** Die erste Version ersetzte die Modell-Liste
+  durch eine reine Anzeige des aktiven Modells. Rückmeldung aus dem Feld
+  ("sonst sehe ich ja nicht, was es alles gibt") → Liste wurde wiederhergestellt
+  (aktives Modell + alle Modelle, aktives markiert).
