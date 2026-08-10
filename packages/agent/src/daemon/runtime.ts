@@ -491,13 +491,19 @@ export class DaemonRuntime {
   /**
    * Deferred restart: requests a self-restart that takes effect after the
    * current turn finishes and its final response has been sent. The marker
-   * is written first so the intent survives even a mid-shutdown crash.
-   * systemd sees exit code 1 and restarts the daemon (Restart=on-failure).
+   * is written so the intent survives even a mid-shutdown crash. systemd
+   * sees exit code 1 and restarts the daemon (Restart=on-failure).
+   * An optional announcement is flushed to the channel BEFORE the marker
+   * so the user gets immediate feedback.
    *
    * @param gitHeadOverride New HEAD to record in the marker (e.g. after a
    *   deploy merged a branch). Defaults to the current repo HEAD.
    * @param followUp Whether the boot handler should run a follow-up turn
    *   instead of the static ping after the restart.
+   * @param announceBeforeRestart Called BEFORE the marker is written so the
+   *   user gets immediate feedback ("Restart eingeleitet …") even while a
+   *   turn is still running. Awaited; failures are warn-logged and never
+   *   block the restart.
    * @param awaitBeforeRestart Called right before an immediate restart when
    *   no turn is running. Lets the caller flush the confirmation message
    *   ("Deploy prepared, restarting…") through the channel BEFORE the
@@ -509,6 +515,7 @@ export class DaemonRuntime {
     benachrichtigeSession?: string,
     gitHeadOverride?: string,
     followUp?: boolean,
+    announceBeforeRestart?: () => Promise<void>,
     awaitBeforeRestart?: () => Promise<void>,
   ): Promise<void> {
     const log = this.logger.child("self");
@@ -517,6 +524,18 @@ export class DaemonRuntime {
       replyTarget: benachrichtigeSession ?? "(none)",
       followUp: followUp === true ? true : undefined,
     });
+
+    // Announce the restart BEFORE the marker is written — the user gets
+    // feedback immediately instead of only after the "Back online" ping.
+    if (announceBeforeRestart) {
+      try {
+        await announceBeforeRestart();
+      } catch (err) {
+        log.warn("pre-restart announcement failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Write the restart marker immediately — the shutdown path must not
     // lose this intent if it fails partway.
@@ -578,7 +597,12 @@ export class DaemonRuntime {
       }
       try {
         const replyTarget = this.whatsappSessionToSource.get(sessionId) ?? "";
-        await this.requestRestartAfterTurn(reason, replyTarget, undefined, true);
+        await this.requestRestartAfterTurn(reason, replyTarget, undefined, true, () =>
+          this.sendChannelResponse(
+            sessionId,
+            "Restart eingeleitet — bin in ~20 Sekunden zurück.",
+          ),
+        );
         return { ok: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -2690,6 +2714,14 @@ export class DaemonRuntime {
     }
     this.selfModifyInFlight = true;
     try {
+      // Sofortiges ACK — bevor das Deploy-Skript überhaupt startet, damit
+      // der Nutzer weiß, dass der Auftrag angenommen wurde. Awaited, damit
+      // die Nachricht geflusht ist, bevor die langlaufende Deploy-Phase beginnt.
+      await this.sendChannelResponse(
+        sessionId,
+        `Deploy ${branch} angestoßen — bauen, testen, restarten...`,
+      );
+
       const result = await runDeploy(
         HARNESS_REPO_DIR,
         branch,

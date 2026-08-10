@@ -316,13 +316,15 @@ describe("/deploy channel command", () => {
   it("no turn: pre-restart confirmation send completes before the shutdown signal", async () => {
     const runtime = makeRuntime();
     const shutdownSpy = mockShutdown(runtime);
-    // The send resolves only when explicitly released — proves the restart
-    // is NOT scheduled until the confirmation message has fully flushed.
-    let releaseSend!: () => void;
+    // Sends resolve only when explicitly released — proves the restart is
+    // NOT scheduled until the deploy ACK and the confirmation message have
+    // fully flushed. The ACK is a single awaited send, so a queue that
+    // releases one send at a time keeps the handler blocked in order.
+    const pending: Array<() => void> = [];
     const sendMock = vi.fn(
       () =>
         new Promise<void>((resolve) => {
-          releaseSend = resolve;
+          pending.push(resolve);
         }),
     );
     (
@@ -339,14 +341,20 @@ describe("/deploy channel command", () => {
     const sessionId = await registerWhatsAppSession(runtime, "491701234567");
     const command = runtime.handleChannelSlashCommand(sessionId, "/deploy feat/x");
 
-    // Give the handler a tick to reach the send; the shutdown must still
-    // be pending because the send has not resolved yet.
+    // Give the handler a tick to reach the ACK send; the shutdown must
+    // still be pending because the ACK has not resolved yet.
     await new Promise((r) => setTimeout(r, 20));
     expect(shutdownSpy).not.toHaveBeenCalled();
     expect(sendMock).toHaveBeenCalledTimes(1);
 
-    // Release the send — only now may the restart be scheduled.
-    releaseSend();
+    // Release the deploy ACK — only now may the deploy run and the
+    // confirmation send start.
+    pending.shift()!();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sendMock).toHaveBeenCalledTimes(2);
+
+    // Release the confirmation — only now may the restart be scheduled.
+    pending.shift()!();
     const result = await command;
     expect(result!.response).toBe("");
     await flushImmediate();
@@ -444,6 +452,12 @@ describe("request_restart tool capability (daemon side)", () => {
     internals.turnActive = true;
 
     const sessionId = await registerWhatsAppSession(runtime, "491701234567");
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    (
+      runtime as unknown as {
+        channelPlugins: Map<string, { sendMessage: (t: string, p: unknown) => Promise<void> }>;
+      }
+    ).channelPlugins.set("whatsapp", { sendMessage: sendMock });
 
     const cap = (runtime as unknown as {
       makeRequestRestartCapability: (sid: string) => (reason: string) => Promise<{ ok: boolean; error?: string }>;
@@ -453,6 +467,13 @@ describe("request_restart tool capability (daemon side)", () => {
     expect(result.ok).toBe(true);
     // Turn still active → no immediate exit.
     expect(shutdownSpy).not.toHaveBeenCalled();
+
+    // The pre-restart announcement is flushed to the channel synchronously,
+    // BEFORE the marker is written — user gets immediate feedback.
+    expect(sendMock).toHaveBeenCalledWith(
+      "491701234567@s.whatsapp.net",
+      expect.objectContaining({ text: expect.stringContaining("Restart eingeleitet") }),
+    );
 
     const marker = await readMarker();
     expect(marker?.reason).toBe("new API key added to ~/harness/.env");
