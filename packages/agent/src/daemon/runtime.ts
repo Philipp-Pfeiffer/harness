@@ -2454,7 +2454,7 @@ export class DaemonRuntime {
    * Supported commands:
    *   /help     — List all available commands.
    *   /status   — Show daemon + session status including active model.
-   *   /model    — Show the model active for the current session.
+   *   /model    — Show active model + list available models.
    *   /model <keyword|alias|model|provider/model> — Switch model for the
    *               current session (keyword match wins, substring fallback).
    *   /model default — Reset the session to the config default model.
@@ -2477,7 +2477,7 @@ export class DaemonRuntime {
           "Commands:",
           "/help — Show this list",
           "/status — Daemon status + active model",
-          "/model — Show active model",
+          "/model — Show active model + list",
           "/model <keyword|alias|model> — Switch model",
           "/model default — Reset to default model",
           "/new — Start a fresh session",
@@ -2562,14 +2562,34 @@ export class DaemonRuntime {
       return { response: formatStatusSummary(summary) };
     }
 
-    // /model — show current model
-    if (trimmed === "/model") {
+    // /model — show active model + list all configured models
+    if (trimmed === "/model" || trimmed === "/model list") {
       const entry = this.sessions.get(sessionId);
       const activeModel = this.currentSessionModel(entry);
-      if (!activeModel) {
-        return { response: `Active model: ${entry?.modelRef ?? entry?.session.model ?? "unknown"}` };
+      const activeLabel = activeModel
+        ? `Modell: ${activeModel.name} (${formatContextWindow(activeModel.contextWindow)})`
+        : `Active model: ${entry?.modelRef ?? entry?.session.model ?? "unknown"}`;
+
+      if (this.configModels.length === 0) {
+        return { response: `${activeLabel}\nNo other models configured.` };
       }
-      return { response: `Modell: ${activeModel.name} (${formatContextWindow(activeModel.contextWindow)})` };
+
+      const activeRef = entry?.modelRef ?? "";
+      const lines = this.configModels.map((m) => {
+        const keyword = m.keyword ? `${m.keyword} — ` : "";
+        const label = `${m.alias || `${m.provider}/${m.model}`} (${m.provider}/${m.model})`;
+        const isActive =
+          (activeModel !== null && m.model === activeModel.id) ||
+          (activeRef.length > 0 &&
+            (activeRef.toLowerCase() === m.keyword?.toLowerCase() ||
+              activeRef.toLowerCase() === m.alias.toLowerCase() ||
+              activeRef.toLowerCase() === m.model.toLowerCase()));
+        return `${isActive ? "* " : "  "}${keyword}${label}`;
+      });
+      return {
+        response:
+          `${activeLabel}\n\nVerfügbare Modelle:\n${lines.join("\n")}\n\nWechseln mit /model <keyword|alias|model>.`,
+      };
     }
 
     // /model <ref> — switch model
