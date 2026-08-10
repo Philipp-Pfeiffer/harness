@@ -15,6 +15,8 @@ export type ConfigModel = {
   provider: string;
   model: string;
   alias: string;
+  /** Short slash-command keyword for `/model <keyword>` matching (e.g. "flash"). */
+  keyword?: string;
   api?: OpenAiApiType;
   baseUrl?: string;
   apiKey?: string;

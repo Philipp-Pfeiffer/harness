@@ -58,8 +58,15 @@ function createFakeAgent(): Agent {
 }
 
 const MODELS: ConfigModel[] = [
-  { provider: "openai", model: "gpt-5.2", alias: "GPT 5.2" },
+  { provider: "openai", model: "gpt-5.2", alias: "GPT 5.2", keyword: "pro" },
   { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7" },
+];
+
+const MODELS_WITH_KEYWORDS: ConfigModel[] = [
+  { provider: "openai", model: "gpt-5.2", alias: "GPT 5.2", keyword: "flash", contextWindow: 131072 },
+  { provider: "openai", model: "gpt-5.1", alias: "GPT 5.1", keyword: "pro", contextWindow: 1048576 },
+  { provider: "minimax", model: "MiniMax-M2.7", alias: "MiniMax M2.7", keyword: "kimi", contextWindow: 262144 },
+  { provider: "openai", model: "gpt-4o", alias: "GPT 4o", keyword: "k3", contextWindow: 1048576 },
 ];
 
 type RuntimeInternals = {
@@ -88,7 +95,7 @@ describe("modelRef persistence via /model", () => {
     // /model <ref> — switch the model.
     const result = await runtime.handleChannelSlashCommand(sessionId, "/model MiniMax-M2.7");
     expect(result).not.toBeNull();
-    expect(result!.response).toContain("Model switched to");
+    expect(result!.response).toContain("Modell:");
 
     // Session meta contains modelRef.
     const entry = internals.sessions.get(sessionId);
@@ -122,6 +129,117 @@ describe("modelRef persistence via /model", () => {
     expect(fresh!.newSessionId).toBeDefined();
     const newEntry = internals.sessions.get(fresh!.newSessionId!);
     expect(newEntry?.session.modelRef).toBeUndefined();
+  });
+});
+
+describe("/model keyword matching", () => {
+  async function createSession(internals: RuntimeInternals): Promise<string> {
+    const created = await internals.handleIpcRequest({ type: "create-session", origin: "whatsapp" });
+    expect(created.type).toBe("session-created");
+    if (created.type !== "session-created") throw new Error("session creation failed");
+    return created.sessionId;
+  }
+
+  it("switches by exact keyword (case-insensitive) and persists the ref", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model FLASH");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("GPT-5.2");
+
+    const entry = internals.sessions.get(sessionId);
+    expect(entry?.session.modelRef).toBe("FLASH");
+  });
+
+  it("matches the model id exactly when no keyword matches", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model gpt-5.1");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("GPT-5.1");
+
+    const entry = internals.sessions.get(sessionId);
+    expect(entry?.session.modelRef).toBe("gpt-5.1");
+  });
+
+  it("falls back to substring matching against alias", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    // "kimi" is an exact keyword match (MiniMax-M2.7).
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model kimi");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("MiniMax-M2.7");
+
+    // "k3" is an exact keyword match too.
+    const k3 = await runtime.handleChannelSlashCommand(sessionId, "/model k3");
+    expect(k3!.response).toContain("GPT-4o");
+  });
+
+  it("reports unknown models with available keywords", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model nonexistent");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("Unbekanntes Modell");
+    expect(result!.response).toContain("flash");
+    expect(result!.response).toContain("pro");
+  });
+
+  it("/model default clears the session modelRef and reports the daemon model", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    await runtime.handleChannelSlashCommand(sessionId, "/model flash");
+    const switched = internals.sessions.get(sessionId);
+    expect(switched?.session.modelRef).toBe("flash");
+
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model default");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("fake-default");
+
+    const entry = internals.sessions.get(sessionId);
+    expect(entry?.session.modelRef).toBeUndefined();
+  });
+
+  it("/model without argument reports the active model", async () => {
+    const runtime = new DaemonRuntime();
+    const internals = runtime as unknown as RuntimeInternals;
+    internals.agent = createFakeAgent();
+    internals.model = createFakeModel();
+    internals.configModels = MODELS_WITH_KEYWORDS;
+    const sessionId = await createSession(internals);
+
+    const result = await runtime.handleChannelSlashCommand(sessionId, "/model");
+    expect(result).not.toBeNull();
+    expect(result!.response).toContain("Modell:");
+
+    await runtime.handleChannelSlashCommand(sessionId, "/model flash");
+    const switched = await runtime.handleChannelSlashCommand(sessionId, "/model");
+    expect(switched!.response).toContain("GPT-5.2");
   });
 });
 

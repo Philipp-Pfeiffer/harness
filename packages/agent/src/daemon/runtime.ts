@@ -106,6 +106,12 @@ import {
 import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
 import { waitForChannelReady } from "./restartPing.js";
 
+/** Formats a context window size for user feedback, e.g. 131072 → "128k". */
+function formatContextWindow(contextWindow: number | undefined): string {
+  if (contextWindow === undefined || contextWindow <= 0) return "?";
+  return `${Math.round(contextWindow / 1024)}k`;
+}
+
 /**
  * Heartbeat hook — periodic self-check interface.
  *
@@ -2322,6 +2328,43 @@ export class DaemonRuntime {
     };
   }
 
+  /**
+   * Resolves a model reference against the configured models.
+   *
+   * Match priority (first hit wins, case-insensitive):
+   *   1. exact `keyword` match (e.g. `/model flash`)
+   *   2. exact `model` id match (e.g. `/model @preset/deepseek-flash`)
+   *   3. exact `alias` match (e.g. `/model DeepSeek Flash`)
+   *   4. exact `provider/model` match
+   *   5. substring match against keyword, model, alias, or provider —
+   *      "flash" matches "@preset/deepseek-flash" and "DeepSeek Flash".
+   *      Empty or whitespace-only keywords never match.
+   */
+  private findConfigModel(ref: string): ConfigModel | undefined {
+    const keyword = ref.trim().toLowerCase();
+    if (!keyword) return undefined;
+
+    const substring = (field: string | undefined): boolean =>
+      field !== undefined && field.length > 0 && field.toLowerCase().includes(keyword);
+
+    const exact = (field: string | undefined): boolean =>
+      field !== undefined && field.toLowerCase() === keyword;
+
+    return (
+      this.configModels.find((m) => exact(m.keyword)) ??
+      this.configModels.find((m) => exact(m.model)) ??
+      this.configModels.find((m) => exact(m.alias)) ??
+      this.configModels.find((m) => exact(`${m.provider}/${m.model}`)) ??
+      this.configModels.find(
+        (m) =>
+          substring(m.keyword) ||
+          substring(m.model) ||
+          substring(m.alias) ||
+          substring(m.provider),
+      )
+    );
+  }
+
   private resolveModelRef(ref: string | undefined, fallback?: Model<Api> | null): Model<Api> {
     if (!ref) {
       if (fallback) return fallback;
@@ -2329,12 +2372,7 @@ export class DaemonRuntime {
       return this.model;
     }
 
-    const fromConfig = this.configModels.find(
-      (m) =>
-        m.alias === ref ||
-        m.model === ref ||
-        `${m.provider}/${m.model}` === ref,
-    );
+    const fromConfig = this.findConfigModel(ref);
     if (fromConfig) {
       return resolveModelFromConfig(fromConfig);
     }
@@ -2359,10 +2397,26 @@ export class DaemonRuntime {
   /** Maps a persisted session.model label back to a config preset ref. */
   private inferModelRefFromSessionLabel(label: string | undefined): string | undefined {
     if (!label) return undefined;
-    const match = this.configModels.find(
-      (m) => m.alias === label || m.model === label || `${m.provider}/${m.model}` === label,
-    );
+    const match = this.configModels.find((m) => {
+      return m.keyword === label || m.alias === label || m.model === label || `${m.provider}/${m.model}` === label;
+    });
     return match?.model ?? label;
+  }
+
+  /**
+   * Resolves the model currently active for a session (session-specific
+   * modelRef, then the profile model, then the daemon default). Returns
+   * null if the session's model ref is unresolvable.
+   */
+  private currentSessionModel(entry: SessionEntry | undefined): Model<Api> | null {
+    if (!entry) return this.model ?? null;
+    try {
+      const profile = this.resolveProfile(entry.profile) ?? this.resolveProfile("default");
+      const profileModel = profile ? this.agentContextFor(profile).model : null;
+      return this.resolveModelRef(entry.modelRef, profileModel ?? this.model);
+    } catch {
+      return null;
+    }
   }
 
   private applyTurnModel(
@@ -2395,8 +2449,10 @@ export class DaemonRuntime {
    * Supported commands:
    *   /help     — List all available commands.
    *   /status   — Show daemon + session status including active model.
-   *   /model    — List available models (active one marked).
-   *   /model <alias|model|provider/model> — Switch model for current session.
+   *   /model    — Show the model active for the current session.
+   *   /model <keyword|alias|model|provider/model> — Switch model for the
+   *               current session (keyword match wins, substring fallback).
+   *   /model default — Reset the session to the config default model.
    *   /new      — End current session, create a new one.
    *   /end      — End the current session explicitly.
    *   /sessions — List all sessions.
@@ -2416,8 +2472,9 @@ export class DaemonRuntime {
           "Commands:",
           "/help — Show this list",
           "/status — Daemon status + active model",
-          "/model — List available models",
-          "/model <name|alias|provider/model> — Switch model",
+          "/model — Show active model",
+          "/model <keyword|alias|model> — Switch model",
+          "/model default — Reset to default model",
           "/new — Start a fresh session",
           "/end — End current session",
           "/sessions — List all sessions",
@@ -2500,20 +2557,14 @@ export class DaemonRuntime {
       return { response: formatStatusSummary(summary) };
     }
 
-    // /model — list models
+    // /model — show current model
     if (trimmed === "/model") {
       const entry = this.sessions.get(sessionId);
-      const activeRef = entry?.modelRef ?? entry?.session.model ?? this.model?.name ?? "";
-      if (this.configModels.length === 0) {
-        return { response: `Active model: ${activeRef}\nNo other models configured.` };
+      const activeModel = this.currentSessionModel(entry);
+      if (!activeModel) {
+        return { response: `Active model: ${entry?.modelRef ?? entry?.session.model ?? "unknown"}` };
       }
-      const lines = this.configModels.map((m, i) => {
-        const label = m.alias || `${m.provider}/${m.model}`;
-        const isActive = m.alias === activeRef || m.model === activeRef || `${m.provider}/${m.model}` === activeRef;
-        const marker = isActive ? " *" : "  ";
-        return `${marker} ${i + 1}. ${label} (${m.provider}/${m.model})`;
-      });
-      return { response: `Models (${this.configModels.length}):\n${lines.join("\n")}\n\nUse /model <name|alias|provider/model> to switch.` };
+      return { response: `Modell: ${activeModel.name} (${formatContextWindow(activeModel.contextWindow)})` };
     }
 
     // /model <ref> — switch model
@@ -2521,12 +2572,23 @@ export class DaemonRuntime {
     if (modelMatch) {
       const ref = modelMatch[1]!.trim();
       const entry = this.sessions.get(sessionId);
-      const match = this.configModels.find(
-        (m) => m.alias === ref || m.model === ref || `${m.provider}/${m.model}` === ref,
-      );
+
+      // /model default — reset to the config default model
+      if (ref.toLowerCase() === "default") {
+        if (entry) {
+          entry.modelRef = undefined;
+          entry.session = await setSessionModelRef(entry.session, "", this.paths);
+          const log = this.logger.child("session");
+          log.info("model reset to default via /model", { sessionId });
+        }
+        const target = this.resolveModelRef(undefined, this.model);
+        return { response: `Modell: ${target.name} (${formatContextWindow(target.contextWindow)})` };
+      }
+
+      const match = this.findConfigModel(ref);
       if (!match) {
-        const names = this.configModels.map((m) => m.alias || `${m.provider}/${m.model}`).join(", ");
-        return { response: `Unknown model: "${ref}".\nAvailable: ${names}` };
+        const names = this.configModels.map((m) => m.keyword ?? m.alias ?? `${m.provider}/${m.model}`).join(", ");
+        return { response: `Unbekanntes Modell: "${ref}".\nVerfügbar: ${names}` };
       }
       const resolved = resolveModelFromConfig(match);
       if (entry) {
@@ -2535,7 +2597,7 @@ export class DaemonRuntime {
         const log = this.logger.child("session");
         log.info("model switched via /model", { sessionId, model: ref });
       }
-      return { response: `Model switched to: ${match.alias || `${match.provider}/${match.model}`} (${resolved.name})` };
+      return { response: `Modell: ${resolved.name} (${formatContextWindow(resolved.contextWindow)})` };
     }
 
     // /restart — schedule a deferred self-restart (no build steps)
