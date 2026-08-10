@@ -47,6 +47,37 @@ dem letzten Tool-Call zu. Fix: Progressive Delivery stoppt bei
 `tool_call_start` — Text nach dem letzten Tool-Call wird ausschließlich vom
 Inbound-Processor gesendet (siehe oben).
 
+### Fix: WhatsApp Presence (Online-Status + "tippt…") (10.8.2026)
+
+Nach dem Deploy des progressiven Sendens meldete Philipp: kein Online-Status
+mehr sichtbar, "tippt…"-Indikator unreliable.
+
+Befund:
+
+- `markOnlineOnConnect: false` (seit `199c25e`) bewirkte, dass Baileys bei
+  jedem Connect automatisch `sendPresenceUpdate("unavailable")` sendet
+  (Baileys `chats.js`, `connection.open`-Handler). Das explizite
+  `setPresence("available")` des Plugins verlor das Race gegen dieses
+  automatische `unavailable` → Online-Status verschwand.
+- Der progressive Send (`plugin.sendMessage`) während eines laufenden Turns
+  kann WhatsApps composing-Zustand zurücksetzen; der 15s-Refresh des
+  Inbound-Processors war zu langsam, um das zu korrigieren → "tippt…"
+  flackerte.
+
+Fix:
+
+- `client.ts`: `markOnlineOnConnect: true` — Baileys sendet "available" selbst
+  beim Connect; kein Kampf mehr mit automatischem `unavailable`.
+- `plugin.ts`: explizites `setPresence("available")` bei `open` entfernt
+  (redundant). `unavailable` bei `close` bleibt. Plugin-`setPresence` akzeptiert
+  jetzt auch `composing`/`paused` mit JID.
+- `daemon/types.ts`: `ChannelPlugin.setPresence`-Signatur um
+  `composing`/`paused` erweitert.
+- `runtime.ts`: Nach jedem progressiven Send wird `setWhatsAppPresence(
+  "composing", jid)` sofort erneut gefeuert (fire-and-forget), damit das
+  "tippt…" trotz Send sichtbar bleibt. `setWhatsAppPresence` leitet jetzt auch
+  `composing`/`paused` an das Plugin weiter (vorher nur account-weit).
+
 ### Nicht geändert (bewusst)
 
 - `packages/agent/src/whatsapp/plugin.ts` — der `sendOutbound`-Callback
@@ -69,5 +100,5 @@ Neu: `packages/agent/tests/daemon/runtimeWhatsAppProgressive.test.ts`
 - Kein Channel-Plugin registriert → Hook ist No-Op, Turn schließt normal ab.
 
 Verifikation: `pnpm typecheck` grün, `pnpm build` grün, WhatsApp/daemon-Suite
-(282 Tests) grün. Einzig pre-existing Fail: `exec.test.ts` (sudo-Test ohne
+(498 Tests) grün. Einzig pre-existing Fail: `exec.test.ts` (sudo-Test ohne
 Passwort auf dieser Maschine) — unabhängig von dieser Änderung.

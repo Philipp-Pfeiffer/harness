@@ -138,7 +138,9 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         onConnectionUpdate: (update) => {
           if (update.status === "open") {
             opts.log("WhatsApp connected", "info");
-            void opts.callbacks.setPresence("available");
+            // No explicit "available" here — Baileys sends it itself on connect
+            // (markOnlineOnConnect). Sending it again would race the automatic
+            // "unavailable" from a concurrent reconnect.
           } else if (update.status === "close") {
             opts.log(`WhatsApp disconnected (reason: ${update.disconnectReason ?? "unknown"})`, "warn");
             void opts.callbacks.setPresence("unavailable");
@@ -159,12 +161,13 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
     },
 
     /**
-     * Sets the account-wide online presence ("available"/"unavailable").
-     * Called by the daemon on connect/disconnect/shutdown.
+     * Sets presence: account-wide "available"/"unavailable" (no jid) or
+     * per-chat "composing"/"paused" (with jid). Non-critical — failures are
+     * handled inside the client wrapper, never fatal.
      */
-    async setPresence(type: "available" | "unavailable"): Promise<void> {
+    async setPresence(type: "available" | "unavailable" | "composing" | "paused", jid?: string): Promise<void> {
       if (!client) return;
-      await client.sendPresenceUpdate(type);
+      await client.sendPresenceUpdate(type, jid);
     },
 
     async healthCheck(): Promise<boolean> {
