@@ -639,7 +639,7 @@ export async function setSessionModelRef(
   const meta: SessionMetaRecord = { type: "session-meta", title: session.title, updatedAt, modelRef };
   await appendFile(session.transcriptPath, JSON.stringify(meta) + "\n", "utf-8");
 
-  const updated: Session = { ...session, modelRef };
+  const updated: Session = { ...session, modelRef: modelRef || undefined };
   await upsertIndexEntry(paths, sessionToIndexEntry(updated));
   return updated;
 }
@@ -834,7 +834,7 @@ async function readTranscript(
         if (typeof parsed.title === "string") {
           title = parsed.title;
         }
-        if (typeof parsed.modelRef === "string") {
+        if (typeof parsed.modelRef === "string" && parsed.modelRef.length > 0) {
           modelRef = parsed.modelRef;
         }
         continue;

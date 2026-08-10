@@ -21,6 +21,7 @@
       "provider": "neuralwatt",
       "model": "kimi-k2.7-code",
       "alias": "Kimi K2.7 Code",
+      "keyword": "kimi",
       "reasoning": true,
       "inlineThinking": true,
       "input": ["text", "image"],
