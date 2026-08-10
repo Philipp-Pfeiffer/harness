@@ -54,7 +54,11 @@
     "heartbeatIntervalSec": 0,
     "whatsapp": {
       "testMode": true,
-      "phoneNumber": "4915112345678"
+      "phoneNumber": "4915112345678",
+      "ownerPhone": "4917012345678"
+    },
+    "mail": {
+      "pollIntervalSec": 120
     }
   }
 }

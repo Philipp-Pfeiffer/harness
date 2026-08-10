@@ -284,6 +284,14 @@ export interface DaemonStatusInfo {
  */
 export type SerializedMessage = Message;
 
+/** System event payload for the system event bus. */
+export interface SystemEvent {
+  /** Human-readable origin label (e.g. "Mail", "Restart", "Calendar"). */
+  origin: string;
+  /** Event text (metadata only, no untrusted content). */
+  text: string;
+}
+
 /* ─── Daemon Config ─── */
 
 export interface DaemonConfig {
@@ -310,6 +318,11 @@ export interface DaemonConfig {
   heartbeatIntervalSec: number;
   /** WhatsApp gateway configuration. */
   whatsapp?: WhatsAppConfig;
+  /** Mail poller configuration. */
+  mail?: {
+    /** Polling interval in seconds (default 120 = 2min). */
+    pollIntervalSec?: number;
+  };
 }
 
 /** WhatsApp gateway configuration. */
@@ -318,6 +331,12 @@ export interface WhatsAppConfig {
   testMode: boolean;
   /** Phone number for pairing (JID format: number@s.whatsapp.net). */
   phoneNumber: string;
+  /**
+   * Phone number of the WhatsApp owner (digits-only, e.g. "491701234567").
+   * Used as the target for system event outbound when no active session
+   * exists. Falls back to session-index and config-derived sources.
+   */
+  ownerPhone?: string;
 }
 
 export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {

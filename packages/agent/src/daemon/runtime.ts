@@ -85,6 +85,7 @@ import type {
   SessionOrigin,
   SessionSummary,
   TurnStreamEvent,
+  SystemEvent,
 } from "./types.js";
 import { DEFAULT_DAEMON_CONFIG } from "./types.js";
 
@@ -92,6 +93,7 @@ import { createWhatsAppPlugin } from "../whatsapp/plugin.js";
 import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
 import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
+import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
 import { channelAddendum } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import type { ChannelPlugin } from "./types.js";
@@ -105,6 +107,7 @@ import {
 } from "./selfModify.js";
 import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
 import { waitForChannelReady } from "./restartPing.js";
+import { MailPoller } from "../mail/poller.js";
 
 /** Formats a context window size for user feedback, e.g. 131072 → "128k". */
 function formatContextWindow(contextWindow: number | undefined): string {
@@ -363,30 +366,79 @@ export class DaemonRuntime {
       });
       const plugin = this.channelPlugins.get("whatsapp");
       if (plugin) {
-        try {
-          await sendRestartPing(
+        // Wait for channel ready, then fire-and-forget — never block boot.
+        waitForChannelReady(plugin, (msg, level, data) => {
+          if (level === "warn") log.warn(msg, data ?? {});
+          else log.info(msg, data ?? {});
+        }).then(() => {
+          if (marker.followUp === true && marker.replyTarget) {
+            // System event bus path: inject the follow-up prompt as a
+            // synthetic inbound event. Session resolution via
+            // resolveWhatsAppSession (not sessions.get — sessions are
+            // loaded on-demand, marker.replyTarget is a phone number).
+            // Fire-and-forget: follow-up turn no longer blocks boot.
+            void this.injectSystemEvent({
+              origin: "Restart",
+              text: RESTART_FOLLOWUP_PROMPT(marker.reason),
+            });
+          } else {
+            // Static ping fallback (original behavior)
+            sendRestartPing(
+              marker,
+              (target, payload) => plugin.sendMessage(target, payload),
+              (msg, level, data) => {
+                if (level === "warn") log.warn(msg, data ?? {});
+                else log.info(msg, data ?? {});
+              },
+              undefined, // no follow-up callback
+              () => Promise.resolve(), // already waited above
+            ).catch((err) => {
+              log.warn("restart ping send failed — marker already consumed", {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }).catch((err) => {
+          log.warn("restart ping skipped — WhatsApp not connected", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+          // Still send static ping as best-effort
+          void sendRestartPing(
             marker,
             (target, payload) => plugin.sendMessage(target, payload),
             (msg, level, data) => {
-              if (level === "warn") log.warn(msg, data);
-              else log.info(msg, data);
+              if (level === "warn") log.warn(msg, data ?? {});
+              else log.info(msg, data ?? {});
             },
-            marker.followUp === true && marker.replyTarget
-              ? () => this.runRestartFollowUp(marker.replyTarget, marker.reason)
-              : undefined,
-            () => waitForChannelReady(plugin, (msg, level, data) => {
-              if (level === "warn") log.warn(msg, data);
-              else log.info(msg, data);
-            }),
-          );
-        } catch (err) {
-          log.warn("restart ping send failed — marker already consumed", {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
+            undefined,
+            () => Promise.resolve(),
+          ).catch(() => {});
+        });
       } else {
         log.warn("pending restart marker but no whatsapp plugin — marker consumed", {
           reason: marker.reason,
+        });
+      }
+    }
+
+    // Start mail poller if configured
+    const mailConfig = this.config.mail;
+    if (mailConfig) {
+      try {
+        this.mailPoller = new MailPoller({
+          injectEvent: (event) => { void this.injectSystemEvent(event); },
+          log: (msg, lvl) => {
+            if (lvl === "error") log.error(msg);
+            else if (lvl === "warn") log.warn(msg);
+            else log.info(msg);
+          },
+          pollIntervalSec: mailConfig.pollIntervalSec ?? 120,
+        });
+        this.mailPoller.start();
+        log.info("mail poller started", { interval: mailConfig.pollIntervalSec ?? 120 });
+      } catch (err) {
+        log.error("mail poller failed to start — continuing without it", {
+          error: err instanceof Error ? err.message : String(err),
         });
       }
     }
@@ -444,6 +496,13 @@ export class DaemonRuntime {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+      }
+
+      // Stop mail poller
+      if (this.mailPoller) {
+        this.mailPoller.stop();
+        this.mailPoller = null;
+        log.info("mail poller stopped");
       }
 
       // Report offline presence after the gateways stopped — the WhatsApp
@@ -610,106 +669,6 @@ export class DaemonRuntime {
         return { ok: false, error: msg };
       }
     };
-  }
-
-  /**
-   * Runs the post-restart follow-up: a short agent turn on the reply-target
-   * session (same path as an incoming WhatsApp turn, including provenance
-   * context). Throws on failure so sendRestartPing falls back to the
-   * static ping.
-   */
-  private async runRestartFollowUp(
-    sessionId: string,
-    reason: string,
-  ): Promise<void> {
-    const log = this.logger.child("self");
-    log.info("running post-restart follow-up turn", { sessionId, reason });
-
-    const entry = this.sessions.get(sessionId);
-    if (!entry) {
-      throw new Error(`follow-up session not found: ${sessionId}`);
-    }
-
-    let turnCtx: ProfileAgentContext;
-    try {
-      const turnProfile = this.resolveProfile(entry.profile);
-      if (!turnProfile) throw new Error(`unknown agent profile "${entry.profile}"`);
-      turnCtx = this.agentContextFor(turnProfile);
-    } catch (err) {
-      throw err instanceof Error ? err : new Error(String(err));
-    }
-    turnCtx = this.applyTurnModel(turnCtx, entry.modelRef);
-
-    const userMessage = {
-      role: "user" as const,
-      content: RESTART_FOLLOWUP_PROMPT(reason),
-      timestamp: Date.now(),
-    };
-    entry.messages.push(userMessage as Message);
-
-    let finalMessage = "";
-    this.postRestartFollowUpActive = true;
-    try {
-      const result = await turnCtx.agent.run(entry.messages, {
-        metricsRecorder: entry.metricsRecorder,
-        memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
-        cwd: turnCtx.cwd ?? undefined,
-        compaction: {
-          paths: this.paths,
-          sessionId,
-          threshold: DEFAULT_COMPACTION_THRESHOLD,
-        },
-        mailbox: entry.mailbox,
-        channelFileSender: this.channelFileSender,
-        requestRestart: this.makeRequestRestartCapability(sessionId),
-        postRestartFollowUp: true,
-        systemPromptAddendum: channelAddendum(entry.origin),
-      });
-
-      entry.turnsCompleted++;
-      entry.lastActiveAt = new Date().toISOString();
-
-      finalMessage = result.aborted ? `[Turn aborted: ${result.reason}]` : result.finalMessage;
-      const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
-      const turnSlice = entry.messages.slice(turnStartIndex);
-      const { tool_calls, tool_results } = extractToolData(turnSlice);
-      const turn = {
-        id: crypto.randomUUID(),
-        role: "assistant" as const,
-        content: finalMessage,
-        userContent: userMessage.content,
-        tool_calls,
-        tool_results,
-        tokens: {
-          input: result.usage.inputTokens,
-          output: result.usage.outputTokens,
-          total: result.usage.totalTokens,
-          cacheRead: result.usage.cacheRead,
-          cacheWrite: result.usage.cacheWrite,
-        },
-        timing: {
-          startedAt: new Date().toISOString(),
-          latencyMs: 0,
-        },
-        model: turnCtx.model?.name ?? "unknown",
-        timestamp: new Date().toISOString(),
-        messages: turnSlice,
-      };
-      entry.session = await recordTurn(entry.session, turn, this.paths);
-    } finally {
-      this.postRestartFollowUpActive = false;
-    }
-
-    // Outbound: route the follow-up answer to the session's channel.
-    const source = this.whatsappSessionToSource.get(sessionId);
-    if (source) {
-      const plugin = this.channelPlugins.get("whatsapp");
-      if (plugin) {
-        const target = formatJid(source);
-        await plugin.sendMessage(target, { text: finalMessage });
-        log.info("post-restart follow-up sent", { sessionId, target });
-      }
-    }
   }
 
   /**
@@ -1729,6 +1688,9 @@ export class DaemonRuntime {
         setPresence: (type, jid) => {
           void this.setWhatsAppPresence(type, jid);
         },
+        setProcessor: (processor) => {
+          this.whatsappProcessor = processor;
+        },
       },
     });
 
@@ -1767,6 +1729,15 @@ export class DaemonRuntime {
 
   /** Prevents duplicate session creation when many messages arrive at once. */
   private readonly whatsappSessionLock = new PerKeyLock();
+
+  /** Mail poller instance (started when config.mail is present). */
+  private mailPoller: MailPoller | null = null;
+
+  /** Pending system events that failed outbound delivery. Retried on next event/healthcheck. */
+  private readonly pendingSystemEvents: SystemEvent[] = [];
+
+  /** WhatsApp inbound processor reference (set during gateway init). */
+  private whatsappProcessor: WhatsAppInboundProcessor | null = null;
 
   /**
    * Submits a turn from the WhatsApp plugin, image blocks included.
@@ -2092,6 +2063,120 @@ export class DaemonRuntime {
     const entry = this.sessions.get(sessionId);
     if (entry) {
       entry.mailbox.push(text);
+    }
+  }
+
+  /**
+   * Injects a system event into the WhatsApp session.
+   *
+   * Resolves the target phone from config.ownerPhone → session-index
+   * → logs+discard. The prefixed text ("[System · <origin>]") prevents
+   * slash-command interception (text won't start with "/").
+   *
+   * Behavior per session state:
+   * a) Turn running → steer via mailbox (non-disruptive)
+   * b) Session idle → synthetic ChannelInboundEvent → normal debounce→turn→outbound
+   * c) No active session → resolveWhatsAppSession(phone) → then (b)
+   *
+   * Outbound failures: event is queued as pending, retried on next event/healthcheck.
+   * This method never throws.
+   */
+  private async injectSystemEvent(event: SystemEvent): Promise<void> {
+    const log = this.logger.child("event-bus");
+    const prefixedText = `[System · ${event.origin}] ${event.text}`;
+
+    // Resolve target phone
+    const phone = await this.resolveOwnerPhone();
+    if (!phone) {
+      log.warn("system event discarded — no owner phone found", { origin: event.origin });
+      return;
+    }
+
+    // Resolve session
+    const resolved = await this.resolveWhatsAppSession(phone);
+    const sessionId = resolved.sessionId;
+    const entry = this.sessions.get(sessionId);
+    if (!entry) {
+      log.error("system event: resolved session not found", { sessionId, origin: event.origin });
+      return;
+    }
+
+    const processor = this.whatsappProcessor;
+    if (!processor) {
+      log.warn("system event discarded — no WhatsApp processor available", { origin: event.origin });
+      return;
+    }
+
+    // Check if a turn is currently running
+    const sourceState = processor.getSourceState(phone);
+    const turnRunning = sourceState?.turnRunning ?? false;
+
+    if (turnRunning) {
+      // Turn running → steer via mailbox
+      log.info("system event: turn running, steering", { origin: event.origin, sessionId });
+      this.steerWhatsAppSession(sessionId, prefixedText);
+    } else {
+      // Session idle (or just created) → synthetic inbound event
+      log.info("system event: injecting as synthetic inbound event", { origin: event.origin, sessionId });
+      const syntheticEvent = {
+        channel: "whatsapp",
+        source: phone,
+        text: prefixedText,
+        timestamp: new Date().toISOString(),
+      };
+      try {
+        await processor.processInbound(syntheticEvent);
+      } catch (err) {
+        log.error("system event: inbound injection failed", {
+          origin: event.origin,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // On injection failure, queue for retry
+        this.pendingSystemEvents.push(event);
+        return;
+      }
+    }
+
+    // Flush pending events
+    await this.flushPendingSystemEvents();
+  }
+
+  /**
+   * Resolves the WhatsApp owner phone.
+   * Fallback: config.ownerPhone → session index (newest "WhatsApp: <phone>") → null.
+   */
+  private async resolveOwnerPhone(): Promise<string | null> {
+    // 1. Config
+    const ownerPhone = this.config.whatsapp?.ownerPhone;
+    if (ownerPhone) return ownerPhone;
+
+    // 2. Session index
+    try {
+      const index = await listSessions(this.paths);
+      const whatsAppSessions = index
+        .filter((e) => e.title.startsWith("WhatsApp: ") && e.status !== "ended")
+        .sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
+      if (whatsAppSessions.length > 0) {
+        // Extract phone from title "WhatsApp: 491701234567"
+        const phone = whatsAppSessions[0]!.title.slice("WhatsApp: ".length);
+        this.logger.child("event-bus").info("owner phone resolved from session index", { phone });
+        return phone;
+      }
+    } catch {
+      // Index read failed
+    }
+
+    return null;
+  }
+
+  /** Flushes all pending system events (queued from failed outbound attempts). */
+  private async flushPendingSystemEvents(): Promise<void> {
+    if (this.pendingSystemEvents.length === 0) return;
+    const events = this.pendingSystemEvents.splice(0);
+    const log = this.logger.child("event-bus");
+    log.info(`flushing ${events.length} pending system events`);
+    for (const event of events) {
+      await this.injectSystemEvent(event);
     }
   }
 

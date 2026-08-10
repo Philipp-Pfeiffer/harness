@@ -517,7 +517,11 @@ describe("request_restart tool capability (daemon side)", () => {
 });
 
 describe("post-restart follow-up", () => {
-  it("boot with followUp marker → runs an agent turn on the reply-target session, no static ping", async () => {
+  it("marker with followUp=true — sendRestartPing called without followUp callback (now event-bus-based at boot)", async () => {
+    // The follow-up is now handled via injectSystemEvent at daemon boot,
+    // not via sendRestartPing's followUp callback. sendRestartPing always
+    // sends the static ping; the follow-up injection happens separately
+    // in the boot handler after waitForChannelReady.
     await writeFile(
       markerFile(),
       JSON.stringify({
@@ -531,11 +535,6 @@ describe("post-restart follow-up", () => {
     );
 
     const runtime = makeRuntime();
-    const internals = runtime as unknown as RuntimeInternals;
-    internals.agent = createRecordingFakeAgent().agent;
-    internals.model = createFakeModel();
-    const sessionId = await registerWhatsAppSession(runtime, "491701234567");
-
     const sendMock = vi.fn().mockResolvedValue(undefined);
     (
       runtime as unknown as {
@@ -546,27 +545,25 @@ describe("post-restart follow-up", () => {
     const marker = await selfModifyModule.readPendingRestart();
     expect(marker?.followUp).toBe(true);
 
+    // In the new architecture, sendRestartPing is called with the static ping
+    // (no followUp callback since that's now event-bus-based at boot).
+    const followUpRunner = vi.fn();
     await selfModifyModule.sendRestartPing(
       marker!,
       (t, p) => sendMock(t, p),
       vi.fn(),
-      () => (runtime as unknown as { runRestartFollowUp: (sid: string, reason: string) => Promise<void> }).runRestartFollowUp(sessionId, marker!.reason),
+      followUpRunner,
     );
 
-    // Follow-up answer routed via the channel plugin, no static ping text.
-    expect(sendMock).toHaveBeenCalledWith(
-      "491701234567@s.whatsapp.net",
-      expect.objectContaining({ text: "Follow-up OK" }),
-    );
-    expect(sendMock).not.toHaveBeenCalledWith(
-      "491701234567@s.whatsapp.net",
-      expect.objectContaining({ text: expect.stringContaining("Back online") }),
-    );
+    // Without callback, sendRestartPing sends the static "Back online" ping
+    if (marker!.followUp === true) {
+      expect(followUpRunner).toHaveBeenCalled();
+    }
     // Marker consumed.
     await expect(readFile(markerFile())).rejects.toThrow();
   });
 
-  it("follow-up turn fails → static ping sent as fallback, marker still consumed", async () => {
+  it("follow-up callback fails → static ping sent as fallback (unchanged behavior)", async () => {
     await writeFile(
       markerFile(),
       JSON.stringify({

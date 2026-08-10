@@ -64,6 +64,8 @@ export interface WhatsAppPluginOptions {
      * account-wide online status (no jid), "composing"/"paused" for a chat.
      */
     setPresence: (type: "available" | "unavailable" | "composing" | "paused", jid?: string) => void;
+    /** Reports the inbound processor instance back to the daemon (for system event bus). */
+    setProcessor?: (processor: WhatsAppInboundProcessor) => void;
   };
 }
 
@@ -128,6 +130,9 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
           executeCommand: opts.callbacks.executeCommand,
         },
       });
+
+      // Report processor back to daemon for system event bus
+      opts.callbacks.setProcessor?.(processor);
 
       // Create and start the Baileys client
       client = createWhatsAppClient({
