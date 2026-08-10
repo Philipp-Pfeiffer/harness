@@ -373,13 +373,27 @@ export class DaemonRuntime {
         }).then(() => {
           if (marker.followUp === true && marker.replyTarget) {
             // System event bus path: inject the follow-up prompt as a
-            // synthetic inbound event. Session resolution via
-            // resolveWhatsAppSession (not sessions.get — sessions are
-            // loaded on-demand, marker.replyTarget is a phone number).
-            // Fire-and-forget: follow-up turn no longer blocks boot.
-            void this.injectSystemEvent({
+            // synthetic inbound event. Pass marker.replyTarget as the
+            // phone override — the number is known from the marker, no
+            // need to resolve via config/index (which may be empty at boot).
+            const phone = marker.replyTarget;
+            this.injectSystemEvent({
               origin: "Restart",
               text: RESTART_FOLLOWUP_PROMPT(marker.reason),
+            }, phone).catch((err) => {
+              log.warn("system event injection failed — falling back to static ping", {
+                error: err instanceof Error ? err.message : String(err),
+              });
+              void sendRestartPing(
+                marker,
+                (target, payload) => plugin.sendMessage(target, payload),
+                (msg, level, data) => {
+                  if (level === "warn") log.warn(msg, data ?? {});
+                  else log.info(msg, data ?? {});
+                },
+                undefined,
+                () => Promise.resolve(),
+              ).catch(() => {});
             });
           } else {
             // Static ping fallback (original behavior)
@@ -2081,12 +2095,12 @@ export class DaemonRuntime {
    * Outbound failures: event is queued as pending, retried on next event/healthcheck.
    * This method never throws.
    */
-  private async injectSystemEvent(event: SystemEvent): Promise<void> {
+  private async injectSystemEvent(event: SystemEvent, phoneOverride?: string): Promise<void> {
     const log = this.logger.child("event-bus");
     const prefixedText = `[System · ${event.origin}] ${event.text}`;
 
     // Resolve target phone
-    const phone = await this.resolveOwnerPhone();
+    const phone = phoneOverride ?? await this.resolveOwnerPhone();
     if (!phone) {
       log.warn("system event discarded — no owner phone found", { origin: event.origin });
       return;
