@@ -1783,6 +1783,42 @@ export class DaemonRuntime {
     entry.messages.push(userMessage as Message);
 
     this.turnActive = true;
+    // Progressive outbound: agent text chunks are delivered to the channel
+    // immediately, BEFORE tool execution and BEFORE the final response.
+    // The inbound processor sends the final response itself; this hook only
+    // handles text produced mid-turn (before a tool call or as interim
+    // progress). Fire-and-forget, failures are logged, never fatal.
+    let progressiveText = "";
+    let progressiveOutbound: (() => Promise<void>) | undefined;
+    try {
+      const source = this.whatsappSessionToSource.get(sessionId);
+      if (source) {
+        const plugin = this.channelPlugins.get("whatsapp");
+        if (plugin) {
+          const progressiveSend = async (text: string): Promise<void> => {
+            try {
+              await plugin.sendMessage(formatJid(source), { text });
+              this.logger.child("whatsapp").info("progressive outbound sent", { sessionId, target: source });
+            } catch (err) {
+              this.logger.child("whatsapp").warn("progressive outbound failed", {
+                sessionId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          };
+          progressiveOutbound = () =>
+            progressiveSend(progressiveText)
+              .then(() => {
+                progressiveText = "";
+              })
+              .catch(() => {});
+        }
+      }
+    } catch (err) {
+      this.logger.child("whatsapp").warn("progressive outbound setup failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     try {
       const result = await turnCtx.agent.run(entry.messages, {
         metricsRecorder: entry.metricsRecorder,
@@ -1797,7 +1833,19 @@ export class DaemonRuntime {
         channelFileSender: this.channelFileSender,
         requestRestart: this.makeRequestRestartCapability(sessionId),
         systemPromptAddendum: channelAddendum(entry.origin),
+        onEvent: (event) => {
+          if (event.type === "token") {
+            progressiveText += event.text;
+            void progressiveOutbound?.();
+          }
+        },
       });
+
+      // Ensure the last progressive segment has flushed before the inbound
+      // processor sends the final response — keeps message order stable.
+      if (progressiveOutbound && progressiveText.trim()) {
+        await progressiveOutbound().catch(() => {});
+      }
 
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();
