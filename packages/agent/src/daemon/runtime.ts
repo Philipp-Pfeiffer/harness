@@ -347,6 +347,7 @@ export class DaemonRuntime {
           paths: this.paths,
           logger: this.logger.child("cron-script"),
           retentionDays: this.config.logRetentionDays,
+          injectEvent: (event) => this.injectSystemEvent(event),
         },
       });
       await this.scheduler.start();

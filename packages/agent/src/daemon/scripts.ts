@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { HarnessPaths } from "@harness/core";
 
+import { buildCuratorPingText } from "./curatorPing.js";
 import type { ComponentLogger } from "./logger.js";
 
 /* ─── Script Job Registry ───
@@ -17,6 +18,8 @@ export interface ScriptJobContext {
   logger: ComponentLogger;
   /** Retention in days for data managed by scripts (from daemon config). */
   retentionDays: number;
+  /** Best-effort system event injection (used by curator-ping). */
+  injectEvent?: (event: { origin: string; text: string }) => Promise<void> | void;
 }
 
 export type ScriptJobFn = (ctx: ScriptJobContext) => Promise<void>;
@@ -69,3 +72,18 @@ async function rotateMetrics(ctx: ScriptJobContext): Promise<void> {
 }
 
 registerScriptJob("metrics-rotation", rotateMetrics);
+
+/* ─── Built-in: curator-ping ───
+ *
+ * After a curator stage-2 run, pings the WhatsApp session via the
+ * system event bus. No report or empty report → no ping.
+ */
+registerScriptJob("curator-ping", async (ctx) => {
+  const text = await buildCuratorPingText(ctx.paths.state, ctx.logger);
+  if (!text) return;
+  if (ctx.injectEvent) {
+    await ctx.injectEvent({ origin: "Curator", text });
+  } else {
+    ctx.logger.info("curator ping skipped — no event bus available");
+  }
+});
