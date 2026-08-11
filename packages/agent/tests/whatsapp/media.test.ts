@@ -9,7 +9,7 @@
  * - isVisionCapableModel check
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,7 +23,35 @@ import {
   formatFileSize,
   MediaTooLargeError,
 } from "../../src/whatsapp/media.js";
-import { MAX_MEDIA_DOWNLOAD_BYTES } from "../../src/whatsapp/limits.js";
+import { MAX_MEDIA_DOWNLOAD_BYTES, MAX_INLINE_IMAGE_BYTES } from "../../src/whatsapp/limits.js";
+
+/**
+ * Sharp mock. `mockMetadata` / `mockToBuffer` control per-test behavior;
+ * the real pipeline (metadata → resize → jpeg → toBuffer) is exercised
+ * against these hooks.
+ */
+let mockMetadata: () => Promise<{ width?: number; height?: number }> = async () => ({ width: 1, height: 1 });
+let mockResizeCalled = false;
+let mockToBuffer: () => Promise<Buffer> = async () => Buffer.from("resized");
+let mockDecodeError: Error | null = null;
+vi.mock("sharp", () => ({
+  default: (() => {
+    const impl = (() => {});
+    return Object.assign(
+      () => ({
+        metadata: async () => {
+          if (mockDecodeError) throw mockDecodeError;
+          return mockMetadata();
+        },
+        resize: () => {
+          mockResizeCalled = true;
+          return { jpeg: () => ({ toBuffer: async () => mockToBuffer() }) };
+        },
+      }),
+      impl,
+    );
+  })(),
+}));
 
 const TEST_DIR = join(tmpdir(), `harness-media-test-${process.pid}-${Date.now()}`);
 const MEDIA_DIR = join(TEST_DIR, "inbound-media");
@@ -31,6 +59,10 @@ const MEDIA_DIR = join(TEST_DIR, "inbound-media");
 beforeEach(async () => {
   await rm(TEST_DIR, { recursive: true, force: true });
   await mkdir(MEDIA_DIR, { recursive: true });
+  mockMetadata = async () => ({ width: 1, height: 1 });
+  mockResizeCalled = false;
+  mockToBuffer = async () => Buffer.from("resized");
+  mockDecodeError = null;
 });
 
 afterEach(async () => {
@@ -160,26 +192,31 @@ describe("WhatsApp Media Pipeline", () => {
   });
 
   describe("processMediaForTurn", () => {
+    // Minimal valid 1x1 PNG
+    const TINY_PNG = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+
     it("creates image blocks for vision-capable models", async () => {
-      // Create a small test image
-      const buffer = Buffer.from("fake-image-data");
-      const media = await downloadMedia(buffer, "image/jpeg", "image", MEDIA_DIR);
+      const media = await downloadMedia(TINY_PNG, "image/png", "image", MEDIA_DIR);
 
       const { imageBlocks, annotations } = await processMediaForTurn([media], true);
       expect(imageBlocks.length).toBe(1);
-      expect(imageBlocks[0]!.mimeType).toBe("image/jpeg");
+      expect(imageBlocks[0]!.mimeType).toBe("image/png");
+      expect(imageBlocks[0]!.filePath).toBe(media.filePath);
       expect(annotations.length).toBe(1);
       expect(annotations[0]).toContain("Bild angehängt:");
-      expect(annotations[0]).toContain("image-Tool");
+      expect(annotations[0]).toContain(media.filePath);
     });
 
     it("does not create image blocks for non-vision models", async () => {
-      const buffer = Buffer.from("fake-image-data");
-      const media = await downloadMedia(buffer, "image/jpeg", "image", MEDIA_DIR);
+      const media = await downloadMedia(TINY_PNG, "image/png", "image", MEDIA_DIR);
 
       const { imageBlocks, annotations } = await processMediaForTurn([media], false);
       expect(imageBlocks.length).toBe(0);
       expect(annotations.length).toBe(1);
+      expect(annotations[0]).toContain("Bild angehängt:");
     });
 
     it("creates annotations for all media types", async () => {
@@ -189,6 +226,70 @@ describe("WhatsApp Media Pipeline", () => {
       const { annotations } = await processMediaForTurn([media], false);
       expect(annotations[0]).toContain("Datei angehängt:");
       expect(annotations[0]).toContain("audio");
+    });
+  });
+
+  describe("createImageBlock", () => {
+    // Minimal valid 1x1 PNG
+    const TINY_PNG = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+
+    it("returns a block with filePath for a decodable image", async () => {
+      const media = await downloadMedia(TINY_PNG, "image/png", "image", MEDIA_DIR);
+      const block = await createImageBlock(media.filePath, media.mimeType);
+      expect(block).not.toBeNull();
+      expect(block!.mimeType).toBe("image/png");
+      expect(block!.filePath).toBe(media.filePath);
+      expect(block!.data.equals(TINY_PNG)).toBe(true);
+    });
+
+    it("returns null for non-decodable content", async () => {
+      mockDecodeError = new Error("decode failed");
+      const media = await downloadMedia(Buffer.from("not-an-image"), "image/jpeg", "image", MEDIA_DIR);
+      const block = await createImageBlock(media.filePath, media.mimeType);
+      expect(block).toBeNull();
+      mockDecodeError = null;
+    });
+
+    it("returns null for missing files", async () => {
+      const block = await createImageBlock(join(MEDIA_DIR, "missing.png"), "image/png");
+      expect(block).toBeNull();
+    });
+
+    it("returns null for files exceeding the inline size cap", async () => {
+      // 1 byte over the cap → rejected before any decode attempt
+      const oversized = Buffer.alloc(MAX_INLINE_IMAGE_BYTES + 1);
+      const media = await downloadMedia(oversized, "image/jpeg", "image", MEDIA_DIR);
+      // downloadMedia enforces MAX_MEDIA_DOWNLOAD_BYTES (100MB), not the 10MB
+      // inline cap — write the file directly so the inline cap is exercised.
+      await writeFile(media.filePath, oversized);
+      const block = await createImageBlock(media.filePath, media.mimeType);
+      expect(block).toBeNull();
+    });
+
+    it("downscales oversized images to the max dimension", async () => {
+      mockMetadata = async () => ({ width: 5000, height: 3000 });
+      mockToBuffer = async () => Buffer.from("resized-jpeg");
+      mockResizeCalled = false;
+      const media = await downloadMedia(TINY_PNG, "image/png", "image", MEDIA_DIR);
+      const block = await createImageBlock(media.filePath, media.mimeType);
+      expect(block).not.toBeNull();
+      expect(block!.mimeType).toBe("image/jpeg");
+      expect(mockResizeCalled).toBe(true);
+      expect(block!.data.toString()).toBe("resized-jpeg");
+    });
+
+    it("keeps small images untouched (no resize)", async () => {
+      mockMetadata = async () => ({ width: 800, height: 600 });
+      mockResizeCalled = false;
+      const media = await downloadMedia(TINY_PNG, "image/png", "image", MEDIA_DIR);
+      const block = await createImageBlock(media.filePath, media.mimeType);
+      expect(block).not.toBeNull();
+      expect(block!.mimeType).toBe("image/png");
+      expect(mockResizeCalled).toBe(false);
+      expect(block!.data.equals(TINY_PNG)).toBe(true);
     });
   });
 

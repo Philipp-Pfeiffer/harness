@@ -7,6 +7,20 @@
 /** Maximum media download size: 100 MB. */
 export const MAX_MEDIA_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 
+/**
+ * Maximum size for an image that is inlined into the turn context as a
+ * content block. Mirrors the image tool's cap (10 MB). Larger images fall
+ * back to file-annotation + image tool.
+ */
+export const MAX_INLINE_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Maximum largest-side dimension for inlined images. WhatsApp photos are
+ * typically 1280px or 1600px — 2048px keeps token cost bounded while
+ * preserving readable detail.
+ */
+export const MAX_INLINE_IMAGE_DIMENSION = 2048;
+
 /** Delay between outbound message chunks (ms). Anti-ban mitigation. */
 export const OUTBOUND_CHUNK_DELAY_MS = 500;
 
