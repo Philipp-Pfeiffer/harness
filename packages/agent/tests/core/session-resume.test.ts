@@ -261,3 +261,98 @@ describe("Session resume after daemon restart", () => {
     });
   });
 });
+
+describe("lastTurnUsage from persisted transcript", () => {
+  let baseDir: string;
+  let paths: HarnessPaths;
+
+  beforeEach(() => {
+    baseDir = mkdtempSync(join(tmpdir(), "harness-usage-test-"));
+    paths = makePaths(baseDir);
+  });
+
+  afterEach(() => {
+    try {
+      rmdirSync(baseDir, { recursive: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  it("returns the last turn's measured usage on resume", async () => {
+    const session = await createSession(paths, { model: "test-model" });
+    await recordTurn(
+      session,
+      baseTurn({
+        id: "t1",
+        tokens: { input: 1_000, output: 200, total: 1_200, cacheRead: 400, cacheWrite: 100 },
+      }),
+      paths,
+    );
+    await recordTurn(
+      session,
+      baseTurn({
+        id: "t2",
+        tokens: { input: 2_000, output: 500, total: 2_500, cacheRead: 800, cacheWrite: 200 },
+      }),
+      paths,
+    );
+
+    const loaded = await loadSession(session.id, paths);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.lastTurnUsage).toEqual({
+      inputTokens: 2_000,
+      outputTokens: 500,
+      totalTokens: 2_500,
+      cacheRead: 800,
+      cacheWrite: 200,
+    });
+  });
+
+  it("skips trailing zero-usage turns (provider without usage reporting)", async () => {
+    const session = await createSession(paths, { model: "test-model" });
+    await recordTurn(
+      session,
+      baseTurn({
+        id: "t1",
+        tokens: { input: 1_000, output: 200, total: 1_200, cacheRead: 400, cacheWrite: 100 },
+      }),
+      paths,
+    );
+    // A later turn where the provider reported no usage at all (all zero).
+    await recordTurn(
+      session,
+      baseTurn({
+        id: "t2",
+        tokens: { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      paths,
+    );
+
+    const loaded = await loadSession(session.id, paths);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.lastTurnUsage).toEqual({
+      inputTokens: 1_000,
+      outputTokens: 200,
+      totalTokens: 1_200,
+      cacheRead: 400,
+      cacheWrite: 100,
+    });
+  });
+
+  it("is undefined when no turn has measured usage", async () => {
+    const session = await createSession(paths, { model: "test-model" });
+    await recordTurn(
+      session,
+      baseTurn({
+        id: "t1",
+        tokens: { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      paths,
+    );
+
+    const loaded = await loadSession(session.id, paths);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.lastTurnUsage).toBeUndefined();
+  });
+});

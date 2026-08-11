@@ -29,6 +29,12 @@ export interface StatusContext {
   /** Accumulated session token usage */
   sessionUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
   /**
+   * Real provider usage of the most recently completed turn (from the
+   * agent's result.usage). Preferred context-fill source: it reflects
+   * what the provider actually counted, unlike the local estimate.
+   */
+  lastTurnUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
+  /**
    * Estimated tokens currently in the session context (message history
    * + system prompt + tool definitions). Falls back to the session's
    * total input spend when not provided.
@@ -252,9 +258,22 @@ export async function buildStatusSummary(
     ? formatTokens(context.sessionUsage.outputTokens)
     : "n/a";
 
-  // Context fill: prefer the live context estimate (messages + prompt + tools,
-  // matching the compaction trigger), fall back to the session's input spend.
+  // Context fill: prefer the real provider usage of the last turn
+  // (input + cache the provider counted for the most recent request),
+  // then the live context estimate (messages + prompt + tools, matching
+  // the compaction trigger), then the session's cumulative input spend.
+  // A provider that did not report usage leaves all-zero values — treat
+  // that like "no measurement" (same guard the Lernassistent uses in
+  // pickTokens) so the fallbacks stay intact.
+  const hasMeasuredLastTurn =
+    context.lastTurnUsage !== undefined &&
+    (context.lastTurnUsage.totalTokens > 0 ||
+      context.lastTurnUsage.inputTokens > 0 ||
+      context.lastTurnUsage.outputTokens > 0);
   const contextTokens =
+    (hasMeasuredLastTurn
+      ? context.lastTurnUsage!.inputTokens + context.lastTurnUsage!.cacheRead + context.lastTurnUsage!.cacheWrite
+      : undefined) ??
     context.contextTokens ??
     (context.sessionUsage
       ? context.sessionUsage.inputTokens + context.sessionUsage.cacheRead + context.sessionUsage.cacheWrite

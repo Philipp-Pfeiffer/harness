@@ -1189,7 +1189,18 @@ export function estimateContextTokens(messages: Message[]): number {
 export async function loadSession(
   sessionId: string,
   paths: HarnessPaths
-): Promise<{ session: Session; turns: SessionTurn[]; tokenEstimate: number } | null> {
+): Promise<{
+  session: Session;
+  turns: SessionTurn[];
+  tokenEstimate: number;
+  /**
+   * Real provider usage of the last turn that reported measured tokens
+   * (from the persisted transcript). Used by /status for context fill;
+   * undefined when no turn has measured usage (e.g. all-zero provider
+   * responses).
+   */
+  lastTurnUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
+} | null> {
   const loaded = await readSession(sessionId, paths);
   if (!loaded) return null;
 
@@ -1214,10 +1225,32 @@ export async function loadSession(
   };
 
   const messages = turnsToMessages(loaded.turns);
+  // Scan from the end: the most recent turn with measured usage wins.
+  // Zero-total turns (providers without usage reporting) are skipped so
+  // the fallback estimate stays intact.
+  let lastTurnUsage: SessionTokenTotals | undefined;
+  for (let i = loaded.turns.length - 1; i >= 0; i--) {
+    const tokens = loaded.turns[i]!.tokens;
+    if (
+      tokens &&
+      (tokens.total > 0 || tokens.input > 0 || tokens.output > 0)
+    ) {
+      lastTurnUsage = {
+        inputTokens: tokens.input,
+        outputTokens: tokens.output,
+        totalTokens: tokens.total,
+        cacheRead: tokens.cacheRead,
+        cacheWrite: tokens.cacheWrite,
+      };
+      break;
+    }
+  }
+
   return {
     session,
     turns: loaded.turns,
     tokenEstimate: estimateContextTokens(messages),
+    ...(lastTurnUsage ? { lastTurnUsage } : {}),
   };
 }
 
