@@ -11,7 +11,8 @@ describe("buildSystemPrompt", () => {
     expect(result).toContain("Base prompt text");
     expect(result).toContain("<core_memory>");
     expect(result).toContain("Some core memory");
-    expect(result).not.toContain("UNTRUSTED DATA");
+    // Safety layer must NOT be present
+    expect(result).not.toContain('<web_content url="..." untrusted="true">');
   });
 
   it("injects web-content-safety layer when web_fetch is active", () => {
@@ -20,8 +21,7 @@ describe("buildSystemPrompt", () => {
       activeToolNames: ["readFile", "web_fetch"],
     });
     expect(result).toContain("Base prompt text");
-    expect(result).toContain("UNTRUSTED DATA");
-    expect(result).toContain("<web_content url=\"...\" untrusted=\"true\">");
+    expect(result).toContain('<web_content url="..." untrusted="true">');
   });
 
   it("injects web-content-safety layer when web_search is active", () => {
@@ -29,7 +29,7 @@ describe("buildSystemPrompt", () => {
       basePrompt: "Base prompt text",
       activeToolNames: ["web_search"],
     });
-    expect(result).toContain("UNTRUSTED DATA");
+    expect(result).toContain('<web_content url="..." untrusted="true">');
   });
 
   it("does not duplicate safety layer if both web tools are active", () => {
@@ -37,7 +37,7 @@ describe("buildSystemPrompt", () => {
       basePrompt: "Base prompt text",
       activeToolNames: ["web_fetch", "web_search"],
     });
-    const matches = result.match(/UNTRUSTED DATA/g);
+    const matches = result.match(/<web_content url="\.\.\." untrusted="true">/g);
     expect(matches?.length).toBe(1);
   });
 });
