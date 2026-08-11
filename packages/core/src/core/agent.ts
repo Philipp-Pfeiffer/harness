@@ -177,7 +177,7 @@ export interface TokenUsage {
 
 export type RunResult =
   | { aborted: false; turns: number; finalMessage: string; usage: TokenUsage; toolCallCount: number; error?: { type: "provider_aborted" | "max_turns_exhausted"; message: string } }
-  | { aborted: true; completedTurns: number; reason: "signal" | "internal_restart"; usage: TokenUsage; toolCallCount: number };
+  | { aborted: true; completedTurns: number; reason: "signal" | "internal_restart" | "user"; usage: TokenUsage; toolCallCount: number };
 
 /**
  * Events emitted during a streaming run.
@@ -298,6 +298,15 @@ function findLastAssistantMessageIndex(messages: Message[]): number {
     }
   }
   return -1;
+}
+
+/**
+ * Maps the abort signal to its user-facing reason. A signal aborted with
+ * the reason "user" (stop-word abort from a channel) is distinguishable
+ * from generic user/UI aborts (reason "signal").
+ */
+function abortReason(signal: AbortSignal | undefined): "signal" | "user" {
+  return signal?.reason === "user" ? "user" : "signal";
 }
 
 function stripDanglingToolCalls(
@@ -524,7 +533,7 @@ export function createAgent(config: AgentConfig): Agent {
         if (signal?.aborted) {
           discardMailbox(mailbox);
           pushAbortAnnotation(context.messages, options.abortCommand);
-          return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+          return { aborted: true, completedTurns: i, reason: abortReason(signal), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
         }
 
         // Last turn: inject a hard warning that this is the final iteration.
@@ -660,7 +669,7 @@ export function createAgent(config: AgentConfig): Agent {
               }
               discardMailbox(mailbox);
               pushAbortAnnotation(context.messages, options.abortCommand);
-              return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+              return { aborted: true, completedTurns: i, reason: abortReason(signal), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
             }
 
             // Classify the error
@@ -715,7 +724,7 @@ export function createAgent(config: AgentConfig): Agent {
               // User aborted during backoff wait — immediate abort, no further retry
               discardMailbox(mailbox);
               pushAbortAnnotation(context.messages, options.abortCommand);
-              return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+              return { aborted: true, completedTurns: i, reason: abortReason(signal), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
             }
 
             // Partial output is already discarded — partialText and thinkingTransformer
@@ -794,7 +803,7 @@ export function createAgent(config: AgentConfig): Agent {
               cacheRead: response.usage.cacheRead,
               cacheWrite: response.usage.cacheWrite,
             });
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+            return { aborted: true, completedTurns: i, reason: abortReason(signal), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           // Build buckets: independent calls get their own bucket;
@@ -956,7 +965,7 @@ export function createAgent(config: AgentConfig): Agent {
               cacheRead: response.usage.cacheRead,
               cacheWrite: response.usage.cacheWrite,
             });
-            return { aborted: true, completedTurns: i, reason: "signal", usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
+            return { aborted: true, completedTurns: i, reason: abortReason(signal), usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
           }
 
           metricsRecorder?.recordTurn({

@@ -1674,8 +1674,8 @@ export class DaemonRuntime {
       model: this.model,
       modelSupportsVision: this.configDefaultModel?.supportsVision,
       callbacks: {
-        submitTurn: async (sessionId, text, imageBlocks) => {
-          return this.submitWhatsAppTurn(sessionId, text, imageBlocks);
+        submitTurn: async (sessionId, text, imageBlocks, signal) => {
+          return this.submitWhatsAppTurn(sessionId, text, imageBlocks, signal);
         },
         compactSession: async (sessionId) => {
           await this.compactWhatsAppSession(sessionId);
@@ -1688,9 +1688,6 @@ export class DaemonRuntime {
         },
         steer: (sessionId, text) => {
           this.steerWhatsAppSession(sessionId, text);
-        },
-        checkToolExecuted: (sessionId) => {
-          return this.checkWhatsAppToolExecuted(sessionId);
         },
         executeCommand: async (sessionId, text) => {
           const result = await this.handleChannelSlashCommand(sessionId, text);
@@ -1755,12 +1752,15 @@ export class DaemonRuntime {
 
   /**
    * Submits a turn from the WhatsApp plugin, image blocks included.
-   * Returns the agent's final response for routing back to the channel.
+   * The optional signal is wired to agent.run so a stop-word message can
+   * abort the running turn. Returns the agent's final response for routing
+   * back to the channel.
    */
   private async submitWhatsAppTurn(
     sessionId: string,
     text: string,
     imageBlocks?: import("./types.js").InboundImageBlock[],
+    signal?: AbortSignal,
   ): Promise<{ finalResponse: string }> {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
@@ -1831,6 +1831,7 @@ export class DaemonRuntime {
     };
     try {
       const result = await turnCtx.agent.run(entry.messages, {
+        signal,
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(turnCtx.memoryZones),
         cwd: turnCtx.cwd ?? undefined,
@@ -1864,7 +1865,12 @@ export class DaemonRuntime {
       entry.lastActiveAt = new Date().toISOString();
 
       const finalMessage = result.aborted ?
-        `[Turn aborted: ${result.reason}]` : result.finalMessage;
+        // The stop-word abort ("user") is already confirmed by the inbound
+        // processor ("Turn abgebrochen."); the generic signal abort gets a
+        // distinguishable transcript entry.
+        (result.reason === "user"
+          ? "[Turn abgebrochen]"
+          : `[Turn aborted: ${result.reason}]`) : result.finalMessage;
       const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
       const turnSlice = entry.messages.slice(turnStartIndex);
       const { tool_calls, tool_results } = extractToolData(turnSlice);
@@ -1892,7 +1898,10 @@ export class DaemonRuntime {
       };
       entry.session = await recordTurn(entry.session, turn, this.paths);
 
-      return { finalResponse: finalMessage };
+      // The stop-word abort ("user") is already confirmed to the user by the
+      // inbound processor ("Turn abgebrochen.") — returning an empty response
+      // prevents a second, duplicate confirmation.
+      return { finalResponse: result.aborted && result.reason === "user" ? "" : finalMessage };
     } finally {
       this.turnActive = false;
       // If a restart was requested during this turn, trigger it now that
@@ -2193,23 +2202,6 @@ export class DaemonRuntime {
       await this.injectSystemEvent(event);
     }
   }
-
-  /**
-   * Checks whether a tool has executed in the current WhatsApp turn.
-   * Delegates to the session's metrics recorder's last turn data.
-   */
-  private checkWhatsAppToolExecuted(sessionId: string): boolean {
-    // The agent loop tracks tool calls internally. Since we can't directly
-    // inspect the agent's internal state from here, we use a pragmatic
-    // heuristic: once agent.run() is awaiting, we assume tools may have
-    // started. The actual check is whether we're past the first LLM call.
-    // For v1, we track this via a per-session flag.
-    const flag = this.whatsappToolExecuted.get(sessionId);
-    return flag ?? false;
-  }
-
-  /** Per-session tool-executed flag for WhatsApp turns. */
-  private readonly whatsappToolExecuted = new Map<string, boolean>();
 
   /**
    * Channel file sender callback for the `send_file` tool.

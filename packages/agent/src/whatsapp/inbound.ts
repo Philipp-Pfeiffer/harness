@@ -3,9 +3,11 @@
  *
  * Handles:
  * - Debounce: Accumulate messages within INBOUND_DEBOUNCE_MS into one turn.
- * - Abort-and-Restart: If new message arrives < ABORT_RESTART_WINDOW_MS after
- *   turn start and no tool has executed, abort and restart with expanded context.
- *   Max MAX_RESTARTS_PER_TURN, then steer-only via mailbox.
+ * - Steer: A user message arriving while a turn is running is ALWAYS queued
+ *   into the mailbox (steer). No abort-and-restart: restarting the turn after
+ *   a fast model already sent its first response produced duplicate answers.
+ * - Stop-Word: An exact "stop"/"stopp" (case-insensitive) message while a
+ *   turn is running aborts the turn hard via the user abort signal.
  * - 8h-Inactivity: rotate to a fresh session and notify before the turn when
  *   the user returns after SESSION_INACTIVITY_THRESHOLD_MS.
  * - Test Mode: Echo instead of agent turns, structured logging of all events.
@@ -14,11 +16,12 @@
 import type { ChannelInboundEvent, InboundImageBlock } from "../daemon/types.js";
 import {
   INBOUND_DEBOUNCE_MS,
-  ABORT_RESTART_WINDOW_MS,
-  MAX_RESTARTS_PER_TURN,
   SESSION_INACTIVITY_THRESHOLD_MS,
   PRESENCE_COMPOSING_REFRESH_MS,
 } from "./limits.js";
+
+/** Stop words that hard-abort a running turn (whole message, case-insensitive). */
+const STOP_WORDS = new Set(["stop", "stopp"]);
 
 type LogFn = (msg: string, level?: "info" | "warn" | "error") => void;
 
@@ -26,14 +29,8 @@ type LogFn = (msg: string, level?: "info" | "warn" | "error") => void;
 interface SourceState {
   /** Last activity timestamp (ms epoch). */
   lastActivityMs: number;
-  /** Current turn's abort controller (for internal restart). */
+  /** Abort controller of the running turn (for user stop-word abort). */
   currentAbort: AbortController | null;
-  /** Current turn's start timestamp (ms epoch). */
-  turnStartMs: number;
-  /** Whether a tool has executed in the current turn. */
-  hasToolExecuted: boolean;
-  /** Restart count for the current turn. */
-  restartCount: number;
   /** Debounce timer. */
   debounceTimer: ReturnType<typeof setTimeout> | null;
   /** Accumulated messages during debounce window. */
@@ -42,20 +39,15 @@ interface SourceState {
   turnRunning: boolean;
   /** Resolved session ID for this source. */
   sessionId: string;
-  /** Text of the currently running turn (for restart context combination). */
-  currentTurnText: string;
-  /** Image blocks of the currently running turn (for restart). */
-  currentTurnImageBlocks: InboundImageBlock[];
-  /** Annotations of the currently running turn (for restart). */
-  currentTurnAnnotations: string[];
   /** Composing-indicator refresh timer for the currently running turn. */
   presenceTimer: ReturnType<typeof setInterval> | null;
 }
 
 /** Callbacks provided by the daemon. */
 export interface InboundProcessorCallbacks {
-  /** Submit a turn to the agent loop. Returns the final response text. */
-  submitTurn: (sessionId: string, text: string, imageBlocks?: InboundImageBlock[]) => Promise<{ finalResponse: string; internalAbortSignal?: AbortSignal }>;
+  /** Submit a turn to the agent loop. The signal is wired to agent.run so a
+   *  stop-word message can abort the running turn. Returns the final response. */
+  submitTurn: (sessionId: string, text: string, imageBlocks?: InboundImageBlock[], signal?: AbortSignal) => Promise<{ finalResponse: string }>;
   /** Trigger session compaction before the turn. */
   compactSession: (sessionId: string) => Promise<void>;
   /** End inactive session and start a fresh one after the 8h boundary. */
@@ -66,8 +58,6 @@ export interface InboundProcessorCallbacks {
   sendOutbound: (target: string, text: string) => Promise<void>;
   /** Steer a running turn by pushing to the mailbox. */
   steer: (sessionId: string, text: string) => void;
-  /** Check whether a tool has executed in the current turn. */
-  checkToolExecuted: (sessionId: string) => boolean;
   /** Execute a slash command and return {response, newSessionId?}. */
   executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
   /** Sends a WhatsApp presence update: "composing"/"paused" for a chat. */
@@ -82,8 +72,8 @@ export interface WhatsAppInboundProcessorOptions {
 }
 
 /**
- * Processes inbound WhatsApp messages with debounce, abort-and-restart,
- * 8h-compaction, and test-mode support.
+ * Processes inbound WhatsApp messages with debounce, steer-while-running,
+ * stop-word abort, 8h-compaction, and test-mode support.
  */
 export class WhatsAppInboundProcessor {
   private readonly log: LogFn;
@@ -116,6 +106,11 @@ export class WhatsAppInboundProcessor {
 
     // Normal mode: debounce + process
     await this.handleNormalMode(event);
+  }
+
+  /** Returns whether the event's whole text (case-insensitive) is a stop word. */
+  private isStopWord(text: string): boolean {
+    return STOP_WORDS.has(text.trim().toLowerCase());
   }
 
   // ─── Slash Commands ───
@@ -196,16 +191,10 @@ export class WhatsAppInboundProcessor {
       state = {
         lastActivityMs: Date.now(),
         currentAbort: null,
-        turnStartMs: 0,
-        hasToolExecuted: false,
-        restartCount: 0,
         debounceTimer: null,
         pendingEvents: [],
         turnRunning: false,
         sessionId: resolved.sessionId,
-        currentTurnText: "",
-        currentTurnImageBlocks: [],
-        currentTurnAnnotations: [],
         presenceTimer: null,
       };
       this.sourceStates.set(event.source, state);
@@ -232,7 +221,7 @@ export class WhatsAppInboundProcessor {
     // After a session rotation (8h inactivity): skip debounce and submit the
     // current message immediately as the first turn of the fresh session.
     // Guarded by !turnRunning so a message arriving mid-turn keeps using the
-    // existing abort-and-restart / steer path.
+    // steer / stop path.
     if (rotated && !state.turnRunning) {
       state.pendingEvents.push(event);
       // Fire-and-forget like the debounce path — a turn must not block the
@@ -243,80 +232,29 @@ export class WhatsAppInboundProcessor {
       return;
     }
 
-    // If a turn is running, check abort-and-restart conditions
+    // If a turn is running: hard-abort on stop word, otherwise steer.
+    // A user message during a running turn NEVER restarts the turn — it is
+    // always queued into the mailbox so the agent processes it in-context.
     if (state.turnRunning) {
-      const timeSinceTurnStart = Date.now() - state.turnStartMs;
-      const toolExecuted = this.callbacks.checkToolExecuted(state.sessionId);
-
-      if (!toolExecuted && timeSinceTurnStart < ABORT_RESTART_WINDOW_MS && state.restartCount < MAX_RESTARTS_PER_TURN) {
-        // Abort-and-restart
-        state.restartCount++;
-        this.log(
-          `Abort-and-restart for ${event.source} (restart ${state.restartCount}/${MAX_RESTARTS_PER_TURN})`,
-          "info",
-        );
-
-        // Abort the current turn via internal abort signal
-        if (state.currentAbort) {
-          state.currentAbort.abort();
-          state.currentAbort = null;
-        }
-
-        // Combine the running turn's text with the new message
-        state.pendingEvents.push(event);
-        const allTexts = [state.currentTurnText, ...state.pendingEvents.map((e) => e.text)];
-        const combinedText = allTexts.filter(Boolean).join("\n");
-        const combinedImageBlocks = [
-          ...state.currentTurnImageBlocks,
-          ...state.pendingEvents.flatMap((e) => e.imageBlocks ?? []),
-        ];
-        const combinedAnnotations = [
-          ...state.currentTurnAnnotations,
-          ...state.pendingEvents.flatMap((e) => e.annotations ?? []),
-        ];
-
-        const fullText = combinedAnnotations.length > 0
-          ? `${combinedText}\n\n${combinedAnnotations.join("\n")}`
-          : combinedText;
-
-        // Restart the turn
-        state.turnStartMs = Date.now();
-        state.hasToolExecuted = false;
-        state.currentTurnText = fullText;
-        state.currentTurnImageBlocks = combinedImageBlocks;
-        state.currentTurnAnnotations = combinedAnnotations;
-        state.pendingEvents = [];
-        const abortController = new AbortController();
-        state.currentAbort = abortController;
-
-        // Turn keeps running (abort-and-restart) — composing indicator stays active.
-        this.callbacks.submitTurn(state.sessionId, fullText, combinedImageBlocks)
-          .then((result) => {
-            this.handleTurnComplete(event.source, state!, result.finalResponse);
-          })
-          .catch(async (err) => {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            this.log(`Turn failed: ${errMsg}`, "error");
-            try {
-              await this.callbacks.sendOutbound(event.source, `[Fehler] Agent-Turn fehlgeschlagen: ${errMsg}`);
-            } catch {
-              // Can't even send error
-            }
-            this.handleTurnComplete(event.source, state!, null);
-          });
-        return;
+      if (this.isStopWord(event.text)) {
+        this.log(`Stop-word received for ${event.source} — aborting running turn`, "info");
+        // Abort with the distinguishable "user" reason — the agent loop
+        // surfaces it as `reason: "user"` (not the generic "signal").
+        state.currentAbort?.abort("user");
+        state.currentAbort = null;
+        // Confirm the abort immediately; the agent loop stops on its next
+        // abort checkpoint (running tool calls finish first).
+        this.callbacks.sendOutbound(event.source, "Turn abgebrochen.").catch((err) => {
+          this.log(`Abort confirmation send failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        });
       } else {
-        // After first tool call or max restarts: steer via mailbox
-        this.log(
-          `Steering turn for ${event.source} (toolExecuted=${toolExecuted}, restarts=${state.restartCount})`,
-          "info",
-        );
+        this.log(`Steering turn for ${event.source}`, "info");
         const steerText = event.annotations?.length
           ? `${event.text}\n${event.annotations.join("\n")}`
           : event.text;
         this.callbacks.steer(state.sessionId, steerText);
-        return;
       }
+      return;
     }
 
     // No turn running: debounce the message
@@ -362,12 +300,6 @@ export class WhatsAppInboundProcessor {
 
     // Start the turn
     state.turnRunning = true;
-    state.turnStartMs = Date.now();
-    state.hasToolExecuted = false;
-    state.restartCount = 0;
-    state.currentTurnText = prefixedText;
-    state.currentTurnImageBlocks = combinedImageBlocks;
-    state.currentTurnAnnotations = combinedAnnotations;
     const abortController = new AbortController();
     state.currentAbort = abortController;
 
@@ -378,6 +310,7 @@ export class WhatsAppInboundProcessor {
         state.sessionId,
         prefixedText,
         combinedImageBlocks,
+        abortController.signal,
       );
       this.handleTurnComplete(source, state, result.finalResponse);
     } catch (err) {
@@ -400,12 +333,7 @@ export class WhatsAppInboundProcessor {
   ): void {
     state.turnRunning = false;
     state.currentAbort = null;
-    state.hasToolExecuted = false;
-    state.restartCount = 0;
     state.lastActivityMs = Date.now();
-    state.currentTurnText = "";
-    state.currentTurnImageBlocks = [];
-    state.currentTurnAnnotations = [];
     this.stopComposingPresence(source, state);
 
     // Send the response back via the channel

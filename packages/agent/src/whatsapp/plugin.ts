@@ -51,13 +51,12 @@ export interface WhatsAppPluginOptions {
   /** Whether the model supports vision (from config, overrides name heuristics). */
   modelSupportsVision?: boolean;
   callbacks: {
-    submitTurn: (sessionId: string, text: string, imageBlocks?: import("../daemon/types.js").InboundImageBlock[]) => Promise<{ finalResponse: string }>;
+    submitTurn: (sessionId: string, text: string, imageBlocks?: import("../daemon/types.js").InboundImageBlock[], signal?: AbortSignal) => Promise<{ finalResponse: string }>;
     compactSession: (sessionId: string) => Promise<void>;
     rotateSessionForInactivity: (source: string, sessionId: string) => Promise<string>;
     /** Resolve or create a session for a source. Returns whether the session was rotated (>8h). */
     resolveSession: (source: string) => Promise<{ sessionId: string; rotated: boolean }>;
     steer: (sessionId: string, text: string) => void;
-    checkToolExecuted: (sessionId: string) => boolean;
     executeCommand: (sessionId: string, text: string) => Promise<{ response: string; newSessionId?: string }>;
     /**
      * Sends a WhatsApp presence update: "available"/"unavailable" for the
@@ -126,7 +125,6 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
             }
           },
           steer: opts.callbacks.steer,
-          checkToolExecuted: opts.callbacks.checkToolExecuted,
           executeCommand: opts.callbacks.executeCommand,
         },
       });

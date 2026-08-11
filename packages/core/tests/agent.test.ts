@@ -359,6 +359,40 @@ describe("Agent", () => {
       expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "signal", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
       expect(stream).toHaveBeenCalledTimes(1);
     });
+
+    it("stop-word abort (signal reason 'user') → current tool finishes, then aborts with reason 'user', no further LLM call", async () => {
+      const mockToolCall = makeAssistantMessage(
+        [{ type: "toolCall", id: "tc_1", name: "slow", arguments: {} }],
+        "toolUse"
+      );
+
+      const controller = new AbortController();
+      let toolRuns = 0;
+
+      const slowTool: Tool = {
+        name: "slow",
+        description: "Slow tool for tests",
+        parameters: Type.Object({}),
+        async execute() {
+          toolRuns++;
+          // The stop-word handler aborts the signal while the tool runs —
+          // with the distinguishable "user" reason.
+          controller.abort("user");
+          return ok("done");
+        },
+      };
+
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockToolCall));
+
+      const agent = createAgent({ tools: [slowTool], model });
+      const result = await agent.run([makeUserMessage("Call slow")], { signal: controller.signal });
+
+      // The running tool finished; iteration ended immediately afterwards.
+      expect(toolRuns).toBe(1);
+      expect(result).toEqual({ aborted: true, completedTurns: 0, reason: "user", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
+      // No second LLM call after the abort signal.
+      expect(stream).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("Streaming", () => {

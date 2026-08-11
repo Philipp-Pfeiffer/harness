@@ -82,7 +82,7 @@ type RuntimeInternals = {
   whatsappSessionToSource: Map<string, string>;
   whatsappSessions: Map<string, string>;
   channelPlugins: Map<string, { sendMessage: (jid: string, payload: { text?: string }) => Promise<void> }>;
-  submitWhatsAppTurn: (sessionId: string, text: string, imageBlocks?: unknown[]) => Promise<{ finalResponse: string }>;
+  submitWhatsAppTurn: (sessionId: string, text: string, imageBlocks?: unknown[], signal?: AbortSignal) => Promise<{ finalResponse: string }>;
 };
 
 /**

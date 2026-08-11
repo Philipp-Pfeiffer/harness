@@ -139,7 +139,7 @@ export interface ChannelPluginContext {
 /**
  * Structured inbound event from a channel plugin.
  * The daemon's routing layer processes this to determine session routing,
- * debounce, abort-and-restart, and agent turn submission.
+ * debounce, steering, and agent turn submission.
  */
 export interface ChannelInboundEvent {
   /** Channel plugin id (e.g. "whatsapp"). */

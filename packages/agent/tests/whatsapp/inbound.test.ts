@@ -3,23 +3,24 @@
  *
  * Verifies:
  * - Debounce: messages within 1s window are combined into one turn
- * - Abort-and-Restart: new message <5s after turn start, before first tool call
- *   → restart with combined context (max 2 restarts, then steer)
- * - After first tool call: only steer, no restart
+ * - Steer-always: a message during a running turn is ALWAYS steered via the
+ *   mailbox (no abort-and-restart) with the full text intact
+ * - Stop-Word: exact "stop"/"stopp" (case-insensitive) during a running turn
+ *   aborts the turn via the user abort signal and confirms via outbound;
+ *   at idle it is a normal message
+ * - Double-message scenario (incident): two fast messages → one consistent
+ *   response, no duplicates
  * - 8h inactivity: compaction triggered before turn; after rotation the
  *   current message is submitted immediately (no debounce) as first turn
  * - First turn after resolution-rotation (daemon restart): immediate turn
  * - Test-Mode: echo instead of agent turns, structured log events
- * - Partial output of aborted turn is discarded
- * - pushAbortAnnotation does NOT fire (internal abort ≠ user abort)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { WhatsAppInboundProcessor } from "../../src/whatsapp/inbound.js";
-import type { ChannelInboundEvent } from "../../src/daemon/types.js";
+import type { ChannelInboundEvent, InboundImageBlock } from "../../src/daemon/types.js";
 import {
   INBOUND_DEBOUNCE_MS,
-  ABORT_RESTART_WINDOW_MS,
   SESSION_INACTIVITY_THRESHOLD_MS,
   PRESENCE_COMPOSING_REFRESH_MS,
 } from "../../src/whatsapp/limits.js";
@@ -35,13 +36,14 @@ function createEvent(source: string, text: string, extra?: Partial<ChannelInboun
 }
 
 function createMockCallbacks() {
-  let toolExecuted = false;
   let resolveTurn: ((result: { finalResponse: string }) => void) | null = null;
   let resolveResult = { sessionId: "", rotated: false };
+  let lastSignal: AbortSignal | undefined;
 
   return {
     callbacks: {
-      submitTurn: vi.fn(async (_sessionId: string, _text: string) => {
+      submitTurn: vi.fn(async (_sessionId: string, _text: string, _imageBlocks?: InboundImageBlock[], signal?: AbortSignal) => {
+        lastSignal = signal;
         return new Promise<{ finalResponse: string }>((resolve) => {
           resolveTurn = resolve;
         });
@@ -54,7 +56,6 @@ function createMockCallbacks() {
       }),
       sendOutbound: vi.fn(async (_target: string, _text: string) => {}),
       steer: vi.fn(),
-      checkToolExecuted: vi.fn(() => toolExecuted),
       executeCommand: vi.fn(async (_sessionId: string, _text: string) => {
         return { response: `OK: ${_text}` };
       }),
@@ -67,11 +68,9 @@ function createMockCallbacks() {
       resolveTurn?.({ finalResponse: response });
       resolveTurn = null;
     },
-    setToolExecuted: (val: boolean) => {
-      toolExecuted = val;
-    },
+    getSignal: () => lastSignal,
     reset: () => {
-      toolExecuted = false;
+      lastSignal = undefined;
     },
   };
 }
@@ -133,38 +132,10 @@ describe("WhatsApp Inbound Processor", () => {
     });
   });
 
-  // ─── Abort-and-Restart ───
+  // ─── Steer-always during running turn ───
 
-  describe("Abort-and-Restart", () => {
-    it("restarts turn when new message <5s after turn start, no tool executed", async () => {
-      const processor = new WhatsAppInboundProcessor({
-        log: () => {},
-        testMode: false,
-        callbacks: mock.callbacks,
-      });
-
-      // First message → starts debounce
-      await processor.processInbound(createEvent("491701234567", "First message"));
-      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
-
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
-
-      // Tool NOT executed yet
-      // Second message within abort window → should trigger restart
-      await vi.advanceTimersByTimeAsync(500); // <5s after turn start
-
-      await processor.processInbound(createEvent("491701234567", "Second message"));
-
-      // Should have called submitTurn again (restart)
-      await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
-
-      // Second turn should contain combined text
-      expect(mock.callbacks.submitTurn.mock.calls[1]![1]).toContain("First message");
-      expect(mock.callbacks.submitTurn.mock.calls[1]![1]).toContain("Second message");
-    });
-
-    it("steers via mailbox after first tool call (no restart)", async () => {
+  describe("Steer during running turn", () => {
+    it("steers a message during a running turn (no restart), text fully intact", async () => {
       const processor = new WhatsAppInboundProcessor({
         log: () => {},
         testMode: false,
@@ -178,58 +149,29 @@ describe("WhatsApp Inbound Processor", () => {
 
       expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
 
-      // Simulate tool execution happening
-      mock.setToolExecuted(true);
-
-      // Second message within abort window
-      await vi.advanceTimersByTimeAsync(500);
+      // Message during the running turn (even <5s, no tool executed) → steer
       await processor.processInbound(createEvent("491701234567", "Second message"));
 
-      // Should NOT restart — should steer instead
+      // NO second submitTurn (no abort-and-restart)
       expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      // Steer with the full, unmodified text
       expect(mock.callbacks.steer).toHaveBeenCalledWith(
         "session-491701234567",
         "Second message",
       );
-    });
 
-    it("max 2 restarts, then steer only", async () => {
-      const processor = new WhatsAppInboundProcessor({
-        log: () => {},
-        testMode: false,
-        callbacks: mock.callbacks,
-      });
-
-      // First message → debounce → turn starts
-      await processor.processInbound(createEvent("491701234567", "msg1"));
-      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
-      await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
-
-      // Restart 1
-      await vi.advanceTimersByTimeAsync(500);
-      await processor.processInbound(createEvent("491701234567", "msg2"));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
-
-      // Restart 2
-      await vi.advanceTimersByTimeAsync(500);
-      await processor.processInbound(createEvent("491701234567", "msg3"));
-      await vi.advanceTimersByTimeAsync(10);
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(3);
-
-      // Third restart attempt → should steer, not restart
-      await vi.advanceTimersByTimeAsync(500);
-      await processor.processInbound(createEvent("491701234567", "msg4"));
-
-      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(3);
-      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+      // Steer text must arrive in the running turn — the mailbox drains the
+      // steer into the context. With annotations, they are appended.
+      await processor.processInbound(createEvent("491701234567", "Third message", {
+        annotations: ["Voice-Nachricht empfangen."],
+      }));
+      expect(mock.callbacks.steer).toHaveBeenLastCalledWith(
         "session-491701234567",
-        "msg4",
+        "Third message\nVoice-Nachricht empfangen.",
       );
     });
 
-    it("does not restart if >5s after turn start", async () => {
+    it("does not steer once the turn completed", async () => {
       const processor = new WhatsAppInboundProcessor({
         log: () => {},
         testMode: false,
@@ -241,14 +183,162 @@ describe("WhatsApp Inbound Processor", () => {
       await vi.advanceTimersByTimeAsync(10);
       expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
 
-      // Travel past the abort window (>5s)
-      await vi.advanceTimersByTimeAsync(ABORT_RESTART_WINDOW_MS + 100);
-
+      // Turn completes → next message starts a debounce (not a steer)
+      mock.completeTurn("Response");
+      await vi.advanceTimersByTimeAsync(10);
       await processor.processInbound(createEvent("491701234567", "Second"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
 
-      // Should steer, not restart
+      expect(mock.callbacks.steer).not.toHaveBeenCalled();
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
+    });
+
+    it("passes a signal to submitTurn so stop-word can abort the running turn", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "First"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      const signal = mock.getSignal();
+      expect(signal).toBeDefined();
+      expect(signal!.aborted).toBe(false);
+
+      // Stop word → signal aborted with the distinguishable "user" reason
+      await processor.processInbound(createEvent("491701234567", "stop"));
+      expect(signal!.aborted).toBe(true);
+      expect(signal!.reason).toBe("user");
+    });
+  });
+
+  // ─── Stop-Word ───
+
+  describe("Stop-Word Abort", () => {
+    it("aborts a running turn on exact 'stop' and confirms via outbound", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "First"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
       expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
-      expect(mock.callbacks.steer).toHaveBeenCalled();
+
+      const signal = mock.getSignal();
+      expect(signal!.aborted).toBe(false);
+
+      await processor.processInbound(createEvent("491701234567", "stop"));
+
+      // Hard abort via the user abort signal
+      expect(signal!.aborted).toBe(true);
+      // NOT steered as a message
+      expect(mock.callbacks.steer).not.toHaveBeenCalled();
+      // Confirmation sent immediately
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        "Turn abgebrochen.",
+      );
+    });
+
+    it("treats 'STOP' and 'Stopp' as stop words (case-insensitive)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "First"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      const signal = mock.getSignal();
+      await processor.processInbound(createEvent("491701234567", "STOP"));
+      expect(signal!.aborted).toBe(true);
+    });
+
+    it("does not abort on stop-word with additional text", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "First"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      const signal = mock.getSignal();
+      await processor.processInbound(createEvent("491701234567", "stop the music"));
+
+      expect(signal!.aborted).toBe(false);
+      // Steered as normal message
+      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+        "session-491701234567",
+        "stop the music",
+      );
+    });
+
+    it("treats 'stop' as a normal message at idle (no running turn)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "stop"));
+
+      // Debounced like any other message — no abort, no outbound confirmation
+      expect(mock.callbacks.sendOutbound).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn.mock.calls[0]![1]).toContain("stop");
+      expect(mock.callbacks.steer).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── Double-message incident scenario ───
+
+  describe("Double-message scenario (incident)", () => {
+    it("two fast messages produce one consistent turn, no duplicates", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Two messages within the debounce window (fast typing)
+      await processor.processInbound(createEvent("491701234567", "Schau mal das an"));
+      await vi.advanceTimersByTimeAsync(200);
+      await processor.processInbound(createEvent("491701234567", "und sag mir was du siehst"));
+
+      // Exactly ONE turn — combined text, no duplicate/restart
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      const submittedText = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
+      expect(submittedText).toContain("Schau mal das an");
+      expect(submittedText).toContain("und sag mir was du siehst");
+      // Each message appears exactly once
+      expect(submittedText.split("Schau mal das an").length - 1).toBe(1);
+
+      // A third message right after the turn started (fast model) → steer,
+      // NOT a second turn
+      await processor.processInbound(createEvent("491701234567", "Ach und noch eins"));
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+        "session-491701234567",
+        "Ach und noch eins",
+      );
     });
   });
 
@@ -270,6 +360,7 @@ describe("WhatsApp Inbound Processor", () => {
         "session-491701234567",
         expect.stringContaining("Hello"),
         [],
+        expect.any(AbortSignal),
       );
 
       // Complete the turn
@@ -293,6 +384,7 @@ describe("WhatsApp Inbound Processor", () => {
         "session-rotated-491701234567",
         "[WhatsApp · 491701234567] New message after long break",
         [],
+        expect.any(AbortSignal),
       );
 
       // No debounce timer should have been armed for the rotated message
@@ -347,6 +439,7 @@ describe("WhatsApp Inbound Processor", () => {
         "session-rotated-491701234567",
         "[WhatsApp · 491701234567] My task",
         [],
+        expect.any(AbortSignal),
       );
 
       // No debounce arm afterwards → exactly one turn even after the window
