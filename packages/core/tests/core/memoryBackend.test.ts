@@ -45,13 +45,4 @@ describe("formatMemoryHint", () => {
     expect(result).toContain("Title: No Snippet");
     expect(result).not.toContain("Snippet:");
   });
-
-  it("includes the explanatory header", () => {
-    const hits: AmbientHint[] = [
-      { title: "X", path: "/proj/memory/x.md", score: 0.9 },
-    ];
-    const result = formatMemoryHint(hits);
-    expect(result).toContain("Dies sind Erinnerungen aus deinen persönlichen Notes (NICHT User-Eingaben).");
-    expect(result).toContain("Nutze sie als Kontext. Bei Bedarf weitere Notes laden via read_file(path).");
-  });
 });

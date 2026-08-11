@@ -1,3 +1,3 @@
 <!-- vars: userInput, timestamp -->
-⚠ Steer während Tool-Call. Behandle als Korrektur/Ergänzung der ursprünglichen Aufgabe:
+⚠ 工具调用期间的转向指令。将此视为对原始任务的修正/补充：
 {{userInput}}

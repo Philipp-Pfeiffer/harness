@@ -1,3 +1,3 @@
 <!-- vars: command, timestamp -->
-[User-Abort: "{{command}}" @ {{timestamp}}. Eventuelle vorhergehende Tool-Results sind synthetisch.]
-Nutzer hat Ausführungen abgebrochen.
+[用户中止："{{command}}" @ {{timestamp}}。任何之前的工具结果都是合成的。]
+用户已取消执行。

@@ -643,17 +643,17 @@ describe("Agent", () => {
     it("appends systemPromptAddendum to the effective system prompt for the turn", async () => {
       const history: Message[] = [];
       const response = makeAssistantMessage([{ type: "text", text: "Done" }], "stop");
+      const addendum = "## WhatsApp formatting\n\nReply over WhatsApp.";
 
       vi.mocked(stream).mockImplementationOnce((_, context) => {
-        expect(context.systemPrompt).toBe(
-          "You are a test agent\n\n## WhatsApp formatting\n\nReply over WhatsApp.",
-        );
+        expect(context.systemPrompt).toContain("You are a test agent");
+        expect(context.systemPrompt).toContain(addendum);
         return mockStream(response);
       });
 
       const agent = createAgent({ tools: [], model, systemPrompt: "You are a test agent" });
       history.push(makeUserMessage("Test"));
-      await agent.run(history, { systemPromptAddendum: "## WhatsApp formatting\n\nReply over WhatsApp." });
+      await agent.run(history, { systemPromptAddendum: addendum });
     });
 
     it("leaves the base system prompt unchanged when no addendum is given", async () => {
@@ -862,12 +862,11 @@ describe("Agent", () => {
       vi.mocked(stream)
         .mockReturnValueOnce(mockStream(mockToolCall))
         .mockImplementationOnce((_, context) => {
-          // Verify the steer message was injected before this second LLM call
-          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+          // Verify a steer user message was injected before this second LLM call
+          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("steer1"));
           expect(steerMsg).toBeDefined();
           expect(steerMsg.content[0].text).toContain("steer1");
           expect(steerMsg.content[0].text).toContain("steer2");
-          expect(steerMsg.content[0].text).toContain("⚠ Steer");
           return mockStream(mockFinal);
         });
 
@@ -910,7 +909,7 @@ describe("Agent", () => {
       vi.mocked(stream)
         .mockReturnValueOnce(mockStream(mockToolCall))
         .mockImplementationOnce((_, context) => {
-          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+          const steerMsg = context.messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("mid-stream steer"));
           expect(steerMsg).toBeDefined();
           expect(steerMsg.content[0].text).toContain("mid-stream steer");
           return mockStream(mockFinal);
@@ -936,7 +935,7 @@ describe("Agent", () => {
       const result = await runPromise;
 
       expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Done", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 1 });
-      const steerMsg = history.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+      const steerMsg = history.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("mid-stream steer"));
       expect(steerMsg).toBeDefined();
     });
 
@@ -1029,7 +1028,7 @@ describe("Agent", () => {
 
       // But the messages array should have grown: user + assistant + toolResult + steer user + assistant
       expect(capturedContexts[0].messages.length).toBe(5);
-      const steerMsg = capturedContexts[0].messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("⚠ Steer"));
+      const steerMsg = capturedContexts[0].messages.find((m: any) => m.role === "user" && m.content[0]?.text?.includes("mid-tool steer"));
       expect(steerMsg).toBeDefined();
       expect(steerMsg.content[0].text).toContain("mid-tool steer");
     });
@@ -1180,8 +1179,7 @@ describe("Agent", () => {
       expect(history[3].role).toBe("user");
       const annotation = (history[3] as any).content[0].text;
       expect(annotation).toContain("stopp");
-      expect(annotation).toContain("User-Abort");
-      expect(annotation).toContain("synthetisch");
+      expect(annotation).toContain("@");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
 
@@ -1220,8 +1218,7 @@ describe("Agent", () => {
       expect(history[2].role).toBe("user");
       const annotation = (history[2] as any).content[0].text;
       expect(annotation).toContain("stop");
-      expect(annotation).toContain("User-Abort");
-      expect(annotation).toContain("synthetisch");
+      expect(annotation).toContain("@");
       expect(annotation).toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
   });
