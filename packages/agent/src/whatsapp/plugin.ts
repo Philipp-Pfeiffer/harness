@@ -32,7 +32,6 @@ import { isWhitelisted, resolveSenderName, extractPhoneNumber } from "./whitelis
 import {
   downloadMedia,
   processMediaForTurn,
-  isVisionCapableModel,
   MediaTooLargeError,
 } from "./media.js";
 import { transcribeVoice, type VoiceErrorReason } from "./voice.js";
@@ -48,8 +47,6 @@ export interface WhatsAppPluginOptions {
   testMode: boolean;
   log: (msg: string, level?: "info" | "warn" | "error") => void;
   model: Model<Api> | null;
-  /** Whether the model supports vision (from config, overrides name heuristics). */
-  modelSupportsVision?: boolean;
   callbacks: {
     submitTurn: (sessionId: string, text: string, imageBlocks?: import("../daemon/types.js").InboundImageBlock[]) => Promise<{ finalResponse: string }>;
     compactSession: (sessionId: string) => Promise<void>;
@@ -338,10 +335,16 @@ export async function parseBaileysMessage(
       const media = await downloadMedia(buffer, message.imageMessage.mimetype ?? "image/jpeg", "image", mediaDir);
       mediaArray.push(media);
 
-      // Vision check
-      if (opts.model && isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "", supportsVision: opts.modelSupportsVision })) {
+      // Always build a candidate image block for vision-capable sessions.
+      // The daemon decides per session (the active model may have been
+      // switched via /model) whether to inline it or fall back to the
+      // image tool — the plugin cannot know the session's model here.
+      if (opts.model) {
         const { createImageBlock } = await import("./media.js");
-        imageBlocks = [await createImageBlock(media.filePath, media.mimeType)];
+        const block = await createImageBlock(media.filePath, media.mimeType);
+        if (block) {
+          imageBlocks = [block];
+        }
       }
     } catch (err) {
       if (err instanceof MediaTooLargeError) {
@@ -454,10 +457,7 @@ export async function parseBaileysMessage(
 
   // Build media annotations for non-sticker media
   if (mediaArray.length > 0) {
-    const visionCapable = opts.model
-      ? isVisionCapableModel({ name: opts.model.name, provider: (opts.model as any).provider ?? "", supportsVision: opts.modelSupportsVision })
-      : false;
-    const { annotations: mediaAnnotations } = await processMediaForTurn(mediaArray, visionCapable);
+    const { annotations: mediaAnnotations } = await processMediaForTurn(mediaArray, false);
     annotations.push(...mediaAnnotations);
   }
 

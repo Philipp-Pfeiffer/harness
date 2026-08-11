@@ -8,12 +8,14 @@
  * callback so tests can mock the Baileys socket.
  */
 
-import { writeFile, stat, access } from "node:fs/promises";
+import { writeFile, stat, access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { InboundMedia, InboundImageBlock } from "../daemon/types.js";
 import {
   MAX_MEDIA_DOWNLOAD_BYTES,
+  MAX_INLINE_IMAGE_BYTES,
+  MAX_INLINE_IMAGE_DIMENSION,
   MEDIA_FILENAME_RANDOM_CHARS,
 } from "./limits.js";
 
@@ -167,14 +169,44 @@ export function isVisionCapableModel(
 
 /**
  * Reads an image file into an InboundImageBlock for vision-capable models.
+ *
+ * Enforces MAX_INLINE_IMAGE_BYTES (size cap) and downsizes images whose
+ * largest side exceeds MAX_INLINE_IMAGE_DIMENSION. Downscaling keeps token
+ * cost bounded for vision models and avoids oversized base64 payloads.
+ * Returns null when the file is not decodable as an image or exceeds the cap.
  */
 export async function createImageBlock(
   filePath: string,
   mimeType: string,
-): Promise<InboundImageBlock> {
-  const { readFile } = await import("node:fs/promises");
+): Promise<InboundImageBlock | null> {
+  let fileStat;
+  try {
+    fileStat = await stat(filePath);
+  } catch {
+    return null;
+  }
+  if (fileStat.size > MAX_INLINE_IMAGE_BYTES) {
+    return null;
+  }
+
   const data = await readFile(filePath);
-  return { mimeType, data };
+  const { default: sharp } = await import("sharp");
+  try {
+    const metadata = await sharp(data).metadata();
+    const longestSide = Math.max(metadata.width ?? 0, metadata.height ?? 0);
+    if (longestSide > MAX_INLINE_IMAGE_DIMENSION) {
+      const resized = await sharp(data)
+        .resize({ width: MAX_INLINE_IMAGE_DIMENSION, height: MAX_INLINE_IMAGE_DIMENSION, fit: "inside", withoutEnlargement: true })
+        .jpeg()
+        .toBuffer();
+      return { mimeType: "image/jpeg", data: resized, filePath };
+    }
+  } catch {
+    // Not decodable as an image — caller falls back to annotation only.
+    return null;
+  }
+
+  return { mimeType, data, filePath };
 }
 
 /**
@@ -194,18 +226,19 @@ export async function processMediaForTurn(
     if (m.type === "image" && visionCapable) {
       try {
         const block = await createImageBlock(m.filePath, m.mimeType);
-        imageBlocks.push(block);
+        if (block) {
+          imageBlocks.push(block);
+        }
       } catch {
         // If reading the image fails, fall back to annotation only
       }
     }
 
-    // Build annotation for all media types
+    // Build annotation for all media types. The image-tool hint vs. inline
+    // hint is decided by the runtime (which knows the session's actual model).
     const sizeStr = formatFileSize(m.size);
     if (m.type === "image") {
-      annotations.push(
-        `Bild angehängt: ${m.filePath} (${sizeStr}). Nutze das image-Tool mit url="${m.filePath}" und optional einem prompt, um das Bild anzusehen.`,
-      );
+      annotations.push(`Bild angehängt: ${m.filePath} (${sizeStr}).`);
     } else {
       annotations.push(
         `Datei angehängt: ${m.filePath} (${m.type}, ${sizeStr}). Schau sie dir bei Bedarf an.`,

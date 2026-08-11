@@ -57,6 +57,12 @@ export interface InboundImageBlock {
   mimeType: string;
   /** Raw image data. */
   data: Buffer;
+  /**
+   * Source file path on disk. Present when the block was created from an
+   * inbound WhatsApp image; used by the runtime to annotate non-vision
+   * sessions with the image-tool fallback hint.
+   */
+  filePath?: string;
 }
 
 /* ─── Channel Plugin Interface ─── */

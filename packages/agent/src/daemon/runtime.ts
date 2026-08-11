@@ -1,7 +1,7 @@
 import { resolve, join, dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import type { Message, Model, Api } from "@mariozechner/pi-ai";
+import type { Message, Model, Api, TextContent, ImageContent } from "@mariozechner/pi-ai";
 import type { Server } from "node:net";
 
 import {
@@ -1672,7 +1672,6 @@ export class DaemonRuntime {
         else log.info(msg);
       },
       model: this.model,
-      modelSupportsVision: this.configDefaultModel?.supportsVision,
       callbacks: {
         submitTurn: async (sessionId, text, imageBlocks) => {
           return this.submitWhatsAppTurn(sessionId, text, imageBlocks);
@@ -1770,22 +1769,43 @@ export class DaemonRuntime {
     let turnCtx = this.agentContextFor(this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!);
     turnCtx = this.applyTurnModel(turnCtx, entry.modelRef);
 
-    // Build the user message with optional image content blocks
-    let userContent: string | Array<{ type: string; text?: string; source?: { type: "base64"; mediaType: string; data: string } }> = text;
-    if (imageBlocks && imageBlocks.length > 0) {
-      const parts: Array<{ type: string; text?: string; source?: { type: "base64"; mediaType: string; data: string } }> = [];
-      parts.push({ type: "text", text });
-      for (const block of imageBlocks) {
+    // Decide whether the session's active model can see images. The model
+    // may differ from the daemon default (switched via /model), so this is
+    // resolved per session from the config.
+    const turnModel = turnCtx.model;
+    const visionCapable = turnModel ? this.modelSupportsVision(turnModel) : false;
+
+    // Build the user message with optional image content blocks.
+    // pi-ai's content-block contract is { type: "image", data, mimeType }
+    // (base64-encoded data) — providers read these fields directly. The
+    // Anthropic provider adds its own `source` wrapper internally.
+    let userContent: string | (TextContent | ImageContent)[] = text;
+    const inlinable = imageBlocks && imageBlocks.length > 0 && visionCapable;
+    if (inlinable) {
+      const parts: (TextContent | ImageContent)[] = [];
+      // Tell the model it sees the image directly — the neutral annotation
+      // from the plugin ("Bild angehängt: …") carries no tool hint.
+      const textWithVisionHint = `${text}${text ? "\n" : ""}Du siehst das angehängte Bild direkt — kein image-Tool nötig.`;
+      parts.push({ type: "text", text: textWithVisionHint });
+      for (const block of imageBlocks!) {
         parts.push({
           type: "image",
-          source: {
-            type: "base64",
-            mediaType: block.mimeType,
-            data: block.data.toString("base64"),
-          },
+          data: block.data.toString("base64"),
+          mimeType: block.mimeType,
         });
       }
       userContent = parts;
+    } else if (imageBlocks && imageBlocks.length > 0) {
+      // Non-vision session: fall back to the image tool. The plugin emits a
+      // neutral annotation ("Bild angehängt: …") — append the tool hint so
+      // the agent knows it can still inspect the image.
+      const hints = imageBlocks
+        .map((b) => b.filePath)
+        .filter((p): p is string => !!p)
+        .map((p) => `Nutze das image-Tool mit url="${p}" und optional einem prompt, um das Bild anzusehen.`);
+      if (hints.length > 0) {
+        userContent = `${text}${text ? "\n" : ""}${hints.join("\n")}`;
+      }
     }
 
     const userMessage = {
@@ -2567,6 +2587,23 @@ export class DaemonRuntime {
     if (!this.config.memory.ambientHints) return undefined;
     if (!memoryZones.includes("notes")) return undefined;
     return this.memoryService?.getBackend() ?? undefined;
+  }
+
+  /**
+   * Whether a resolved model can process image content blocks. Capability
+   * comes from the model config (input list / supportsVision flag), never
+   * hardcoded on model names.
+   */
+  private modelSupportsVision(model: Model<Api>): boolean {
+    const input = (model as ResolvedModel).input;
+    if (Array.isArray(input) && input.includes("image")) {
+      return true;
+    }
+    const supportsVision = (model as { supportsVision?: boolean }).supportsVision;
+    if (supportsVision !== undefined) {
+      return supportsVision;
+    }
+    return false;
   }
 
   /**
