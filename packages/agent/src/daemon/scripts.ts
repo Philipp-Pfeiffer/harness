@@ -20,6 +20,8 @@ export interface ScriptJobContext {
   retentionDays: number;
   /** Best-effort system event injection (used by curator-ping). */
   injectEvent?: (event: { origin: string; text: string }) => Promise<void> | void;
+  /** Injectable clock (used by curator-ping's freshness check). */
+  now?: () => Date;
 }
 
 export type ScriptJobFn = (ctx: ScriptJobContext) => Promise<void>;
@@ -76,10 +78,11 @@ registerScriptJob("metrics-rotation", rotateMetrics);
 /* ─── Built-in: curator-ping ───
  *
  * After a curator stage-2 run, pings the WhatsApp session via the
- * system event bus. No report or empty report → no ping.
+ * system event bus. Only a report dated today is fresh — an older
+ * newest report (stage 2 ended without findings) yields no ping.
  */
 registerScriptJob("curator-ping", async (ctx) => {
-  const text = await buildCuratorPingText(ctx.paths.state, ctx.logger);
+  const text = await buildCuratorPingText(ctx.paths.state, ctx.logger, { now: ctx.now });
   if (!text) return;
   if (ctx.injectEvent) {
     await ctx.injectEvent({ origin: "Curator", text });

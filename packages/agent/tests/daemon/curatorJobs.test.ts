@@ -58,7 +58,7 @@ describe("curator pipeline job files", () => {
 
     for (const job of jobs) {
       expect(job.enabled).toBe(false);
-      expect(job.schedule).toMatch(/^\d+ \d+ \* \* [\d,]+$/);
+      expect(job.schedule).toMatch(/^\d+ \d+ \*\/2 \* \*$/);
     }
   });
 
@@ -70,8 +70,8 @@ describe("curator pipeline job files", () => {
     };
     expect(toMinutes(stage1.schedule)).toBeLessThan(toMinutes(stage2.schedule));
     expect(toMinutes(stage2.schedule)).toBeLessThan(toMinutes(ping.schedule));
-    expect(stage1.schedule.split(" ")[4]).toBe(stage2.schedule.split(" ")[4]);
-    expect(stage2.schedule.split(" ")[4]).toBe(ping.schedule.split(" ")[4]);
+    expect(stage1.schedule.split(" ")[2]).toBe(stage2.schedule.split(" ")[2]);
+    expect(stage2.schedule.split(" ")[2]).toBe(ping.schedule.split(" ")[2]);
   });
 
   it("runs at night, staggered after distillation-daily (03:00)", () => {

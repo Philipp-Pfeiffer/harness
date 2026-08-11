@@ -8,7 +8,7 @@
 
 | ADR §12 | Gebaut |
 |---------|--------|
-| Pipeline alle 2 Tage, nachts, versetzt zu distillation-daily (03:00) | Drei Cron-Jobs Di/Fr 04:00/04:15/04:45 (stage1 → stage2 → ping), alle `enabled: false` (manueller Rollout) |
+| Pipeline alle 2 Tage, nachts, versetzt zu distillation-daily (03:00) | Drei Cron-Jobs 04:00/04:15/04:45 an `*/2`-DoM-Tagen (stage1 → stage2 → ping), alle `enabled: false` (manueller Rollout) |
 | Stage 1 liest Daily Notes + Session-Protokolle der letzten 2 Tage + Skills-Verzeichnis → Briefing | `curator-stage1/agent.md` umgeschrieben: 2-Tage-Fenster (`memory/daily/` + `~/.harness/sessions/*/*.protocol.md` + `~/harness/skills/`), Briefing nach `~/.harness/curator/briefings/YYYY-MM-DD.md`, YAML-Kopf-Format beibehalten |
 | Stage 2 liest Briefing → Report | `curator-stage2/agent.md` umgeschrieben: Report nach `~/.harness/curator/reports/YYYY-MM-DD.md`, nummerierte Vorschläge `[typ: skill-create \| skill-merge \| memory-fix \| frage]`, max. ~10, sortiert nach Tragweite |
 | Ping per `injectSystemEvent`, nur Metadaten | Script-Job `curator-ping` (`packages/agent/src/daemon/curatorPing.ts` + Registry in `scripts.ts`), Text: "Curator-Report fertig: N Vorschläge, Pfad …" — nie Report-Inhalt |
@@ -32,11 +32,11 @@ Job-Dateien liegen in `$HARNESS_STATE/jobs/` und sind dort nicht versioniert. Da
 
 | Datei | Schedule | Typ | Body |
 |-------|----------|-----|------|
-| `curator-stage1.md` | `0 4 * * 2,5` | agent | leer (Profil beschreibt Aufgabe) |
-| `curator-stage2.md` | `15 4 * * 2,5` | agent | leer |
-| `curator-ping.md` | `45 4 * * 2,5` | script | `curator-ping` |
+| `curator-stage1.md` | `0 4 */2 * *` | agent | leer (Profil beschreibt Aufgabe) |
+| `curator-stage2.md` | `15 4 */2 * *` | agent | leer |
+| `curator-ping.md` | `45 4 */2 * *` | script | `curator-ping` |
 
-`* * 2,5` = Dienstag + Freitag (alle 2 Tage); `0 3 * * *` = distillation-daily. Kein stage2→stage1-Trigger im Scheduler vorhanden (`feat-pipeline-triggers.md` dokumentiert keine Verkettung) → zeitversetzt ge­cront; Stage 2 beendet sich sauber, wenn das Briefing des Tages fehlt. **Alle drei Jobs `enabled: false`** — erster Pass wird von Hand getriggert.
+Alle 2 Tage via `*/2` im Day-of-Month-Feld; Monatsgrenze 31.→1. ergibt 1-Tages-Abstand, bewusst akzeptiert. `0 3 * * *` = distillation-daily. Kein stage2→stage1-Trigger im Scheduler vorhanden (`feat-pipeline-triggers.md` dokumentiert keine Verkettung) → zeitversetzt ge­cront; Stage 2 beendet sich sauber, wenn das Briefing des Tages fehlt. **Alle drei Jobs `enabled: false`** — erster Pass wird von Hand getriggert.
 
 ### 3. Event-Bus-Ping
 
@@ -45,7 +45,7 @@ Job-Dateien liegen in `$HARNESS_STATE/jobs/` und sind dort nicht versioniert. Da
 - den bestehenden `injectSystemEvent`-Pfad direkt nutzt,
 - idempotent pro Lauf ist (liest den neuesten Report, zählt nummerierte Vorschläge).
 
-Neu: `packages/agent/src/daemon/curatorPing.ts` (reines Modul, `buildCuratorPingText` + `parseProposalCount`), Registrierung als `curator-ping` in `scripts.ts`, `ScriptJobContext.injectEvent` als optionaler Callback (daemon-setup: `runtime.ts` verdrahtet ihn auf `injectSystemEvent`). **Fehlt der Report oder ist er leer → kein Ping** (geloggt, nicht geworfen).
+Neu: `packages/agent/src/daemon/curatorPing.ts` (reines Modul, `buildCuratorPingText` + `parseProposalCount`), Registrierung als `curator-ping` in `scripts.ts`, `ScriptJobContext.injectEvent` als optionaler Callback (daemon-setup: `runtime.ts` verdrahtet ihn auf `injectSystemEvent`). **Fehlt der Report, ist er leer oder stammt er nicht von heute → kein Ping** (geloggt, nicht geworfen). Frische-Check: Der neueste Report muss das heutige lokale Datum (`YYYY-MM-DD`) tragen — sonst würde der Ping-Job nach einem laufleeren Stage-2 (kein Briefing/keine Befunde) den Report des letzten Laufs erneut an WhatsApp senden.
 
 Report-Zählung robust: Regex `^\s*\d+\.\s*\[typ: (skill-create|skill-merge|memory-fix|frage)\]` — zählt nur nummerierte Vorschlagszeilen mit gültigem Typ.
 
@@ -63,15 +63,15 @@ Angelegt aus dem aktuellen Verzeichnis (40 Einträge, Name + Zweck + Pfad). Pfle
 | `packages/agent/src/daemon/curatorPing.ts` | **neu** — Ping-Text-Bau + Vorschlags-Zählung |
 | `packages/agent/src/daemon/scripts.ts` | Registry `curator-ping` + `injectEvent` im `ScriptJobContext` |
 | `packages/agent/src/daemon/runtime.ts` | Scheduler-Setup verdrahtet `injectEvent` auf `injectSystemEvent` |
-| `.harness/jobs/curator-{stage1,stage2,ping}.md` | **neu** — Job-Vorlagen (disabled, Di/Fr) |
+| `.harness/jobs/curator-{stage1,stage2,ping}.md` | **neu** — Job-Vorlagen (disabled, `*/2`-DoM) |
 | `packages/agent/tests/daemon/curatorPing.test.ts` | **neu** — Ping-Tests |
 | `packages/agent/tests/daemon/curatorJobs.test.ts` | **neu** — Job-Frontmatter-Tests |
 | `~/harness/skills/_index.md` | **neu** — Skill-Index (40 Skills) |
 
 ## Tests
 
-- `curatorPing.test.ts`: Report mit N Vorschlägen → korrekter Event-Text; kein/leerer Report → kein Ping; Zählung robust (nummeriert + Typ, ignoriert andere Zeilen); neuester Report gewinnt; Registry injiziert über Kontext.
-- `curatorJobs.test.ts`: Frontmatter gültig (croner-Expression, `enabled: false`), Reihenfolge stage1→stage2→ping, Start nach 03:00 (distillation-daily), Profil-Referenzen existieren, Script-Funktion registriert.
+- `curatorPing.test.ts`: Report mit N Vorschlägen → korrekter Event-Text; kein/leerer/staler Report (gestern) → kein Ping; heutiger Report → Ping (Testuhr injiziert via `now`-Option, deterministisch); Zählung robust (nummeriert + Typ, ignoriert andere Zeilen); neuester Report gewinnt; Registry injiziert über Kontext.
+- `curatorJobs.test.ts`: Frontmatter gültig (croner-Expression, `enabled: false`, `*/2` im DoM-Feld), Reihenfolge stage1→stage2→ping, Start nach 03:00 (distillation-daily), Profil-Referenzen existieren, Script-Funktion registriert.
 - Keine Agent-Output-Tests (LLM-Inhalt); Briefing→Report-Kette ist Profil-Verhalten (kein Code).
 
 ## Validierung

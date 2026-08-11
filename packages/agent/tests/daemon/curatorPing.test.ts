@@ -61,6 +61,11 @@ const REPORT_BODY = `# Curator Report
    Beleg: b2. Risiko: r2.
 `;
 
+/** Fixed local clock for deterministic freshness tests. */
+const FIXED_NOW = () => new Date(2026, 7, 12, 4, 50); // 2026-08-12 04:50 local
+const TODAY = "2026-08-12";
+const YESTERDAY = "2026-08-11";
+
 describe("parseProposalCount", () => {
   it("counts numbered proposal lines with typ tags", () => {
     expect(parseProposalCount(REPORT_BODY)).toBe(2);
@@ -88,30 +93,43 @@ describe("parseProposalCount", () => {
 
 describe("buildCuratorPingText", () => {
   it("builds metadata-only text from the newest report", async () => {
-    await writeReport("2026-08-11", REPORT_BODY);
-    await writeReport("2026-08-12", REPORT_BODY);
+    await writeReport(YESTERDAY, REPORT_BODY);
+    await writeReport(TODAY, REPORT_BODY);
 
-    const text = await buildCuratorPingText(paths.state, logger);
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
     expect(text).toBe(
       "Curator-Report fertig: 2 Vorschläge, Pfad ~/.harness/curator/reports/2026-08-12.md (2026-08-12)",
     );
   });
 
   it("returns null when no reports exist", async () => {
-    const text = await buildCuratorPingText(paths.state, logger);
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
     expect(text).toBeNull();
   });
 
   it("returns null when the newest report has no proposals", async () => {
-    await writeReport("2026-08-11", "# Curator Report\n\nKeine Vorschläge.\n");
-    const text = await buildCuratorPingText(paths.state, logger);
+    await writeReport(TODAY, "# Curator Report\n\nKeine Vorschläge.\n");
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
     expect(text).toBeNull();
   });
 
+  it("returns null when the newest report is stale (yesterday)", async () => {
+    await writeReport(YESTERDAY, REPORT_BODY);
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
+    expect(text).toBeNull();
+  });
+
+  it("pings a today report even when an older one has proposals", async () => {
+    await writeReport(YESTERDAY, REPORT_BODY);
+    await writeReport(TODAY, REPORT_BODY);
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
+    expect(text).toContain("2026-08-12");
+  });
+
   it("picks the newest report even when an older one has proposals", async () => {
-    await writeReport("2026-08-10", REPORT_BODY);
-    await writeReport("2026-08-11", "# Leerer Report\n");
-    const text = await buildCuratorPingText(paths.state, logger);
+    await writeReport("2026-08-11", REPORT_BODY);
+    await writeReport(TODAY, "# Leerer Report\n");
+    const text = await buildCuratorPingText(paths.state, logger, { now: FIXED_NOW });
     expect(text).toBeNull();
   });
 });
@@ -121,12 +139,13 @@ describe("curator-ping script job", () => {
     const fn = getScriptJob("curator-ping");
     expect(fn).toBeTypeOf("function");
 
-    await writeReport("2026-08-12", REPORT_BODY);
+    await writeReport(TODAY, REPORT_BODY);
     const events: { origin: string; text: string }[] = [];
     await fn!({
       paths,
       logger: logger.child("cron-script"),
       retentionDays: 14,
+      now: FIXED_NOW,
       injectEvent: async (event) => {
         events.push(event);
       },
@@ -144,6 +163,7 @@ describe("curator-ping script job", () => {
       paths,
       logger: logger.child("cron-script"),
       retentionDays: 14,
+      now: FIXED_NOW,
       injectEvent: async (event) => {
         events.push(event);
       },
@@ -153,12 +173,29 @@ describe("curator-ping script job", () => {
 
   it("does not inject when the report is empty of proposals", async () => {
     const fn = getScriptJob("curator-ping")!;
-    await writeReport("2026-08-12", "# Curator Report\n");
+    await writeReport(TODAY, "# Curator Report\n");
     const events: { origin: string; text: string }[] = [];
     await fn({
       paths,
       logger: logger.child("cron-script"),
       retentionDays: 14,
+      now: FIXED_NOW,
+      injectEvent: async (event) => {
+        events.push(event);
+      },
+    });
+    expect(events).toHaveLength(0);
+  });
+
+  it("does not inject when the newest report is stale", async () => {
+    const fn = getScriptJob("curator-ping")!;
+    await writeReport(YESTERDAY, REPORT_BODY);
+    const events: { origin: string; text: string }[] = [];
+    await fn({
+      paths,
+      logger: logger.child("cron-script"),
+      retentionDays: 14,
+      now: FIXED_NOW,
       injectEvent: async (event) => {
         events.push(event);
       },
