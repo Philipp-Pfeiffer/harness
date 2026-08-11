@@ -18,6 +18,7 @@ import {
   INBOUND_DEBOUNCE_MS,
   SESSION_INACTIVITY_THRESHOLD_MS,
   PRESENCE_COMPOSING_REFRESH_MS,
+  ROTATION_GUARD_MS,
 } from "./limits.js";
 
 /** Stop words that hard-abort a running turn (whole message, case-insensitive). */
@@ -39,6 +40,14 @@ interface SourceState {
   turnRunning: boolean;
   /** Resolved session ID for this source. */
   sessionId: string;
+  /** Session the currently running turn belongs to (set at turn start). */
+  turnSessionId: string | null;
+  /**
+   * Timestamp of the last session rotation (0 = none). While within
+   * ROTATION_GUARD_MS, the 8h-inactivity check is skipped to protect a
+   * freshly rotated session from a stale lastActivityMs re-trigger.
+   */
+  rotatedAt: number;
   /** Composing-indicator refresh timer for the currently running turn. */
   presenceTimer: ReturnType<typeof setInterval> | null;
 }
@@ -188,22 +197,30 @@ export class WhatsAppInboundProcessor {
 
     if (!state) {
       const resolved = await this.callbacks.resolveSession(event.source);
+      const now = Date.now();
       state = {
-        lastActivityMs: Date.now(),
+        lastActivityMs: now,
         currentAbort: null,
         debounceTimer: null,
         pendingEvents: [],
         turnRunning: false,
         sessionId: resolved.sessionId,
+        turnSessionId: null,
+        rotatedAt: resolved.rotated ? now : 0,
         presenceTimer: null,
       };
       this.sourceStates.set(event.source, state);
       rotated = resolved.rotated;
     }
 
-    // Check 8h inactivity — rotate to a fresh session before the turn
-    const inactiveMs = Date.now() - state.lastActivityMs;
-    if (state.lastActivityMs > 0 && inactiveMs > SESSION_INACTIVITY_THRESHOLD_MS) {
+    // Check 8h inactivity — rotate to a fresh session before the turn.
+    // Guard: skip while within ROTATION_GUARD_MS of a previous rotation so a
+    // stale lastActivityMs (incident 11.08.: lastActivityMs is only updated
+    // in handleTurnComplete) cannot kill a freshly rotated session mid-turn.
+    const now = Date.now();
+    const inactiveMs = now - state.lastActivityMs;
+    const withinRotationGuard = state.rotatedAt > 0 && now - state.rotatedAt < ROTATION_GUARD_MS;
+    if (state.lastActivityMs > 0 && !withinRotationGuard && inactiveMs > SESSION_INACTIVITY_THRESHOLD_MS) {
       this.log(
         `Session ${state.sessionId} inactive for ${Math.round(inactiveMs / 3_600_000)}h — rotating session`,
         "info",
@@ -213,6 +230,10 @@ export class WhatsAppInboundProcessor {
         // A rotated session has no prior context — submit the current message
         // immediately as the first turn instead of debouncing it.
         rotated = true;
+        // Fresh session → refresh activity timestamp and arm the rotation
+        // guard so the 8h check cannot re-fire from the old lastActivityMs.
+        state.lastActivityMs = Date.now();
+        state.rotatedAt = Date.now();
       } catch (err) {
         this.log(`Session rotation failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
@@ -248,11 +269,16 @@ export class WhatsAppInboundProcessor {
           this.log(`Abort confirmation send failed: ${err instanceof Error ? err.message : String(err)}`, "error");
         });
       } else {
-        this.log(`Steering turn for ${event.source}`, "info");
+        // Route into the session of the RUNNING turn (turnSessionId): if the
+        // 8h rotation fired during this turn (stale lastActivityMs), the
+        // fresh session has no turn running yet — steering into it would only
+        // surface in the wrong context minutes later.
+        const steerSessionId = state.turnSessionId ?? state.sessionId;
+        this.log(`Steering turn for ${event.source} into session ${steerSessionId}`, "info");
         const steerText = event.annotations?.length
           ? `${event.text}\n${event.annotations.join("\n")}`
           : event.text;
-        this.callbacks.steer(state.sessionId, steerText);
+        this.callbacks.steer(steerSessionId, steerText);
       }
       return;
     }
@@ -300,6 +326,7 @@ export class WhatsAppInboundProcessor {
 
     // Start the turn
     state.turnRunning = true;
+    state.turnSessionId = state.sessionId;
     const abortController = new AbortController();
     state.currentAbort = abortController;
 
@@ -334,6 +361,7 @@ export class WhatsAppInboundProcessor {
     state.turnRunning = false;
     state.currentAbort = null;
     state.lastActivityMs = Date.now();
+    state.turnSessionId = null;
     this.stopComposingPresence(source, state);
 
     // Send the response back via the channel

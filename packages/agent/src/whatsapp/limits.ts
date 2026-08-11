@@ -17,6 +17,14 @@ export const INBOUND_DEBOUNCE_MS = 1_000;
 export const SESSION_INACTIVITY_THRESHOLD_MS = 8 * 60 * 60 * 1_000;
 
 /**
+ * Cooldown after a session rotation during which the 8h-inactivity check is
+ * skipped. Protects a freshly rotated session from being killed by a second
+ * rotation triggered by a stale lastActivityMs (the real-world incident:
+ * the first turn after rotation ran longer than the gap to the next message).
+ */
+export const ROTATION_GUARD_MS = 60_000;
+
+/**
  * Interval for refreshing the WhatsApp composing indicator while a turn is
  * running. WhatsApp's composing state expires after ~20-30s, so it must be
  * re-sent well within that window.

@@ -23,6 +23,7 @@ import {
   INBOUND_DEBOUNCE_MS,
   SESSION_INACTIVITY_THRESHOLD_MS,
   PRESENCE_COMPOSING_REFRESH_MS,
+  ROTATION_GUARD_MS,
 } from "../../src/whatsapp/limits.js";
 
 function createEvent(source: string, text: string, extra?: Partial<ChannelInboundEvent>): ChannelInboundEvent {
@@ -487,6 +488,168 @@ describe("WhatsApp Inbound Processor", () => {
       expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
         "491701234567",
         expect.stringContaining("OK"),
+      );
+    });
+  });
+
+  // ─── Session Rotation Race (Incident 11.08.) ───
+
+  describe("Session Rotation Race (incident 11.08.)", () => {
+    it("does NOT re-rotate when the first turn after rotation is still running and a second message arrives", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Establish source state with a normal turn
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      mock.completeTurn("Response");
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Move past the 8h inactivity threshold
+      await vi.advanceTimersByTimeAsync(SESSION_INACTIVITY_THRESHOLD_MS + 1000);
+
+      // First message after inactivity → rotation → first turn starts immediately
+      await processor.processInbound(createEvent("491701234567", "New task"));
+      expect(mock.callbacks.rotateSessionForInactivity).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(2);
+      // lastActivityMs is now current — no stale 8h window
+      const stateAfterRotation = processor.getSourceState("491701234567")!;
+      expect(stateAfterRotation.lastActivityMs).toBeGreaterThan(Date.now() - 5_000);
+
+      // Second message while the first turn is still running (turn not completed).
+      // This is the incident: previously the stale lastActivityMs re-fired the
+      // 8h check and killed the fresh session mid-turn.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await processor.processInbound(createEvent("491701234567", "Steer please"));
+
+      // No second rotation
+      expect(mock.callbacks.rotateSessionForInactivity).toHaveBeenCalledTimes(1);
+
+      // The message is steered into the session of the RUNNING turn (the rotated one)
+      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+        "session-rotated-491701234567",
+        "Steer please",
+      );
+
+      // The turn still completes in the rotated session (not a killed one)
+      mock.completeTurn("Done");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        "Done",
+      );
+    });
+
+    it("skips the 8h-inactivity check within the rotation guard window even with a stale lastActivityMs", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Establish state with a completed turn so lastActivityMs is fresh
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+      mock.completeTurn("Response");
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Simulate a rotation that already happened (e.g. resolved on restart):
+      // rotatedAt is fresh, but lastActivityMs is artificially stale (>8h).
+      const state = processor.getSourceState("491701234567")!;
+      state.rotatedAt = Date.now();
+      state.lastActivityMs = Date.now() - SESSION_INACTIVITY_THRESHOLD_MS - 1000;
+      state.sessionId = "session-rotated-491701234567";
+
+      await processor.processInbound(createEvent("491701234567", "Message within guard window"));
+
+      // Guard skips the 8h check → no rotation
+      expect(mock.callbacks.rotateSessionForInactivity).not.toHaveBeenCalled();
+    });
+
+    it("allows the 8h check again after the rotation guard window expires", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Establish state with a completed turn so lastActivityMs is fresh
+      await processor.processInbound(createEvent("491701234567", "Hello"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+      mock.completeTurn("Response");
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Rotation happened long ago (> guard), lastActivityMs still stale
+      const state = processor.getSourceState("491701234567")!;
+      state.rotatedAt = Date.now() - ROTATION_GUARD_MS - 1000;
+      state.lastActivityMs = Date.now() - SESSION_INACTIVITY_THRESHOLD_MS - 1000;
+
+      await processor.processInbound(createEvent("491701234567", "Message after guard window"));
+
+      expect(mock.callbacks.rotateSessionForInactivity).toHaveBeenCalledTimes(1);
+    });
+
+    it("updates lastActivityMs when the rotation happens via resolveSession (daemon-restart path)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // No existing source state → resolveSession reports a rotated session
+      mock.setResolveResult({ sessionId: "session-rotated-491701234567", rotated: true });
+
+      await processor.processInbound(createEvent("491701234567", "My task"));
+
+      // Fresh state was created with a current lastActivityMs
+      const state = processor.getSourceState("491701234567")!;
+      expect(state.lastActivityMs).toBeGreaterThan(Date.now() - 5_000);
+      expect(state.rotatedAt).toBeGreaterThan(0);
+
+      // Guard active: even a wild second inbound (same tick) must not rotate
+      await processor.processInbound(createEvent("491701234567", "Follow-up"));
+      expect(mock.callbacks.rotateSessionForInactivity).not.toHaveBeenCalled();
+      // With steer-always, the follow-up is steered into the running turn's
+      // session (the rotated one), NOT restarted as a second turn.
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+        "session-rotated-491701234567",
+        "Follow-up",
+      );
+    });
+
+    it("steers into the running turn's session when a rotation happened mid-turn", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Start a normal turn
+      await processor.processInbound(createEvent("491701234567", "First message"));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      expect(mock.callbacks.submitTurn.mock.calls[0]![0]).toBe("session-491701234567");
+
+      // Mid-turn rotation: sessionId points to a fresh session, but the running
+      // turn still belongs to the old one (tracked in turnSessionId)
+      const state = processor.getSourceState("491701234567")!;
+      state.sessionId = "session-fresh-491701234567";
+
+      await processor.processInbound(createEvent("491701234567", "Steer me"));
+
+      // Steer must go to the RUNNING turn's session, not the fresh one
+      expect(mock.callbacks.steer).toHaveBeenCalledWith(
+        "session-491701234567",
+        "Steer me",
       );
     });
   });
