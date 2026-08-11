@@ -18,6 +18,7 @@ import {
   MAX_RESTARTS_PER_TURN,
   SESSION_INACTIVITY_THRESHOLD_MS,
   PRESENCE_COMPOSING_REFRESH_MS,
+  ROTATION_GUARD_MS,
 } from "./limits.js";
 
 type LogFn = (msg: string, level?: "info" | "warn" | "error") => void;
@@ -42,6 +43,14 @@ interface SourceState {
   turnRunning: boolean;
   /** Resolved session ID for this source. */
   sessionId: string;
+  /** Session the currently running turn belongs to (set at turn start). */
+  turnSessionId: string | null;
+  /**
+   * Timestamp of the last session rotation (0 = none). While within
+   * ROTATION_GUARD_MS, the 8h-inactivity check is skipped to protect a
+   * freshly rotated session from a stale lastActivityMs re-trigger.
+   */
+  rotatedAt: number;
   /** Text of the currently running turn (for restart context combination). */
   currentTurnText: string;
   /** Image blocks of the currently running turn (for restart). */
@@ -193,8 +202,9 @@ export class WhatsAppInboundProcessor {
 
     if (!state) {
       const resolved = await this.callbacks.resolveSession(event.source);
+      const now = Date.now();
       state = {
-        lastActivityMs: Date.now(),
+        lastActivityMs: now,
         currentAbort: null,
         turnStartMs: 0,
         hasToolExecuted: false,
@@ -203,6 +213,8 @@ export class WhatsAppInboundProcessor {
         pendingEvents: [],
         turnRunning: false,
         sessionId: resolved.sessionId,
+        turnSessionId: null,
+        rotatedAt: resolved.rotated ? now : 0,
         currentTurnText: "",
         currentTurnImageBlocks: [],
         currentTurnAnnotations: [],
@@ -212,9 +224,14 @@ export class WhatsAppInboundProcessor {
       rotated = resolved.rotated;
     }
 
-    // Check 8h inactivity — rotate to a fresh session before the turn
-    const inactiveMs = Date.now() - state.lastActivityMs;
-    if (state.lastActivityMs > 0 && inactiveMs > SESSION_INACTIVITY_THRESHOLD_MS) {
+    // Check 8h inactivity — rotate to a fresh session before the turn.
+    // Guard: skip while within ROTATION_GUARD_MS of a previous rotation so a
+    // stale lastActivityMs (incident 11.08.: lastActivityMs is only updated
+    // in handleTurnComplete) cannot kill a freshly rotated session mid-turn.
+    const now = Date.now();
+    const inactiveMs = now - state.lastActivityMs;
+    const withinRotationGuard = state.rotatedAt > 0 && now - state.rotatedAt < ROTATION_GUARD_MS;
+    if (state.lastActivityMs > 0 && !withinRotationGuard && inactiveMs > SESSION_INACTIVITY_THRESHOLD_MS) {
       this.log(
         `Session ${state.sessionId} inactive for ${Math.round(inactiveMs / 3_600_000)}h — rotating session`,
         "info",
@@ -224,6 +241,10 @@ export class WhatsAppInboundProcessor {
         // A rotated session has no prior context — submit the current message
         // immediately as the first turn instead of debouncing it.
         rotated = true;
+        // Fresh session → refresh activity timestamp and arm the rotation
+        // guard so the 8h check cannot re-fire from the old lastActivityMs.
+        state.lastActivityMs = Date.now();
+        state.rotatedAt = Date.now();
       } catch (err) {
         this.log(`Session rotation failed: ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
@@ -306,15 +327,21 @@ export class WhatsAppInboundProcessor {
           });
         return;
       } else {
-        // After first tool call or max restarts: steer via mailbox
+        // After first tool call or max restarts: steer via mailbox.
+        // Route into the session of the RUNNING turn (turnSessionId): if the
+        // 8h rotation fired during this turn (stale lastActivityMs), the
+        // fresh session has no turn running yet — steering into it would only
+        // surface in the wrong context minutes later.
+        const steerSessionId = state.turnSessionId ?? state.sessionId;
         this.log(
-          `Steering turn for ${event.source} (toolExecuted=${toolExecuted}, restarts=${state.restartCount})`,
+          `Steering turn for ${event.source} into session ${steerSessionId} ` +
+          `(toolExecuted=${toolExecuted}, restarts=${state.restartCount})`,
           "info",
         );
         const steerText = event.annotations?.length
           ? `${event.text}\n${event.annotations.join("\n")}`
           : event.text;
-        this.callbacks.steer(state.sessionId, steerText);
+        this.callbacks.steer(steerSessionId, steerText);
         return;
       }
     }
@@ -365,6 +392,7 @@ export class WhatsAppInboundProcessor {
     state.turnStartMs = Date.now();
     state.hasToolExecuted = false;
     state.restartCount = 0;
+    state.turnSessionId = state.sessionId;
     state.currentTurnText = prefixedText;
     state.currentTurnImageBlocks = combinedImageBlocks;
     state.currentTurnAnnotations = combinedAnnotations;
@@ -403,6 +431,7 @@ export class WhatsAppInboundProcessor {
     state.hasToolExecuted = false;
     state.restartCount = 0;
     state.lastActivityMs = Date.now();
+    state.turnSessionId = null;
     state.currentTurnText = "";
     state.currentTurnImageBlocks = [];
     state.currentTurnAnnotations = [];
