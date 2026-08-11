@@ -251,6 +251,24 @@ describe("token usage pipeline end-to-end", () => {
     expect(summary.sessionTokensIn).toBe("3.1k"); // 1565 + 1500 + 0 = 3065
     expect(summary.sessionTokensOut).toBe("70");
     expect(summary.cacheHitRate).toBe("48.9%"); // 1500 / (1565+1500+0) = 48.94%
+
+    // Stage 5: context fill from the real last-turn usage (measured values
+    // instead of the local estimate). The whole run is one turn in the
+    // session sense: result.usage = input 1565 + cacheRead 1500 = 3065.
+    const summaryWithUsage = await buildStatusSummary(
+      {
+        sessionState: "ready",
+        toolCalls: 0,
+        errors: 0,
+        contextWindow: 128_000,
+        lastTurnUsage: result.usage,
+        contextTokens: 99_999, // a bogus estimate that must NOT win
+        sessionUsage: result.usage,
+      },
+      null,
+    );
+    expect(summaryWithUsage.contextFill).toBe("2%"); // 3065/128000 = 2.39%
+    expect(summaryWithUsage.contextTokens).toBe("3.1k"); // 1565 + 1500 + 0
   });
 
   it("keeps /status values accurate when prompt caching is inactive", async () => {

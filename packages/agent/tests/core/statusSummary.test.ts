@@ -388,6 +388,81 @@ describe("context fill", () => {
     expect(summary.contextFill).toBe("25%");
   });
 
+  it("prefers real last-turn usage over the estimate and session spend", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        lastTurnUsage: { inputTokens: 32_500, outputTokens: 1_200, totalTokens: 33_700, cacheRead: 8_000, cacheWrite: 2_000 },
+        contextTokens: 40_000,
+        sessionUsage: { inputTokens: 50_000, outputTokens: 5_000, totalTokens: 55_000, cacheRead: 8_000, cacheWrite: 2_000 },
+      },
+      null,
+    );
+    // input + cacheRead + cacheWrite = 32500 + 8000 + 2000 = 42500
+    expect(summary.contextFill).toBe("33%");
+    expect(summary.contextTokens).toBe("42.5k");
+  });
+
+  it("uses last-turn usage when the estimate is absent", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        lastTurnUsage: { inputTokens: 20_000, outputTokens: 800, totalTokens: 20_800, cacheRead: 12_000, cacheWrite: 0 },
+        sessionUsage: { inputTokens: 40_000, outputTokens: 2_000, totalTokens: 42_000, cacheRead: 12_000, cacheWrite: 0 },
+      },
+      null,
+    );
+    // 20000 + 12000 = 32000 → 25%
+    expect(summary.contextFill).toBe("25%");
+    expect(summary.contextTokens).toBe("32.0k");
+  });
+
+  it("falls back to the estimate when last-turn usage is absent", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        contextTokens: 64_000,
+        sessionUsage: { inputTokens: 10_000, outputTokens: 5_000, totalTokens: 15_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("50%");
+    expect(summary.contextTokens).toBe("64.0k");
+  });
+
+  it("treats all-zero last-turn usage as no measurement (provider fallback)", async () => {
+    // A provider that does not report usage leaves all-zero usage values.
+    // The estimate must win over a bogus 0-token context.
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        lastTurnUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+        contextTokens: 64_000,
+        sessionUsage: { inputTokens: 32_000, outputTokens: 5_000, totalTokens: 37_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("50%");
+    expect(summary.contextTokens).toBe("64.0k");
+  });
+
+  it("falls back to session spend when last-turn usage is zero and no estimate", async () => {
+    const summary = await buildStatusSummary(
+      {
+        ...baseContext,
+        contextWindow: 128_000,
+        lastTurnUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+        sessionUsage: { inputTokens: 32_000, outputTokens: 1_000, totalTokens: 33_000, cacheRead: 0, cacheWrite: 0 },
+      },
+      null,
+    );
+    expect(summary.contextFill).toBe("25%");
+  });
+
   it("returns n/a when contextWindow is missing", async () => {
     const summary = await buildStatusSummary(
       {
