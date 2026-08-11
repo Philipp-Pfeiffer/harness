@@ -175,6 +175,13 @@ interface SessionEntry {
    *  same session waits for the first to complete instead of racing on
    *  entry.messages in-place. Messages arriving mid-turn go to the mailbox. */
   turnQueue: Promise<unknown>;
+  /**
+   * Real provider usage of the most recently completed turn (from
+   * result.usage). Used by /status to report context fill from measured
+   * values instead of the local char-based estimate. Absent until the
+   * first turn of this in-memory entry completes.
+   */
+  lastUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; cacheRead: number; cacheWrite: number };
 }
 
 /**
@@ -1061,6 +1068,7 @@ export class DaemonRuntime {
           entry.messages = loaded.turns.length > 0
             ? turnsToMessages(loaded.turns)
             : [];
+          entry.lastUsage = loaded.lastTurnUsage;
           this.sessions.set(sessionId, entry);
           const log = this.logger.child("session");
           log.info("session resumed", { id: sessionId, messages: entry.messages.length });
@@ -1135,6 +1143,7 @@ export class DaemonRuntime {
               entry.messages = loaded.turns.length > 0
                 ? turnsToMessages(loaded.turns)
                 : [];
+              entry.lastUsage = loaded.lastTurnUsage;
               this.sessions.set(req.sessionId, entry);
             }
             sessionId = req.sessionId;
@@ -1332,6 +1341,13 @@ export class DaemonRuntime {
               truncated: result.aborted && partialContent.length > 0 ? true : undefined,
             };
             entry.session = await recordTurn(entry.session, turn, this.paths);
+            entry.lastUsage = {
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              totalTokens: result.usage.totalTokens,
+              cacheRead: result.usage.cacheRead,
+              cacheWrite: result.usage.cacheWrite,
+            };
             this.turnActive = false;
             // A deferred restart (requested mid-turn via /deploy or
             // /restart) fires after the turn body settles and the final
@@ -1891,6 +1907,13 @@ export class DaemonRuntime {
         messages: turnSlice,
       };
       entry.session = await recordTurn(entry.session, turn, this.paths);
+      entry.lastUsage = {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        totalTokens: result.usage.totalTokens,
+        cacheRead: result.usage.cacheRead,
+        cacheWrite: result.usage.cacheWrite,
+      };
 
       return { finalResponse: finalMessage };
     } finally {
@@ -2453,6 +2476,7 @@ export class DaemonRuntime {
       modelRef,
       mailbox: createMailbox(),
       turnQueue: Promise.resolve(),
+      // lastUsage stays undefined until the first turn of this entry completes.
     };
   }
 
@@ -2635,9 +2659,14 @@ export class DaemonRuntime {
       }
       const modelForContext = turnModel ?? this.model;
 
-      // Live context estimate: message history + system prompt + tool defs.
-      // Mirrors the compaction trigger (shouldCompact) so the fill % answers
-      // "when will compaction happen?".
+      // Context fill sources, in priority order (resolved inside
+      // buildStatusSummary): real provider usage of the last completed turn
+      // (measured input + cache, matching what the provider actually saw),
+      // then the local char-based estimate (message history + system prompt
+      // + tool defs, mirrors the compaction trigger), then the session's
+      // cumulative input spend. The estimate is always computed so the
+      // fallback stays intact for providers that never report usage.
+      const lastUsage = entry?.lastUsage;
       let contextTokens: number | undefined;
       if (entry) {
         try {
@@ -2672,6 +2701,7 @@ export class DaemonRuntime {
               cacheWrite: entry.session.tokenTotals.cacheWrite,
             }
           : undefined,
+        lastTurnUsage: lastUsage,
         contextTokens,
         memoryReady: this.memoryService ? !this.memoryService.degraded : false,
         toolCalls: entry?.turnsCompleted ?? 0,
