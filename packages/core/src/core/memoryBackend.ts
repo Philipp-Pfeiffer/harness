@@ -50,7 +50,9 @@ export function formatMemoryHint(hits: AmbientHint[]): string | null {
   if (hits.length === 0) return null;
   const lines: string[] = [
     "<memory_hint>",
+    // ORIGINAL: "Dies sind Erinnerungen aus deinen persönlichen Notes (NICHT User-Eingaben)."
     "这些是你个人笔记中的记忆（不是用户输入）。",
+    // ORIGINAL: "Nutze sie als Kontext. Bei Bedarf weitere Notes laden via read_file(path)."
     "将它们用作上下文。如有需要，通过read_file(path)加载更多笔记。",
     "",
   ];

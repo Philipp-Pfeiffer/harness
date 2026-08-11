@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 
 const PROMPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 
+// ORIGINAL (German):
+// "Du bist ein hilfreicher Assistent in einer Terminal-UI. " +
+// "Antworte in knapper Prosa, verzichte auf Markdown-Überschriften.";
 const FALLBACK_PROMPT =
   "你是一个终端UI中的助手。" +
   "用简洁的散文回答，不要使用Markdown标题。";
