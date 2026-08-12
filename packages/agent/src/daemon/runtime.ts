@@ -280,6 +280,9 @@ export class DaemonRuntime {
 
     // Inject structured logger into processSupervisor (replaces console.warn fallback)
     processSupervisor.setLogger(this.makeToolLogger());
+    // In-process tasks (async browser runs) don't survive a restart — sweep any
+    // that would otherwise look like they're still running.
+    processSupervisor.completeTasksOnRestart();
 
     // Build the /skills overview lazily from the skill directories (state
     // files, not in-memory records — reflects the operator's real skills).
@@ -1606,6 +1609,7 @@ export class DaemonRuntime {
         models: this.configModels,
         downloadsBaseDir: join(this.paths.state, "downloads"),
         browserRunsDir: this.paths.browserRuns,
+        injectSystemEvent: (event) => { void this.injectSystemEvent(event); },
       },
       image: {
         config: this.imageConfig,

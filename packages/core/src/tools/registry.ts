@@ -35,6 +35,12 @@ export interface LoadToolsOptions {
     models?: ConfigModel[];
     downloadsBaseDir: string;
     browserRunsDir: string;
+    /** System event bus for async browser completion notifications. */
+    injectSystemEvent?: (event: { origin: string; text: string }) => void;
+    /** Max concurrent async browser tasks (default 2). */
+    maxConcurrent?: number;
+    /** Per-task timeout in ms (default 30 min). */
+    taskTimeoutMs?: number;
   };
   /** Vision model options. When models are set, registers the `image` tool. */
   image?: {
@@ -96,6 +102,9 @@ export function loadTools(
       models: opts.browser.models,
       downloadsBaseDir: opts.browser.downloadsBaseDir,
       browserRunsDir: opts.browser.browserRunsDir,
+      injectSystemEvent: opts.browser.injectSystemEvent,
+      maxConcurrent: opts.browser.maxConcurrent,
+      taskTimeoutMs: opts.browser.taskTimeoutMs,
     }));
   }
 

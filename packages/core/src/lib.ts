@@ -38,7 +38,7 @@ export { createImageTool } from "./tools/image.js";
 export { loadTools, findTool } from "./tools/registry.js";
 
 // Process supervisor (singleton — used by exec/process tools, logger-injectable)
-export { processSupervisor } from "./tools/processSupervisor.js";
+export { processSupervisor, type Task, type TaskStatus, type TaskType } from "./tools/processSupervisor.js";
 
 // Model resolution
 export {

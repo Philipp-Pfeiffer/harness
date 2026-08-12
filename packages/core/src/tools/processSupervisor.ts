@@ -23,8 +23,35 @@ export type Session = {
   stderrRing: RingBuffer;
 };
 
+export type TaskType = "browser";
+
+export type TaskStatus = "running" | "done" | "error" | "stopped";
+
+/**
+ * An in-process background task managed alongside child processes.
+ * Unlike a child process it has no pid/rings; it exposes a status, a short
+ * summary, produced artifact paths and an idempotent `stop()`.
+ */
+export type Task = {
+  id: string;
+  type: TaskType;
+  status: TaskStatus;
+  /** Short human-readable outcome (empty while running). */
+  summary: string;
+  /** Paths to produced artifacts (reports, traces, downloads). */
+  artifactPaths: string[];
+  startedAt: Date;
+  finishedAt?: Date;
+  /** Latest progress label (e.g. last browser action). */
+  lastAction?: string;
+  /** Latest visited URL, when the task reports one. */
+  lastUrl?: string;
+  stop: () => void;
+};
+
 class ProcessSupervisor {
   private sessions = new Map<string, Session>();
+  private tasks = new Map<string, Task>();
   private gcTimer?: NodeJS.Timeout;
   private logger?: (msg: string, level?: "warn" | "debug") => void;
 
@@ -86,6 +113,58 @@ class ProcessSupervisor {
       return session;
     }
     return undefined;
+  }
+
+  /** Registers an in-process background task (e.g. an async browser run). */
+  registerTask(task: Task): void {
+    this.tasks.set(task.id, task);
+  }
+
+  getTask(id: string): Task | undefined {
+    return this.tasks.get(id);
+  }
+
+  listTasks(): { running: Task[]; finished: Task[] } {
+    const running: Task[] = [];
+    const finished: Task[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.status === "running") {
+        running.push(task);
+      } else {
+        finished.push(task);
+      }
+    }
+    return { running, finished };
+  }
+
+  countRunningTasks(type: TaskType): number {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.type === type && task.status === "running") {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Closes out all in-process tasks at daemon boot. In-memory task state does
+   * not survive a restart, so any leftover running task is a leftover from a
+   * previous process and is marked "error: daemon restart".
+   */
+  completeTasksOnRestart(): void {
+    for (const task of this.tasks.values()) {
+      if (task.status === "running") {
+        task.status = "error";
+        task.summary = "daemon restart";
+        task.finishedAt = new Date();
+        try {
+          task.stop();
+        } catch {
+          // stop() must never break the boot sweep
+        }
+      }
+    }
   }
 
   list(): { running: Session[]; finished: Session[] } {
@@ -246,12 +325,32 @@ class ProcessSupervisor {
         }
       }
     }
+
+    for (const [id, task] of this.tasks.entries()) {
+      if (task.status !== "running" && task.finishedAt) {
+        const age = now - task.finishedAt.getTime();
+        if (age > GC_MAX_AGE_MS) {
+          this.tasks.delete(id);
+        }
+      }
+    }
   }
 
   destroy(): void {
     if (this.gcTimer) {
       clearInterval(this.gcTimer);
     }
+
+    for (const task of this.tasks.values()) {
+      if (task.status === "running") {
+        try {
+          task.stop();
+        } catch {
+          // best-effort
+        }
+      }
+    }
+    this.tasks.clear();
 
     for (const session of this.sessions.values()) {
       if (!session.exitedAt) {
