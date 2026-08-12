@@ -40,7 +40,10 @@ export async function channelAddendumAsync(
   const catalog = stickerLibraryDir
     ? await buildStickerCatalog(stickerLibraryDir)
     : "";
-  return catalog ? `${WHATSAPP_ADDENDUM}\n\n${catalog}` : WHATSAPP_ADDENDUM;
+  const registration = stickerLibraryDir ? STICKER_REGISTRATION_GUIDE : "";
+  return catalog || registration
+    ? `${WHATSAPP_ADDENDUM}\n\n${catalog}${registration}`
+    : WHATSAPP_ADDENDUM;
 }
 
 /** Legacy sync variant: static addendum (no sticker catalog). */
@@ -59,3 +62,18 @@ const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 - 表格是可以使用的，会渲染成图片——在确实需要结构化数据时使用它们。
 - 用-或1.的列表是可以的。保持消息长度适合对话；长输出在段落边界处分段（大约4000个字符）。
 - 要发送文件或图片，使用send_file工具。`;
+
+/**
+ * Compact registration guide injected after the catalog so the agent can
+ * register new stickers without guessing the index.json schema (previously
+ * discovered via source code / memory notes).
+ */
+const STICKER_REGISTRATION_GUIDE = `
+
+## Sticker registrieren
+
+Neue Sticker (z.B. aus \`incoming/\`) so registrieren:
+1. Datei in die Library kopieren (z.B. \`~/.harness/stickers/<name>-<kürzel>.webp\`).
+2. SHA-256-Hex-Hash des Dateiinhalts berechnen.
+3. In \`index.json\` einen Eintrag ergänzen: \`{ "<sha256-hex>": { "name": "<slug>", "beschreibung": "<kurze Bedeutung>", "datei": "<dateiname>.webp" } }\`.
+4. Wichtig: Die referenzierte Datei muss neben der index.json existieren — Einträge ohne Datei werden verworfen, und der Katalog oben aktualisiert sich automatisch.`;

@@ -56,16 +56,24 @@ describe("channelAddendumAsync (sticker catalog injection)", () => {
     expect(text).toBeDefined();
     expect(text).toContain("s000 — Beschreibung s000");
     expect(text).toContain("s001 — Beschreibung s001");
-    // One line per sticker
-    const lines = (text ?? "").split("\n").filter((l) => l.includes(" — "));
+    // One line per sticker (catalog section only, between the headers)
+    const catalogSection = (text ?? "").split("## Sticker registrieren")[0] ?? "";
+    const lines = catalogSection.split("\n").filter((l) => l.includes(" — "));
     expect(lines).toHaveLength(2);
+    // Registration guide present (schema + workflow, replaces memory notes)
+    expect(text).toContain("## Sticker registrieren");
+    expect(text).toContain("sha256-hex");
   });
 
   it("does not inject a catalog for an empty library", async () => {
     const text = await channelAddendumAsync("whatsapp", STICKER_DIR);
     expect(text).toBeDefined();
     expect(text).not.toContain("Sticker-Katalog");
-    expect(text).not.toContain(" — ");
+    // Catalog section absent — no " — " before the registration guide
+    const catalogSection = (text ?? "").split("## Sticker registrieren")[0] ?? "";
+    expect(catalogSection).not.toContain(" — ");
+    // Registration guide still injected (works even with an empty library)
+    expect(text).toContain("## Sticker registrieren");
   });
 
   it("does not inject a catalog for a broken index (no crash)", async () => {
@@ -79,7 +87,8 @@ describe("channelAddendumAsync (sticker catalog injection)", () => {
   it("caps the catalog at 50 entries", async () => {
     await seedLibrary(60);
     const text = await channelAddendumAsync("whatsapp", STICKER_DIR);
-    const lines = (text ?? "").split("\n").filter((l) => l.includes(" — "));
+    const catalogSection = (text ?? "").split("## Sticker registrieren")[0] ?? "";
+    const lines = catalogSection.split("\n").filter((l) => l.includes(" — "));
     expect(lines).toHaveLength(50);
   });
 

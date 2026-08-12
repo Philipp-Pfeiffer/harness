@@ -14,7 +14,9 @@
 import { Type } from "@sinclair/typebox";
 import { readFile } from "node:fs/promises";
 import type { Tool } from "./types.js";
-import { ok, err } from "./types.js";export const SendStickerArgs = Type.Object({
+import { ok, err } from "./types.js";
+
+export const SendStickerArgs = Type.Object({
   name: Type.String({ description: "Name of the sticker from the sticker catalog (e.g. \"pepe\")." }),
 });
 
@@ -73,9 +75,14 @@ export async function resolveStickerRecord(
 export const sendStickerTool: Tool<typeof SendStickerArgs> = {
   name: "send_sticker",
   description:
-    "Send a sticker from the local sticker library to the active channel chat (WhatsApp). " +
+    "Sends a sticker from the local sticker library to the active channel chat (WhatsApp). " +
     "Sticker names are listed in the sticker catalog in the system prompt. " +
-    "The library lives in ~/.harness/stickers/ (index.json + webp files).",
+    "The library lives in ~/.harness/stickers/ with index.json mapping " +
+    "sha256(file content) → { name, beschreibung, datei }. " +
+    "To register a NEW sticker (e.g. one that arrived in incoming/): write a file to the library dir, " +
+    "compute its sha256 (hex), add an entry with the same sha256 key + { name, beschreibung, datei } to index.json, " +
+    "and verify the referenced datei file exists next to it — entries without an existing file are dropped. " +
+    "The catalog in the system prompt refreshes automatically.",
   parameters: SendStickerArgs,
   conflictKey() {
     return "send_sticker";

@@ -93,6 +93,10 @@ export interface WhatsAppClient {
    * presence ("available"/"unavailable" = online status of the device).
    */
   sendPresenceUpdate(type: WAPresence, jid?: string): Promise<void>;
+  /** Region-optimized media host from Baileys' media_conn ('' when not fetched yet). */
+  getMediaHost(): string;
+  /** (Re-)fetches Baileys' media_conn node; returns its media hosts. */
+  refreshMediaConn(force?: boolean): Promise<{ hosts: { hostname: string; maxContentLengthBytes: number }[] }>;
 }
 
 /**
@@ -317,6 +321,15 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): WhatsAppClien
         opts.log(`Failed to send presence update (${type}): ${err instanceof Error ? err.message : String(err)}`, "warn");
       }
     },
+
+    getMediaHost(): string {
+      return sock?.getMediaHost() ?? "";
+    },
+
+    async refreshMediaConn(force?: boolean): Promise<{ hosts: { hostname: string; maxContentLengthBytes: number }[] }> {
+      if (!sock) return { hosts: [] };
+      return sock.refreshMediaConn(force);
+    },
   };
 }
 
@@ -342,6 +355,12 @@ export function createMockWhatsAppClient(): WhatsAppClient {
     },
     async markAsRead(_jid: string, _messageKeys: string[]): Promise<void> {},
     async sendPresenceUpdate(_type: WAPresence, _jid?: string): Promise<void> {},
+    getMediaHost(): string {
+      return "";
+    },
+    async refreshMediaConn(): Promise<{ hosts: { hostname: string; maxContentLengthBytes: number }[] }> {
+      return { hosts: [] };
+    },
   };
 }
 

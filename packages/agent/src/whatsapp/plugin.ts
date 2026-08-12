@@ -26,9 +26,9 @@ import {
   type BaileysMessage,
   type WAMessage,
 } from "./client.js";
-import { downloadContentFromMessage } from "baileys";
 import type { DownloadableMessage } from "baileys";
 import { isWhitelisted, resolveSenderName, extractPhoneNumber } from "./whitelist.js";
+import { downloadMediaContent, type MediaHostSource } from "./mediaDownload.js";
 import {
   downloadMedia,
   processMediaForTurn,
@@ -135,7 +135,7 @@ export function createWhatsAppPlugin(opts: WhatsAppPluginOptions): ChannelPlugin
         authDir,
         phoneNumber: opts.phoneNumber,
         log: opts.log,
-        onMessage: (msg) => handleInboundMessage(msg, opts, processor, client),
+        onMessage: (msg) => handleInboundMessage(msg, opts, processor, client, client),
         onConnectionUpdate: (update) => {
           if (update.status === "open") {
             opts.log("WhatsApp connected", "info");
@@ -220,16 +220,26 @@ async function handleInboundMessage(
   msg: BaileysMessage,
   opts: WhatsAppPluginOptions,
   processor: WhatsAppInboundProcessor | null,
-  client: { resolveLidToPn: (lid: string) => Promise<string | null>; markAsRead: (jid: string, messageKeys: string[]) => Promise<void> } | null,
+  client: {
+    resolveLidToPn: (lid: string) => Promise<string | null>;
+    markAsRead: (jid: string, messageKeys: string[]) => Promise<void>;
+  } | null,
+  mediaSource: MediaHostSource | null,
 ): Promise<void> {
   if (!processor) return;
 
   const jid = msg.rawJid || msg.key.remoteJid || "";
   let source = extractPhoneNumber(jid);
 
-  // For group messages (@g.us), the real sender is in key.participant
+  // Baileys 7.x isJidGroup(): jid.endsWith('@g.us') is exact — LID group
+  // JIDs ("…:0@g.us" or "…@lid" group participants) can slip through. The
+  // participant JID is the reliable group-membership signal, so treat
+  // messages with a participant as group messages.
+  const isGroup = jid.includes("@g.us") || (msg.key.participant?.length ?? 0) > 0;
+
+  // For group messages, the real sender is in key.participant
   let effectiveJid = jid;
-  if (jid.includes("@g.us") && msg.key.participant) {
+  if (isGroup && msg.key.participant) {
     effectiveJid = msg.key.participant;
     source = extractPhoneNumber(effectiveJid);
   }
@@ -265,7 +275,6 @@ async function handleInboundMessage(
     }
   }
 
-  const isGroup = jid.includes("@g.us");
   opts.log(`Inbound: JID=${jid}${isGroup ? " (group)" : ""}, effective=${effectiveJid}, source=${source}, pushName=${msg.pushName}`, "info");
 
   // Whitelist check — silent drop for non-whitelisted
@@ -292,7 +301,7 @@ async function handleInboundMessage(
   const timestamp = new Date(msg.messageTimestamp * 1000).toISOString();
   // Use effectiveJid as source — outbound replies go to this JID
   // (LID for LID chats, PN for PN chats)
-  const event = await parseBaileysMessage(waMessage, effectiveJid, timestamp, opts, msg);
+  const event = await parseBaileysMessage(waMessage, effectiveJid, timestamp, opts, msg, mediaSource);
 
   if (event) {
     event.senderName = resolveSenderName(effectiveJid);
@@ -311,6 +320,7 @@ export async function parseBaileysMessage(
   timestamp: string,
   opts: WhatsAppPluginOptions,
   rawMsg: BaileysMessage,
+  mediaSource: MediaHostSource | null = null,
 ): Promise<ChannelInboundEvent | null> {
   const log = opts.log;
   const mediaDir = opts.paths.inboundMedia;
@@ -331,7 +341,7 @@ export async function parseBaileysMessage(
   // ─── Image message ───
   if (message.imageMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.imageMessage, rawMsg, "image");
+      const buffer = await downloadFromBaileys(message.imageMessage, rawMsg, "image", mediaSource);
       const media = await downloadMedia(buffer, message.imageMessage.mimetype ?? "image/jpeg", "image", mediaDir);
       mediaArray.push(media);
 
@@ -358,7 +368,7 @@ export async function parseBaileysMessage(
   // ─── Video message ───
   if (message.videoMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.videoMessage, rawMsg, "video");
+      const buffer = await downloadFromBaileys(message.videoMessage, rawMsg, "video", mediaSource);
       const media = await downloadMedia(buffer, message.videoMessage.mimetype ?? "video/mp4", "video", mediaDir);
       mediaArray.push(media);
     } catch (err) {
@@ -379,7 +389,7 @@ export async function parseBaileysMessage(
     const ptt = message.audioMessage.ptt === true || isOgg;
     log(`Audio message: ptt=${message.audioMessage.ptt} isOgg=${isOgg} → treatingAsVoice=${ptt} mimeType=${message.audioMessage.mimetype} seconds=${message.audioMessage.seconds}`, "info");
     try {
-      const buffer = await downloadFromBaileys(message.audioMessage, rawMsg, "audio");
+      const buffer = await downloadFromBaileys(message.audioMessage, rawMsg, "audio", mediaSource);
       const mediaType = ptt ? "voice" : "audio";
       const media = await downloadMedia(buffer, message.audioMessage.mimetype ?? "audio/ogg", mediaType as InboundMedia["type"], mediaDir);
 
@@ -415,7 +425,7 @@ export async function parseBaileysMessage(
   // ─── Document message ───
   if (message.documentMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.documentMessage, rawMsg, "document");
+      const buffer = await downloadFromBaileys(message.documentMessage, rawMsg, "document", mediaSource);
       const media = await downloadMedia(buffer, message.documentMessage.mimetype ?? "application/octet-stream", "document", mediaDir);
       mediaArray.push(media);
     } catch (err) {
@@ -430,7 +440,7 @@ export async function parseBaileysMessage(
   // ─── Sticker message ───
   if (message.stickerMessage) {
     try {
-      const buffer = await downloadFromBaileys(message.stickerMessage, rawMsg, "sticker");
+      const buffer = await downloadFromBaileys(message.stickerMessage, rawMsg, "sticker", mediaSource);
       const media = await downloadMedia(buffer, message.stickerMessage.mimetype ?? "image/webp", "sticker", mediaDir);
       mediaArray.push(media);
       log(`Sticker received from ${source}: ${media.filePath}`, "info");
@@ -500,21 +510,18 @@ export async function parseBaileysMessage(
 }
 
 /**
- * Downloads media content from a Baileys message component.
- * Uses Baileys' downloadContentFromMessage which doesn't need socket context.
+ * Downloads media content from a Baileys message component, using the
+ * socket's media_conn host (region-optimized) with fallback hosts and
+ * bounded retry for transient network failures.
  * @param mediaType - "image" | "video" | "audio" | "sticker" | "document"
  */
 async function downloadFromBaileys(
   proto: DownloadableMessage | Record<string, unknown>,
   _rawMsg: BaileysMessage,
   mediaType: "image" | "video" | "audio" | "sticker" | "document",
+  mediaSource: MediaHostSource | null,
 ): Promise<Buffer> {
-  const stream = await downloadContentFromMessage(proto as DownloadableMessage, mediaType);
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
+  return downloadMediaContent(proto as DownloadableMessage, mediaType, mediaSource ?? undefined);
 }
 
 /**
