@@ -312,6 +312,8 @@ async function handleInboundMessage(
 /**
  * Parses a Baileys message into a ChannelInboundEvent.
  * Handles text, image, video, audio (voice), document, sticker.
+ * Media captions (image/video/document) become the turn text so the model
+ * sees them like normal accompanying text.
  * Exported for tests.
  */
 export async function parseBaileysMessage(
@@ -340,6 +342,12 @@ export async function parseBaileysMessage(
 
   // ─── Image message ───
   if (message.imageMessage) {
+    // Baileys liefert die Caption (Begleittext) direkt am message-Payload —
+    // das Modell soll sie als normalen Begleittext sehen.
+    const caption = message.imageMessage.caption;
+    if (caption) {
+      text = caption;
+    }
     try {
       const buffer = await downloadFromBaileys(message.imageMessage, rawMsg, "image", mediaSource);
       const media = await downloadMedia(buffer, message.imageMessage.mimetype ?? "image/jpeg", "image", mediaDir);
@@ -367,6 +375,11 @@ export async function parseBaileysMessage(
 
   // ─── Video message ───
   if (message.videoMessage) {
+    // Caption (Begleittext) dem Modell als normalen Text übergeben.
+    const caption = message.videoMessage.caption;
+    if (caption) {
+      text = caption;
+    }
     try {
       const buffer = await downloadFromBaileys(message.videoMessage, rawMsg, "video", mediaSource);
       const media = await downloadMedia(buffer, message.videoMessage.mimetype ?? "video/mp4", "video", mediaDir);
@@ -424,6 +437,11 @@ export async function parseBaileysMessage(
 
   // ─── Document message ───
   if (message.documentMessage) {
+    // Caption (Begleittext) dem Modell als normalen Text übergeben.
+    const caption = message.documentMessage.caption;
+    if (caption) {
+      text = caption;
+    }
     try {
       const buffer = await downloadFromBaileys(message.documentMessage, rawMsg, "document", mediaSource);
       const media = await downloadMedia(buffer, message.documentMessage.mimetype ?? "application/octet-stream", "document", mediaDir);
