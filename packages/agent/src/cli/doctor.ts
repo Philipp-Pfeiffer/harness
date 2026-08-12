@@ -16,6 +16,8 @@ import {
  * - requires targets exist + depth ≤ 1
  * - Token warnings (skill.md > 1200 tokens)
  * - Dark skills (loaded but never used according to telemetry)
+ * - Disabled skills (deliberately switched off — shown separately, not
+ *   warned as dark skills)
  *
  * Exit code 0 = no errors (warnings are ok), 1 = errors found.
  */
@@ -78,10 +80,23 @@ export async function harnessDoctor(): Promise<DoctorResult> {
     lines.push("");
   }
 
+  // ─── Disabled skills (deliberately switched off by the operator) ───
+  const disabledSkills = result.skills.filter((s) => s.frontmatter.disabled);
+
+  if (disabledSkills.length > 0) {
+    lines.push("── Disabled Skills (bewusst deaktiviert) ──");
+    for (const skill of disabledSkills) {
+      lines.push(`  ⊘ ${skill.name} [${skill.frontmatter.level}] (status: ${skill.frontmatter.status})`);
+    }
+    lines.push("");
+  }
+
   // ─── Dark skills (never loaded) ───
   const telemetry = await readTelemetry(telemetryPath);
   const darkSkills = result.skills.filter(
-    (s) => s.frontmatter.status === "active" && (telemetry[s.name]?.uses ?? 0) === 0,
+    (s) => !s.frontmatter.disabled &&
+      s.frontmatter.status === "active" &&
+      (telemetry[s.name]?.uses ?? 0) === 0,
   );
 
   if (darkSkills.length > 0) {
@@ -98,7 +113,11 @@ export async function harnessDoctor(): Promise<DoctorResult> {
     for (const skill of result.skills) {
       const uses = telemetry[skill.name]?.uses ?? 0;
       const pin = skill.frontmatter.pinned ? "📌 " : "   ";
-      const route = skill.frontmatter.routable ? "r" : "-";
+      const route = skill.frontmatter.disabled
+        ? "⊘"
+        : skill.frontmatter.routable
+        ? "r"
+        : "-";
       const reqs = skill.frontmatter.requires.length > 0
         ? ` [requires: ${skill.frontmatter.requires.join(", ")}]`
         : "";

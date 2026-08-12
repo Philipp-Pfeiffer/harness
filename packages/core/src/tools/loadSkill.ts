@@ -9,6 +9,7 @@ import { recordSkillUse, telemetryPathFor } from "../skills/telemetry.js";
  *
  * Loads the full content of a skill by name. Updates telemetry.
  * Returns the skill.md body plus hints about scripts/references.
+ * Refuses to load skills with disabled:true.
  */
 
 const LoadSkillArgs = Type.Object({
@@ -40,6 +41,14 @@ export function createLoadSkillTool(
       if (!skill) {
         const available = skills.map((s) => s.name).join(", ");
         return err(`Skill not found: "${args.name}". Available skills: ${available}`);
+      }
+
+      // Disabled skills are deliberately switched off by the operator —
+      // refuse to load them regardless of status.
+      if (skill.frontmatter.disabled) {
+        return err(
+          `Skill ${skill.name} ist deaktiviert (disabled: true). Erst enablen.`,
+        );
       }
 
       // Update telemetry (best-effort)

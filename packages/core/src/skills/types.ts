@@ -11,6 +11,9 @@
  * - status    (optional, default "active") draft|active|stale|archive
  * - pinned    (optional, default false) include in Tier-0 hot-set
  * - routable  (optional, default true) discoverable via find_skill
+ * - disabled  (optional, default false) deliberately switched off by the
+ *   operator — harder than any status: excluded from hot-set, find_skill
+ *   and load_skill, independent of status/pinned/routable
  */
 
 export type SkillLevel = "atom" | "molecule";
@@ -24,6 +27,7 @@ export interface SkillFrontmatter {
   status: SkillStatus;
   pinned: boolean;
   routable: boolean;
+  disabled: boolean;
 }
 
 export interface SkillRecord {

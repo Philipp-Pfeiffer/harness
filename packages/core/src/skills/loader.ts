@@ -198,6 +198,8 @@ export function validateRequires(skills: SkillRecord[]): string[] {
  * Computes which skills are routable (discoverable via find_skill).
  *
  * Rules:
+ * - A skill with disabled:true is never routable (operator switch-off,
+ *   harder than any status).
  * - A skill with routable=false is not routable.
  * - An atom with incoming requires (required by another skill) is not routable
  *   — it can only be reached via its parent.
@@ -213,6 +215,9 @@ export function computeRoutableSkills(skills: SkillRecord[]): Set<string> {
 
   const routable = new Set<string>();
   for (const skill of skills) {
+    // Disabled is harder than any status — never routable, never reachable
+    // via find_skill, not even through the stale/archive search flag.
+    if (skill.frontmatter.disabled) continue;
     if (!skill.frontmatter.routable) continue;
     // Atoms with incoming requires are not routable
     if (

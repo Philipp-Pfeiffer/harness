@@ -1,5 +1,5 @@
 import { resolve, join, dirname } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { Message, Model, Api, TextContent, ImageContent } from "@mariozechner/pi-ai";
 import type { Server } from "node:net";
@@ -221,6 +221,8 @@ export class DaemonRuntime {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private scheduler: CronScheduler | null = null;
   private skillRecords: SkillRecord[] = [];
+  /** Last known skill directory names, used by the /skills overview. */
+  private skillDirectoryCache: string[] | null = null;
   private shuttingDown = false;
   /** Loaded agent profiles by name (built-in + user overrides). */
   private profiles = new Map<string, AgentProfile>();
@@ -278,6 +280,10 @@ export class DaemonRuntime {
 
     // Inject structured logger into processSupervisor (replaces console.warn fallback)
     processSupervisor.setLogger(this.makeToolLogger());
+
+    // Build the /skills overview lazily from the skill directories (state
+    // files, not in-memory records — reflects the operator's real skills).
+    this.skillDirectoryCache = null;
 
     // Clean up stale PID file from a previous crash
     const wasStale = await cleanupStalePidFile(this.paths.pidFile);
@@ -1558,6 +1564,11 @@ export class DaemonRuntime {
       builtinDir: builtinSkillsDir,
     });
     this.skillRecords = skillResult.skills;
+    this.skillDirectoryCache = await this.listSkillDirectories(this.paths.skills);
+
+    // Persisted disabled flags (state files) beat the in-memory load —
+    // a /skill disable|enable survives the daemon restart.
+    await this.applyDisabledSkills();
 
     for (const err of skillResult.errors) {
       log.warn("skill load error", { skill: err.skillName, message: err.message });
@@ -2706,6 +2717,8 @@ export class DaemonRuntime {
           "/compact — Compact context window",
           "/restart — Restart the daemon (after the current turn)",
           "/deploy <branch> — Merge branch into main, build, restart",
+          "/skills — List all skills (name, status, disabled)",
+          "/skill disable|enable <name> — Toggle a skill's disabled flag",
         ].join("\n"),
       };
     }
@@ -2887,8 +2900,158 @@ export class DaemonRuntime {
       return this.handleDeployCommand(sessionId, deployMatch[1]!);
     }
 
+    // /skills — overview of all skills (name, status, disabled)
+    if (trimmed === "/skills") {
+      return this.handleSkillsOverview();
+    }
+
+    // /skill disable <name> / /skill enable <name> — toggle disabled flag
+    const skillToggleMatch = trimmed.match(/^\/skill\s+(disable|enable)\s+(\S+)/);
+    if (skillToggleMatch) {
+      const action = skillToggleMatch[1] === "enable" ? "enable" : "disable";
+      return this.handleSkillToggle(action, skillToggleMatch[2]!);
+    }
+
     // Delegate to session commands
     return this.executeSessionSlashCommand(trimmed, sessionId);
+  }
+
+  /**
+   * /skills — compact overview of all skills: name, status, disabled flag.
+   * Reads the skill directories directly (state files, not in-memory
+   * records) so the operator always sees the real skills on disk.
+   */
+  private async handleSkillsOverview(): Promise<{ response: string }> {
+    const lines: string[] = [];
+    for (const name of await this.skillDirectories()) {
+      const fm = await this.readSkillFrontmatter(name);
+      if (!fm) {
+        lines.push(`- ${name}: (kein gültiges skill.md)`);
+        continue;
+      }
+      const disabled = fm.disabled ? " disabled" : "";
+      lines.push(`- ${name}: ${fm.status}${disabled}`);
+    }
+    const header = lines.length > 0
+      ? "Skills:\n"
+      : "Keine Skills gefunden. Hinweis: /skill disable|enable <name>.";
+    return { response: header + lines.map((l) => `  ${l}`).join("\n") };
+  }
+
+  /**
+   * Re-applies the disabled flag from the skill.md files to the in-memory
+   * skill records (idempotent). Called at startup so /skill disable|enable
+   * persists across daemon restarts.
+   */
+  private async applyDisabledSkills(): Promise<void> {
+    const known = await this.skillDirectories();
+    this.skillRecords = await Promise.all(
+      this.skillRecords.map(async (s) => {
+        if (!known.includes(s.name)) return s;
+        const fm = await this.readSkillFrontmatter(s.name);
+        if (!fm) return s;
+        if (fm.disabled === s.frontmatter.disabled) return s;
+        return { ...s, frontmatter: { ...s.frontmatter, disabled: fm.disabled } };
+      }),
+    );
+  }
+
+  /**
+   * /skill disable <name> / /skill enable <name> — toggles the disabled
+   * flag in the skill's frontmatter (persisted in skill.md, survives
+   * restarts). Rejects unknown skill names with a hint to /skills.
+   */
+  private async handleSkillToggle(
+    action: "disable" | "enable",
+    skillName: string,
+  ): Promise<{ response: string }> {
+    const name = skillName.trim().toLowerCase();
+    const known = await this.skillDirectories();
+    if (!known.includes(name)) {
+      const available = known.length > 0 ? known.join(", ") : "(keine)";
+      return {
+        response: `Skill "${skillName}" nicht gefunden. Verfügbare Skills: ${available} — siehe auch /skills.`,
+      };
+    }
+
+    const filePath = join(this.paths.skills, name, "skill.md");
+    let content: string;
+    try {
+      content = await readFile(filePath, "utf-8");
+    } catch (err) {
+      return {
+        response: `skill.md für "${name}" konnte nicht gelesen werden: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    const updated = setFrontmatterField(content, "disabled", String(action === "disable"));
+
+    try {
+      await writeFile(filePath, updated, "utf-8");
+    } catch (err) {
+      return {
+        response: `disabled-Flag für "${name}" konnte nicht geschrieben werden: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+
+    this.skillRecords = this.skillRecords.map((s) =>
+      s.name === name ? { ...s, frontmatter: { ...s.frontmatter, disabled: action === "disable" } } : s,
+    );
+
+    return {
+      response: action === "disable"
+        ? `Skill "${name}" deaktiviert (disabled: true).`
+        : `Skill "${name}" aktiviert (disabled: false).`,
+    };
+  }
+
+  /**
+   * Lists skill directory names in $HARNESS_HOME/skills/ (hidden and
+   * underscore-prefixed directories are skipped, like the loader).
+   */
+  private async skillDirectories(): Promise<string[]> {
+    try {
+      const entries = await readdir(this.paths.skills, { withFileTypes: true });
+      return entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !e.name.startsWith("_"))
+        .map((e) => e.name)
+        .sort();
+    } catch {
+      return this.skillDirectoryCache ?? [];
+    }
+  }
+
+  /** Lists skill directory names from a skills directory (for the cache). */
+  private async listSkillDirectories(dir: string): Promise<string[]> {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      return entries
+        .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !e.name.startsWith("_"))
+        .map((e) => e.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Reads the frontmatter of a skill's skill.md and returns its name, status
+   * and disabled flag. Returns null when the file is missing or invalid.
+   */
+  private async readSkillFrontmatter(
+    name: string,
+  ): Promise<{ name: string; status: string; disabled: boolean } | null> {
+    try {
+      const content = await readFile(join(this.paths.skills, name, "skill.md"), "utf-8");
+      const fields = parseFlatFrontmatter(content);
+      return {
+        name: fields.get("name") ?? name,
+        status: fields.get("status") ?? "active",
+        disabled: (fields.get("disabled") ?? "false").toLowerCase() === "true",
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -3316,4 +3479,71 @@ export class DaemonRuntime {
       this.paths.metrics,
     );
   }
+}
+
+/* ─── Skill-Frontmatter Editing (flat key: value format) ─── */
+
+/**
+ * Parses the flat `key: value` frontmatter of a skill.md and returns the
+ * fields as a map (last value wins). Mirrors the core frontmatter parser;
+ * used here because the core parser is write-agnostic.
+ */
+function parseFlatFrontmatter(content: string): Map<string, string> {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const raw = match?.[1] ?? "";
+  const fields = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const sep = trimmed.indexOf(":");
+    if (sep === -1) continue;
+    fields.set(trimmed.slice(0, sep).trim(), trimmed.slice(sep + 1).trim());
+  }
+  return fields;
+}
+
+/**
+ * Sets a flat frontmatter field in a skill.md. Replaces an existing key in
+ * place, appends the key after the closing "---" line otherwise. Returns the
+ * updated content, or the original content when no frontmatter exists.
+ *
+ * Note: `\r?\n` between the raw lines means the frontmatter opener/closer
+ * line lengths differ from `\n`-only math — the fields are therefore spliced
+ * back in via string positions, not line counts.
+ */
+function setFrontmatterField(
+  content: string,
+  key: string,
+  value: string,
+): string {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return content;
+
+  const raw = match[1]!;
+  const lines = raw.split("\n").map((line) => line.replace(/\r$/, ""));
+  const keyRe = new RegExp(`^\\s*${key}\\s*:`);
+  let replaced = false;
+
+  const newLines = lines.map((line) => {
+    if (keyRe.test(line)) {
+      replaced = true;
+      return `${key}: ${value}`;
+    }
+    return line;
+  });
+
+  if (!replaced) {
+    newLines.push(`${key}: ${value}`);
+  }
+
+  // Rebuild the frontmatter block with the original line separator style
+  // (`\r\n` for Windows files, `\n` otherwise).
+  const separator = raw.includes("\r\n") ? "\r\n" : "\n";
+  const rebuilt =
+    "---" + separator + newLines.join(separator) + separator + "---";
+
+  const closerStart = content.indexOf(raw) + raw.length;
+  const bodyStart =
+    closerStart + 3 + 1 + (content[closerStart] === "\r" ? 1 : 0);
+  return rebuilt + content.slice(bodyStart);
 }

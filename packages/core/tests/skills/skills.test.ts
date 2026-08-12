@@ -32,6 +32,7 @@ function makeSkillContent(opts: {
   status?: "draft" | "active" | "stale" | "archive";
   pinned?: boolean;
   routable?: boolean;
+  disabled?: boolean;
   body?: string;
 }): string {
   const lines = ["---"];
@@ -49,6 +50,9 @@ function makeSkillContent(opts: {
   }
   if (opts.routable !== undefined) {
     lines.push(`routable: ${opts.routable}`);
+  }
+  if (opts.disabled !== undefined) {
+    lines.push(`disabled: ${opts.disabled}`);
   }
   lines.push("---");
   lines.push(opts.body ?? `Body for ${opts.name}.`);
@@ -83,6 +87,7 @@ describe("parseSkillFile", () => {
       status: "active",
       pinned: true,
       routable: true,
+      disabled: true,
     });
     const result = parseSkillFile("/test/my-skill/skill.md", content, "my-skill");
     expect(result.frontmatter.name).toBe("my-skill");
@@ -91,6 +96,7 @@ describe("parseSkillFile", () => {
     expect(result.frontmatter.status).toBe("active");
     expect(result.frontmatter.pinned).toBe(true);
     expect(result.frontmatter.routable).toBe(true);
+    expect(result.frontmatter.disabled).toBe(true);
   });
 
   it("defaults status to active, pinned to false, routable to true", () => {
@@ -102,7 +108,31 @@ describe("parseSkillFile", () => {
     expect(result.frontmatter.status).toBe("active");
     expect(result.frontmatter.pinned).toBe(false);
     expect(result.frontmatter.routable).toBe(true);
+    expect(result.frontmatter.disabled).toBe(false);
     expect(result.frontmatter.requires).toEqual([]);
+  });
+
+  it("parses disabled: true", () => {
+    const content = makeSkillContent({
+      name: "disabled-skill",
+      description: "Use when: testing.",
+      disabled: true,
+    });
+    const result = parseSkillFile("/test/disabled-skill/skill.md", content, "disabled-skill");
+    expect(result.frontmatter.disabled).toBe(true);
+  });
+
+  it("throws on invalid disabled value", () => {
+    const content = makeSkillContent({
+      name: "bad-disabled",
+      description: "Use when: testing.",
+    }).replace("---", "---\ndisabled: vielleicht");
+    expect(() => parseSkillFile("/test/bad-disabled/skill.md", content, "bad-disabled")).toThrow(
+      SkillFrontmatterError,
+    );
+    expect(() => parseSkillFile("/test/bad-disabled/skill.md", content, "bad-disabled")).toThrow(
+      'invalid value for "disabled"',
+    );
   });
 
   it("throws on name mismatch", () => {
@@ -284,6 +314,7 @@ describe("validateRequires", () => {
         status: "active",
         pinned: false,
         routable: true,
+        disabled: false,
       },
       body: "",
       filePath: `/test/${name}/skill.md`,
@@ -337,11 +368,12 @@ describe("computeRoutableSkills", () => {
       frontmatter: {
         name,
         description: "Use when: test.",
-        level,
+        level: "atom",
         requires,
         status: "active",
         pinned: false,
         routable,
+        disabled: false,
       },
       body: "",
       filePath: `/test/${name}/skill.md`,
@@ -376,6 +408,17 @@ describe("computeRoutableSkills", () => {
     expect(routable.has("visible")).toBe(true);
     expect(routable.has("hidden")).toBe(false);
   });
+
+  it("excludes disabled skills even when routable=true", () => {
+    const skills = [
+      makeRecord("enabled", "atom"),
+      makeRecord("switched-off", "atom"),
+    ];
+    skills[1]!.frontmatter.disabled = true;
+    const routable = computeRoutableSkills(skills);
+    expect(routable.has("enabled")).toBe(true);
+    expect(routable.has("switched-off")).toBe(false);
+  });
 });
 
 /* ─── Hot-Set Tests ─── */
@@ -386,6 +429,7 @@ describe("buildHotSet", () => {
     opts?: {
       status?: "draft" | "active" | "stale" | "archive";
       pinned?: boolean;
+      disabled?: boolean;
       description?: string;
     },
   ): SkillRecord {
@@ -402,6 +446,7 @@ describe("buildHotSet", () => {
         status: opts?.status ?? "active",
         pinned: opts?.pinned ?? false,
         routable: true,
+        disabled: opts?.disabled ?? false,
       },
       body: "",
       filePath: `/test/${name}/skill.md`,
@@ -438,6 +483,16 @@ describe("buildHotSet", () => {
     ];
     const hotSet = buildHotSet(skills, {});
     expect(hotSet).toHaveLength(0);
+  });
+
+  it("excludes disabled skills even when active and pinned", () => {
+    const skills = [
+      makeSkill("switched-off", { pinned: true, disabled: true }),
+      makeSkill("enabled", { pinned: true }),
+    ];
+    const hotSet = buildHotSet(skills, {});
+    expect(hotSet.map((s) => s.name)).not.toContain("switched-off");
+    expect(hotSet.map((s) => s.name)).toContain("enabled");
   });
 
   it("orders by telemetry uses (descending)", () => {
@@ -540,30 +595,33 @@ describe("Telemetry", () => {
 /* ─── load_skill Tool Tests ─── */
 
 describe("load_skill tool", () => {
-  it("returns skill body when found", async () => {
-    const skills: SkillRecord[] = [
-      {
+  function makeSkill(frontmatter: Partial<SkillRecord["frontmatter"]>): SkillRecord {
+    return {
+      name: "test-skill",
+      frontmatter: {
         name: "test-skill",
-        frontmatter: {
-          name: "test-skill",
-          description: "Use when: testing.",
-          level: "atom",
-          requires: [],
-          status: "active",
-          pinned: false,
-          routable: true,
-        },
-        body: "This is the skill body.",
-        filePath: "/test/test-skill/skill.md",
-        dir: "/test/test-skill",
-        builtin: false,
-        tokenEstimate: 5,
-        hasScripts: false,
-        hasReferences: false,
-        hasEvals: false,
+        description: "Use when: testing.",
+        level: "atom",
+        requires: [],
+        status: "active",
+        pinned: false,
+        routable: true,
+        disabled: false,
+        ...frontmatter,
       },
-    ];
-    const tool = createLoadSkillTool(skills, skillsDir);
+      body: "This is the skill body.",
+      filePath: "/test/test-skill/skill.md",
+      dir: "/test/test-skill",
+      builtin: false,
+      tokenEstimate: 5,
+      hasScripts: false,
+      hasReferences: false,
+      hasEvals: false,
+    };
+  }
+
+  it("returns skill body when found", async () => {
+    const tool = createLoadSkillTool([makeSkill({})], skillsDir);
     const result = await tool.execute({ name: "test-skill" });
     expect(result.content).toContain("This is the skill body.");
     expect(result.content).toContain("test-skill");
@@ -575,41 +633,39 @@ describe("load_skill tool", () => {
     expect(result.content).toContain("not found");
   });
 
+  it("refuses disabled skills with a clear error, even when status is active", async () => {
+    const tool = createLoadSkillTool([makeSkill({ disabled: true })], skillsDir);
+    const result = await tool.execute({ name: "test-skill" });
+    expect(result.content).toContain("ist deaktiviert (disabled: true). Erst enablen.");
+    expect(result.content).not.toContain("This is the skill body.");
+  });
+
+  it("does not record telemetry for a refused disabled skill", async () => {
+    const telemetryPath = telemetryPathFor(skillsDir);
+    const tool = createLoadSkillTool([makeSkill({ disabled: true })], skillsDir);
+    await tool.execute({ name: "test-skill" });
+    const telemetry = await readTelemetry(telemetryPath);
+    expect(telemetry["test-skill"]).toBeUndefined();
+  });
+
   it("updates telemetry after load", async () => {
     const telemetryPath = telemetryPathFor(skillsDir);
-    const skills: SkillRecord[] = [
-      {
-        name: "telemetry-test",
-        frontmatter: {
-          name: "telemetry-test",
-          description: "Use when: testing.",
-          level: "atom",
-          requires: [],
-          status: "active",
-          pinned: false,
-          routable: true,
-        },
-        body: "Body.",
-        filePath: "/test/telemetry-test/skill.md",
-        dir: "/test/telemetry-test",
-        builtin: false,
-        tokenEstimate: 1,
-        hasScripts: false,
-        hasReferences: false,
-        hasEvals: false,
-      },
-    ];
-    const tool = createLoadSkillTool(skills, skillsDir);
-    await tool.execute({ name: "telemetry-test" });
+    const tool = createLoadSkillTool([makeSkill({})], skillsDir);
+    await tool.execute({ name: "test-skill" });
     const telemetry = await readTelemetry(telemetryPath);
-    expect(telemetry["telemetry-test"]?.uses).toBe(1);
+    expect(telemetry["test-skill"]?.uses).toBe(1);
   });
 });
 
 /* ─── find_skill Tool Tests ─── */
 
 describe("find_skill tool", () => {
-  function makeSkill(name: string, description: string, level: "atom" | "molecule" = "atom"): SkillRecord {
+  function makeSkill(
+    name: string,
+    description: string,
+    level: "atom" | "molecule" = "atom",
+    disabled = false,
+  ): SkillRecord {
     return {
       name,
       frontmatter: {
@@ -620,6 +676,7 @@ describe("find_skill tool", () => {
         status: "active",
         pinned: false,
         routable: true,
+        disabled,
       },
       body: "",
       filePath: `/test/${name}/skill.md`,
@@ -655,6 +712,7 @@ describe("find_skill tool", () => {
           status: "active",
           pinned: false,
           routable: true,
+          disabled: false,
         },
         body: "",
         filePath: "/test/parent/skill.md",
@@ -675,6 +733,7 @@ describe("find_skill tool", () => {
           status: "active",
           pinned: false,
           routable: true,
+          disabled: false,
         },
         body: "",
         filePath: "/test/child/skill.md",
@@ -692,6 +751,19 @@ describe("find_skill tool", () => {
     // But "sub-task" matches child's description. Since child is not routable,
     // it should not appear. The parent's description doesn't mention "sub-task".
     expect(result.content).toContain("0 results");
+  });
+
+  it("excludes disabled skills even when they match the query", async () => {
+    const skills = [
+      makeSkill("cron-jobs", "Manage cron jobs. Use when: scheduling tasks."),
+      makeSkill("memory-search", "Search memory. Use when: finding notes."),
+    ];
+    skills[1]!.frontmatter.disabled = true;
+    const tool = createFindSkillTool(skills);
+    // Only the disabled skill matches — the disabled skill must not appear.
+    const result = await tool.execute({ query: "memory" });
+    expect(result.content).toContain("0 results");
+    expect(result.content).not.toContain("memory-search");
   });
 
   it("returns empty result message for no matches", async () => {

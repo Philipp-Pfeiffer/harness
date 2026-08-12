@@ -12,6 +12,7 @@ import type {
  * - Stays within a token budget (~2k tokens default)
  * - Only name + description are included (not the full body)
  * - Skills with status draft/stale/archive are never in the hot-set
+ * - Skills with disabled:true are never in the hot-set
  */
 
 const DEFAULT_BUDGET_TOKENS = 2000;
@@ -24,10 +25,13 @@ function estimateTokens(text: string): number {
 
 /**
  * Checks if a skill is eligible for the hot-set.
- * Only status "active" skills are eligible.
+ * Only status "active" and not disabled skills are eligible.
  */
-function isHotSetEligible(status: SkillStatus): boolean {
-  return status === "active";
+function isHotSetEligible(
+  status: SkillStatus,
+  disabled: boolean,
+): boolean {
+  return !disabled && status === "active";
 }
 
 /**
@@ -52,9 +56,9 @@ export function buildHotSet(
   const budget = opts?.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
   const maxSkills = opts?.maxSkills ?? DEFAULT_MAX_SKILLS;
 
-  // Filter to eligible (active status)
+  // Filter to eligible (active status, not disabled)
   const eligible = skills.filter((s) =>
-    isHotSetEligible(s.frontmatter.status),
+    isHotSetEligible(s.frontmatter.status, s.frontmatter.disabled),
   );
 
   // Split into pinned and non-pinned

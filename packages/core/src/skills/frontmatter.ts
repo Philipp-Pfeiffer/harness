@@ -155,10 +155,27 @@ export function parseSkillFile(
     true,
   );
 
+  // disabled (optional, default false) — operator switch-off
+  const disabled = parseBoolean(
+    filePath,
+    "disabled",
+    fields.get("disabled"),
+    false,
+  );
+
   const tokenEstimate = Math.ceil(content.length / 4);
 
   return {
-    frontmatter: { name, description, level, requires, status, pinned, routable },
+    frontmatter: {
+      name,
+      description,
+      level,
+      requires,
+      status,
+      pinned,
+      routable,
+      disabled,
+    },
     body,
     tokenEstimate,
   };

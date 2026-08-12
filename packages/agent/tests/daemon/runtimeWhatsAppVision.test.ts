@@ -11,17 +11,14 @@
  * from hardcoded model names.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { rm, mkdir } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Agent, RunResult, Model, HarnessPaths } from "@harness/core";
-import type { Message, Api } from "@mariozechner/pi-ai";
 import { DaemonRuntime } from "../../src/daemon/runtime.js";
 import { resolveHarnessPaths } from "@harness/core";
-import type { ConfigModel } from "../../src/config.js";
 import { createSession } from "../../src/core/session.js";
-import type { InboundImageBlock } from "../../src/daemon/types.js";
 
 const TEST_DIR = join(tmpdir(), `harness-wa-vision-${process.pid}-${Date.now()}`);
 
@@ -35,7 +32,6 @@ beforeEach(async () => {
   savedState = process.env.HARNESS_STATE;
   process.env.HARNESS_HOME = join(TEST_DIR, "home");
   process.env.HARNESS_STATE = join(TEST_DIR, "state");
-  vi.restoreAllMocks();
 });
 
 afterEach(async () => {
@@ -76,6 +72,12 @@ const IMAGE_BLOCK: InboundImageBlock = {
   filePath: "/tmp/inbound-media/photo.jpg",
 };
 
+const imageBlockFactory = (): InboundImageBlock => ({
+  mimeType: "image/jpeg",
+  data: Buffer.from("fake-image-data"),
+  filePath: "/tmp/inbound-media/photo.jpg",
+});
+
 type SessionEntry = {
   session: { id: string; transcriptPath: string; model?: string; modelRef?: string; createdAt?: string; lastActivityAt?: string };
   messages: Message[];
@@ -94,7 +96,7 @@ type SessionEntry = {
 type RuntimeInternals = {
   agent: Agent;
   model: Model<Api>;
-  configModels: ConfigModel[];
+  configModels: unknown[];
   paths: HarnessPaths;
   sessions: Map<string, SessionEntry>;
   whatsappSessionToSource: Map<string, string>;
@@ -143,6 +145,10 @@ async function makeRuntime(modelRef: string | undefined): Promise<{ internals: R
     turnQueue: Promise.resolve(),
   });
 
+  const sessionEntry = internals.sessions.get(session.id)!;
+  sessionEntry.session.model = "vision";
+  sessionEntry.modelRef = modelRef;
+
   return { internals, sessionId: session.id };
 }
 
@@ -150,7 +156,7 @@ describe("WhatsApp vision inline images", () => {
   it("inlines image content blocks when the session model is vision-capable", async () => {
     const { internals, sessionId } = await makeRuntime("vision");
 
-    await internals.submitWhatsAppTurn(sessionId, "Schau dir das an", [IMAGE_BLOCK]);
+    await internals.submitWhatsAppTurn(sessionId, "Schau dir das an", [imageBlockFactory()]);
 
     const entry = internals.sessions.get(sessionId)!;
     const userMessage = entry.messages[0]!;
@@ -171,7 +177,7 @@ describe("WhatsApp vision inline images", () => {
   it("does NOT inline image blocks and appends the image-tool hint for non-vision sessions", async () => {
     const { internals, sessionId } = await makeRuntime(undefined);
 
-    await internals.submitWhatsAppTurn(sessionId, "Schau dir das an", [IMAGE_BLOCK]);
+    await internals.submitWhatsAppTurn(sessionId, "Schau dir das an", [imageBlockFactory()]);
 
     const entry = internals.sessions.get(sessionId)!;
     const userMessage = entry.messages[0]!;
@@ -185,7 +191,7 @@ describe("WhatsApp vision inline images", () => {
   it("treats a session explicitly switched to a vision model as vision-capable", async () => {
     const { internals, sessionId } = await makeRuntime("@preset/vision");
 
-    await internals.submitWhatsAppTurn(sessionId, "Was ist drauf?", [IMAGE_BLOCK]);
+    await internals.submitWhatsAppTurn(sessionId, "Was ist drauf?", [imageBlockFactory()]);
 
     const entry = internals.sessions.get(sessionId)!;
     const blocks = entry.messages[0]!.content as Array<{ type: string }>;

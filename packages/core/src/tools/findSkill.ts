@@ -16,6 +16,7 @@ import { computeRoutableSkills } from "../skills/loader.js";
  * Routability:
  * - Only routable skills appear in results
  * - Atoms with incoming requires are not routable (only via parent)
+ * - Disabled skills never appear (operator switch-off)
  */
 
 const FindSkillArgs = Type.Object({
