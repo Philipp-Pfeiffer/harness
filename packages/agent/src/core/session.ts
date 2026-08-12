@@ -128,7 +128,7 @@ export type SessionStatus = "active" | "idle" | "suspended" | "ended";
 
 /** Channel origin of a session. Determines channel-specific behavior
  *  (e.g. the WhatsApp system-prompt addendum). Persisted on the session. */
-export type SessionOrigin = "tui" | "cron" | "whatsapp" | "api";
+export type SessionOrigin = "tui" | "cron" | "whatsapp" | "voice" | "api";
 
 export interface Session {
   id: string;
@@ -202,6 +202,8 @@ export interface SessionMetaRecord {
 export interface CreateSessionOptions {
   model: string;
   title?: string;
+  /** Optional explicit session id. Defaults to a generated `createSessionId()`. */
+  id?: string;
   parentSessionId?: string;
   /** Agent profile name — persisted so resume restores the same profile. */
   profile?: string;
@@ -522,7 +524,7 @@ export async function createSession(
   paths: HarnessPaths,
   options: CreateSessionOptions
 ): Promise<Session> {
-  const id = createSessionId();
+  const id = options.id ?? createSessionId();
   const now = new Date().toISOString();
   const title =
     options.title ??

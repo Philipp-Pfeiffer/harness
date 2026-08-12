@@ -35,6 +35,7 @@ export async function channelAddendumAsync(
   origin: SessionOrigin,
   stickerLibraryDir?: string,
 ): Promise<string | undefined> {
+  if (origin === "voice") return VOICE_ADDENDUM;
   if (origin !== "whatsapp") return undefined;
 
   const catalog = stickerLibraryDir
@@ -48,9 +49,14 @@ export async function channelAddendumAsync(
 
 /** Legacy sync variant: static addendum (no sticker catalog). */
 export function channelAddendum(origin: SessionOrigin): string | undefined {
+  if (origin === "voice") return VOICE_ADDENDUM;
   if (origin !== "whatsapp") return undefined;
   return WHATSAPP_ADDENDUM;
 }
+
+const VOICE_ADDENDUM = `## Voice-Call
+
+Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, gesprochene Sprache, KEIN Markdown, keine Listen, keine Code-Blöcke, keine URLs vorlesen. Lange Tool-Aktionen kurz verbal ankündigen. Antworten kurz halten.`;
 
 const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 

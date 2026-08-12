@@ -187,6 +187,31 @@ export interface SessionScope {
 
 export type { SessionStatus, SessionOrigin } from "../core/session.js";
 
+/* ─── Voice IPC Protocol (Unix socket, NDJSON — siehe docs/voice-ipc.md) ─── */
+
+/** Ein aktiver Call, den der Adapter nach einem (Re)Connect meldet. */
+export interface VoiceActiveCall {
+  callId: string;
+  from: string;
+  /** ms-Epoch des Call-Starts. */
+  since: number;
+}
+
+/** Nachrichten vom Adapter an den Daemon. */
+export type VoiceInboundMessage =
+  | { type: "hello"; activeCalls: VoiceActiveCall[] }
+  | { type: "call_started"; callId: string; from: string; direction: "inbound" | "outbound"; ts: number }
+  | { type: "transcript"; callId: string; text: string }
+  | { type: "call_ended"; callId: string; reason: string }
+  | { type: "call_error"; callId: string; error: string };
+
+/** Nachrichten vom Daemon an den Adapter. */
+export type VoiceOutboundMessage =
+  | { type: "say"; callId: string; text: string }
+  | { type: "end_call"; callId: string; reason: string }
+  // v1: nur definiert/typiert, Implementierung folgt in v1.1.
+  | { type: "start_call"; callId: string; jid: string; briefing: string };
+
 /* ─── IPC Protocol (Unix socket) ─── */
 
 /**

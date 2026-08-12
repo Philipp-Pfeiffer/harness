@@ -41,6 +41,13 @@ describe("channelAddendum", () => {
     expect(channelAddendum("whatsapp")).toBe(text);
   });
 
+  it("returns a non-null string for the voice origin", () => {
+    const text = channelAddendum("voice");
+    expect(text).toBeTypeOf("string");
+    expect((text as string).length).toBeGreaterThan(0);
+    expect(channelAddendum("voice")).toBe(text);
+  });
+
   it.each<SessionOrigin>(["tui", "cron", "api"])(
     "returns undefined for the %s origin (no addendum)",
     (origin) => {
@@ -95,5 +102,12 @@ describe("channelAddendumAsync (sticker catalog injection)", () => {
   it("returns undefined for non-whatsapp origins", async () => {
     expect(await channelAddendumAsync("tui", STICKER_DIR)).toBeUndefined();
     expect(await channelAddendumAsync("cron", STICKER_DIR)).toBeUndefined();
+  });
+
+  it("returns the voice addendum for the voice origin (no sticker catalog)", async () => {
+    const text = await channelAddendumAsync("voice", STICKER_DIR);
+    expect(text).toBeDefined();
+    expect(text).toContain("TTS-verträglich");
+    expect(text).not.toContain("Sticker");
   });
 });

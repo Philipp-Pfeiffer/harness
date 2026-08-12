@@ -96,6 +96,7 @@ import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
 import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
 import { channelAddendumAsync } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
+import { VoiceChannel, voiceSessionId } from "./voiceChannel.js";
 import type { ChannelPlugin } from "./types.js";
 import {
   HARNESS_REPO_DIR,
@@ -213,6 +214,7 @@ export class DaemonRuntime {
   private memoryService: MemoryService | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
   private ipcServer: Server | null = null;
+  private voiceChannel: VoiceChannel | null = null;
   private readonly startTime: string;
   private readonly startMs: number;
   private readonly errorBuffer = new ErrorRingBuffer();
@@ -337,6 +339,23 @@ export class DaemonRuntime {
       this.handleIpcRequest(req, send, ctx),
     );
     log.info("IPC server listening", { socket: this.paths.socketFile });
+
+    // Start voice channel (thin audio adapter over NDJSON Unix socket)
+    this.voiceChannel = new VoiceChannel({
+      socketPath: this.paths.voiceSocketFile,
+      log: (msg, level) => {
+        if (level === "error") log.error(msg);
+        else if (level === "warn") log.warn(msg);
+        else log.info(msg);
+      },
+      callbacks: {
+        submitTurn: (sessionId, text) => this.submitVoiceTurn(sessionId, text),
+        resolveSession: (callId, callStartTs, from) =>
+          this.resolveVoiceSession(callId, callStartTs, from),
+        endSession: (sessionId) => this.endVoiceSession(sessionId),
+      },
+    });
+    await this.voiceChannel.start();
 
     // Start heartbeat if configured
     if (this.config.heartbeatIntervalSec > 0) {
@@ -544,6 +563,12 @@ export class DaemonRuntime {
       if (this.ipcServer) {
         await stopIpcServer(this.ipcServer, this.paths.socketFile);
         this.ipcServer = null;
+      }
+
+      // Stop voice channel
+      if (this.voiceChannel) {
+        await this.voiceChannel.stop();
+        this.voiceChannel = null;
       }
 
       // Suspend all active sessions — they are resumable, not ended.
@@ -2151,6 +2176,139 @@ export class DaemonRuntime {
     if (entry) {
       entry.mailbox.push(text);
     }
+  }
+
+  /** Voice callId → sessionId. Survives adapter reconnects while the daemon lives. */
+  private readonly voiceCallSessions = new Map<string, string>();
+
+  /**
+   * Resolves or creates a voice session for a call. On a fresh daemon the
+   * map is empty, so a reconnect `hello`/`call_started` creates a new
+   * session (`voice-<callStartTs>`) — accepted behavior, no complex resume.
+   */
+  private async resolveVoiceSession(
+    callId: string,
+    callStartTs: number,
+    from: string,
+  ): Promise<string> {
+    const existing = this.voiceCallSessions.get(callId);
+    if (existing && this.sessions.has(existing)) {
+      return existing;
+    }
+    const session = await createSession(this.paths, {
+      id: voiceSessionId(callStartTs),
+      model: this.model?.name ?? "unknown",
+      title: `Voice: ${from}`,
+      origin: "voice",
+    });
+    const entry = this.createSessionEntry(session, "voice", `Voice: ${from}`);
+    this.sessions.set(session.id, entry);
+    this.voiceCallSessions.set(callId, session.id);
+    return session.id;
+  }
+
+  /**
+   * Submits a voice transcript as a normal turn in the voice session. The
+   * origin "voice" injects the TTS-voice addendum via channelAddendumAsync.
+   */
+  private async submitVoiceTurn(
+    sessionId: string,
+    text: string,
+  ): Promise<{ finalResponse: string }> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const turnCtx = this.agentContextFor(
+      this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!,
+    );
+    const appliedCtx = this.applyTurnModel(turnCtx, entry.modelRef);
+
+    const userMessage = {
+      role: "user" as const,
+      content: text,
+      timestamp: Date.now(),
+    };
+    entry.messages.push(userMessage as Message);
+
+    this.turnActive = true;
+    try {
+      const result = await appliedCtx.agent.run(entry.messages, {
+        metricsRecorder: entry.metricsRecorder,
+        memoryBackend: this.ambientMemoryBackend(appliedCtx.memoryZones),
+        cwd: appliedCtx.cwd ?? undefined,
+        compaction: {
+          paths: this.paths,
+          sessionId,
+          threshold: DEFAULT_COMPACTION_THRESHOLD,
+        },
+        mailbox: entry.mailbox,
+        channelFileSender: this.channelFileSender,
+        channelStickerSender: this.channelStickerSender,
+        stickerLibraryDir: this.paths.stickers,
+        systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
+      });
+
+      entry.turnsCompleted++;
+      entry.lastActiveAt = new Date().toISOString();
+
+      const finalMessage = result.aborted ? "" : result.finalMessage;
+      const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
+      const turnSlice = entry.messages.slice(turnStartIndex);
+      const { tool_calls, tool_results } = extractToolData(turnSlice);
+      const turn = {
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        content: finalMessage,
+        userContent: text,
+        tool_calls,
+        tool_results,
+        tokens: {
+          input: result.usage.inputTokens,
+          output: result.usage.outputTokens,
+          total: result.usage.totalTokens,
+          cacheRead: result.usage.cacheRead,
+          cacheWrite: result.usage.cacheWrite,
+        },
+        timing: {
+          startedAt: new Date().toISOString(),
+          latencyMs: 0,
+        },
+        model: appliedCtx.model?.name ?? "unknown",
+        timestamp: new Date().toISOString(),
+        messages: turnSlice,
+      };
+      entry.session = await recordTurn(entry.session, turn, this.paths);
+      entry.lastUsage = {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        totalTokens: result.usage.totalTokens,
+        cacheRead: result.usage.cacheRead,
+        cacheWrite: result.usage.cacheWrite,
+      };
+
+      return { finalResponse: finalMessage };
+    } finally {
+      this.turnActive = false;
+      void this.performPendingRestartIfNeeded();
+    }
+  }
+
+  /**
+   * Ends a voice session (call ended/error). Idempotent; triggers the
+   * session-end job so the call transcript is protocoled like any other.
+   */
+  private async endVoiceSession(sessionId: string): Promise<void> {
+    for (const [callId, sid] of this.voiceCallSessions) {
+      if (sid === sessionId) this.voiceCallSessions.delete(callId);
+    }
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    const transcriptPath = entry.session.transcriptPath;
+    entry.session = await endSession(entry.session, this.paths);
+    this.sessions.delete(sessionId);
+    this.triggerSessionEndJob(transcriptPath);
   }
 
   /**

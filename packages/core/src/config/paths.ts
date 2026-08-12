@@ -47,6 +47,8 @@ export interface HarnessPaths {
   pidFile: string;
   /** $state/daemon.sock */
   socketFile: string;
+  /** $state/voice.sock — Voice-Adapter IPC (NDJSON, siehe docs/voice-ipc.md). */
+  voiceSocketFile: string;
 }
 
 /**
@@ -93,6 +95,7 @@ export function resolveHarnessPaths(opts?: { home?: string; state?: string }): H
     stickersIncoming: path.join(state, "stickers", "incoming"),
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
+    voiceSocketFile: path.join(state, "voice.sock"),
   };
 }
 
