@@ -1,4 +1,5 @@
 import type { SessionOrigin } from "../core/session.js";
+import { buildStickerCatalog } from "../stickers/library.js";
 
 /*
  * ORIGINAL (German):
@@ -18,6 +19,31 @@ import type { SessionOrigin } from "../core/session.js";
  * - To send files or images, use the send_file tool.`;
  */
 
+/**
+ * Builds the channel system-prompt addendum for a session origin.
+ *
+ * WhatsApp sessions get the formatting rules plus — when the sticker library
+ * has entries — a compact catalog ("name — beschreibung", one line per
+ * sticker, capped at 50). A missing or broken library yields an empty
+ * catalog: nothing is injected, no crash.
+ *
+ * The catalog is read from the sticker library dir. When no library dir is
+ * given (e.g. non-daemon contexts), the addendum falls back to the static
+ * formatting rules only.
+ */
+export async function channelAddendumAsync(
+  origin: SessionOrigin,
+  stickerLibraryDir?: string,
+): Promise<string | undefined> {
+  if (origin !== "whatsapp") return undefined;
+
+  const catalog = stickerLibraryDir
+    ? await buildStickerCatalog(stickerLibraryDir)
+    : "";
+  return catalog ? `${WHATSAPP_ADDENDUM}\n\n${catalog}` : WHATSAPP_ADDENDUM;
+}
+
+/** Legacy sync variant: static addendum (no sticker catalog). */
 export function channelAddendum(origin: SessionOrigin): string | undefined {
   if (origin !== "whatsapp") return undefined;
   return WHATSAPP_ADDENDUM;

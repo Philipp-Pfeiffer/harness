@@ -39,6 +39,10 @@ export interface HarnessPaths {
   browserRuns: string;
   /** $state/whatsapp/ — Baileys Session-Persistence und Auth-State */
   whatsapp: string;
+  /** $state/stickers/ — Sticker-Library (index.json + WebP-Dateien) */
+  stickers: string;
+  /** $state/stickers/incoming/ — unbekannte, empfangene Sticker */
+  stickersIncoming: string;
   /** $state/daemon.pid */
   pidFile: string;
   /** $state/daemon.sock */
@@ -85,6 +89,8 @@ export function resolveHarnessPaths(opts?: { home?: string; state?: string }): H
     inboundMedia: path.join(state, "inbound-media"),
     browserRuns: path.join(state, "browser-runs"),
     whatsapp: path.join(state, "whatsapp"),
+    stickers: path.join(state, "stickers"),
+    stickersIncoming: path.join(state, "stickers", "incoming"),
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
   };
@@ -107,4 +113,6 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.inboundMedia, { recursive: true });
   await mkdir(paths.browserRuns, { recursive: true });
   await mkdir(paths.whatsapp, { recursive: true });
+  await mkdir(paths.stickers, { recursive: true });
+  await mkdir(paths.stickersIncoming, { recursive: true });
 }

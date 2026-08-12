@@ -38,6 +38,7 @@ import { transcribeVoice, type VoiceErrorReason } from "./voice.js";
 import { sendAgentResponse } from "./outbound.js";
 import { WhatsAppInboundProcessor } from "./inbound.js";
 import { getCapabilities } from "../output/capabilities.js";
+import { sha256Hex } from "../stickers/library.js";
 import type { Model, Api } from "@mariozechner/pi-ai";
 
 /** Options for creating the WhatsApp plugin. */
@@ -313,6 +314,7 @@ export async function parseBaileysMessage(
 ): Promise<ChannelInboundEvent | null> {
   const log = opts.log;
   const mediaDir = opts.paths.inboundMedia;
+  const stickerDir = opts.paths.stickers;
   const annotations: string[] = [];
   const mediaArray: InboundMedia[] = [];
   let text = "";
@@ -432,7 +434,28 @@ export async function parseBaileysMessage(
       const media = await downloadMedia(buffer, message.stickerMessage.mimetype ?? "image/webp", "sticker", mediaDir);
       mediaArray.push(media);
       log(`Sticker received from ${source}: ${media.filePath}`, "info");
-      // Return event with media but no text — test mode echoes, normal mode ignores
+
+      // Sticker matching against the local library. Baileys provides the
+      // content hash (fileSha256) on the sticker payload — prefer it; fall
+      // back to hashing the downloaded bytes.
+      const sha256 = message.stickerMessage.fileSha256
+        ? Buffer.from(message.stickerMessage.fileSha256).toString("hex")
+        : sha256Hex(buffer);
+
+      const { matchOrStoreSticker } = await import("../stickers/library.js");
+      const result = await matchOrStoreSticker(stickerDir, sha256, buffer);
+      if (result.kind === "match") {
+        annotations.push(`[Sticker: ${result.record.name} — ${result.record.beschreibung}]`);
+        log(`Sticker matched: ${result.record.name} (${sha256})`, "info");
+      } else {
+        annotations.push(
+          `[Sticker empfangen: unbekannt, gespeichert unter ${result.savedPath}, sha256 ${result.sha256}]`,
+        );
+        log(`Sticker unknown, saved to ${result.savedPath}`, "info");
+      }
+
+      // Return event with media but no text — test mode echoes, normal mode
+      // forwards the annotation to the agent turn.
       return {
         channel: "whatsapp",
         source,
@@ -440,7 +463,7 @@ export async function parseBaileysMessage(
         timestamp,
         media: mediaArray,
         imageBlocks: [],
-        annotations: undefined,
+        annotations: annotations.length > 0 ? annotations : undefined,
         isVoiceTranscript: false,
       };
     } catch (err) {

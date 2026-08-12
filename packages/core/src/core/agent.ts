@@ -122,6 +122,18 @@ export interface RunOptions {
    */
   channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional channel sticker sender. When present, enables the `send_sticker`
+   * tool. Injected by the daemon when a sticker-capable channel plugin is
+   * active for the session.
+   */
+  channelStickerSender?: (sessionId: string, sticker: { name: string; filePath: string }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Optional sticker library directory ($HARNESS_STATE/stickers/). Passed to
+   * the tool context alongside channelStickerSender so send_sticker can
+   * resolve names against index.json.
+   */
+  stickerLibraryDir?: string;
+  /**
    * Optional deferred-restart capability for the `request_restart` tool.
    * Injected by the daemon for running sessions; passed through to the
    * ToolCallContext so the tool can schedule a graceful daemon restart.
@@ -437,7 +449,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, requestRestart, postRestartFollowUp, systemPromptAddendum, cwd } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -473,6 +485,8 @@ export function createAgent(config: AgentConfig): Agent {
         cwd,
         logger: logger,
         channelFileSender,
+        channelStickerSender,
+        stickerLibraryDir,
         requestRestart,
         postRestartFollowUp,
         onStatus: (status) => onEvent?.({ type: "status", status }),

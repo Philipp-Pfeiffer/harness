@@ -94,7 +94,7 @@ import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
 import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
 import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
-import { channelAddendum } from "./channelAddendum.js";
+import { channelAddendumAsync } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import type { ChannelPlugin } from "./types.js";
 import {
@@ -1260,7 +1260,10 @@ export class DaemonRuntime {
                 threshold: DEFAULT_COMPACTION_THRESHOLD,
               },
               mailbox: entry.mailbox,
-              systemPromptAddendum: channelAddendum(entry.origin),
+              systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
+              channelFileSender: this.channelFileSender,
+              channelStickerSender: this.channelStickerSender,
+              stickerLibraryDir: this.paths.stickers,
               onEvent: (event) => {
                 if (!send) return;
                 let streamEvent: TurnStreamEvent | null = null;
@@ -1879,8 +1882,10 @@ export class DaemonRuntime {
         },
         mailbox: entry.mailbox,
         channelFileSender: this.channelFileSender,
+        channelStickerSender: this.channelStickerSender,
+        stickerLibraryDir: this.paths.stickers,
         requestRestart: this.makeRequestRestartCapability(sessionId),
-        systemPromptAddendum: channelAddendum(entry.origin),
+        systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
         onEvent: (event) => {
           if (event.type === "token") {
             progressiveText += event.text;
@@ -2272,6 +2277,43 @@ export class DaemonRuntime {
       const target = formatJid(source);
       await plugin.sendMessage(target, {
         files: [{ path: file.path, mimeType: file.mimeType, caption: file.caption }],
+      });
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: msg };
+    }
+  };
+
+  /**
+   * Channel sticker sender callback for the `send_sticker` tool.
+   * Resolves the session's channel, rejects channels without sticker
+   * support, then sends the sticker file with asSticker: true.
+   */
+  private readonly channelStickerSender = async (
+    sessionId: string,
+    sticker: { name: string; filePath: string },
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const source = this.whatsappSessionToSource.get(sessionId);
+    if (!source) {
+      return { ok: false, error: "Kein Channel-Kontext für diese Session (kein WhatsApp-Chat aktiv)." };
+    }
+
+    const plugin = this.channelPlugins.get("whatsapp");
+    if (!plugin) {
+      return { ok: false, error: "Kein WhatsApp-Plugin aktiv." };
+    }
+
+    const caps = plugin.getFileCapabilities?.();
+    if (caps && !caps.supportsSticker) {
+      return { ok: false, error: "Sticker werden nur auf WhatsApp unterstützt." };
+    }
+
+    try {
+      const { formatJid } = await import("../whatsapp/whitelist.js");
+      const target = formatJid(source);
+      await plugin.sendMessage(target, {
+        files: [{ path: sticker.filePath, mimeType: "image/webp", asSticker: true }],
       });
       return { ok: true };
     } catch (err) {

@@ -52,6 +52,20 @@ export interface ToolCallContext {
    */
   channelFileSender?: (sessionId: string, file: { path: string; mimeType: string; caption?: string }) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional channel sticker sender. When present, enables the `send_sticker`
+   * tool to send a sticker from the local library to the active channel chat.
+   * The daemon injects this together with `stickerLibraryDir` for sessions
+   * backed by a sticker-capable channel; otherwise `send_sticker` returns an
+   * error.
+   */
+  channelStickerSender?: (sessionId: string, sticker: { name: string; filePath: string }) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Optional sticker library directory ($HARNESS_STATE/stickers/). Passed
+   * with `channelStickerSender` so the send_sticker tool can resolve sticker
+   * names against index.json.
+   */
+  stickerLibraryDir?: string;
+  /**
    * Optional deferred-restart capability for the `request_restart` tool.
    * Injected by the daemon for running sessions; the tool calls it with a
    * reason and the daemon schedules the restart for after the turn. When

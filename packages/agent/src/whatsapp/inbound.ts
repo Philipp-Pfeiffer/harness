@@ -161,7 +161,7 @@ export class WhatsAppInboundProcessor {
     const msgType = this.detectMessageType(event);
     const textLen = event.text.length;
     const hasPtt = event.annotations?.some((a) => a.includes("Voice-Nachricht")) ?? false;
-    const hasSticker = msgType === "sticker";
+    const hasSticker = msgType === "sticker" || (event.annotations?.some((a) => a.includes("Sticker")) ?? false);
     const mediaInfo = event.media?.map((m) => `${m.type}:${m.size}`) ?? [];
 
     this.log(
@@ -172,9 +172,12 @@ export class WhatsAppInboundProcessor {
 
     // Echo to whitelisted senders only
     // Voice transcripts: show the transcript text
-    // Stickers: echo sticker file name
+    // Stickers: echo the annotation (matched sticker name or saved file)
     // Other media: echo file name
-    const echoText = msgType === "sticker"
+    const stickerAnnotation = event.annotations?.find((a) => a.includes("Sticker"));
+    const echoText = stickerAnnotation
+      ? `[test] Sticker: ${stickerAnnotation}`
+      : msgType === "sticker"
       ? `[test] Sticker gespeichert: ${event.media?.map((m) => m.filePath.split("/").pop()).join(", ") ?? "kein Download"}`
       : event.isVoiceTranscript && event.text
       ? `[test] Voice transkribiert: ${event.text}`

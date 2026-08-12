@@ -39,3 +39,18 @@ export type { WhatsAppPluginOptions } from "./plugin.js";
 
 // Limits
 export * from "./limits.js";
+
+// Stickers
+export {
+  loadStickerIndex,
+  sha256Hex,
+  matchOrStoreSticker,
+  addSticker,
+  importStickerFile,
+  resolveStickerPath,
+  listStickerNames,
+  buildStickerCatalog,
+  ensureStickerDirs,
+  MAX_CATALOG_ENTRIES,
+} from "../stickers/library.js";
+export type { StickerRecord, StickerIndex, StickerMatchResult, StickerIndexLoad } from "../stickers/library.js";

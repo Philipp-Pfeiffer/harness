@@ -706,6 +706,53 @@ describe("WhatsApp Inbound Processor", () => {
       const text = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
       expect(text).toBe("[WhatsApp · Philipp] Hello\nWorld");
     });
+
+    it("appends sticker annotations to the turn text", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      // Sticker-only event: no text, annotation carries the sticker info.
+      // The flush skips empty turns, so this must reach submitTurn.
+      await processor.processInbound(createEvent("491701234567", "", {
+        media: [{
+          filePath: "/tmp/media/sticker.webp",
+          mimeType: "image/webp",
+          size: 512,
+          type: "sticker",
+        }],
+        annotations: ["[Sticker: pepe — Der Frosch]"],
+      }));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(mock.callbacks.submitTurn).toHaveBeenCalledTimes(1);
+      const text = mock.callbacks.submitTurn.mock.calls[0]![1] as string;
+      expect(text).toContain("[WhatsApp · 491701234567]");
+      expect(text).toContain("[Sticker: pepe — Der Frosch]");
+    });
+
+    it("skips sticker-only turns without annotation (no text, no annotations)", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: false,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "", {
+        media: [{
+          filePath: "/tmp/media/sticker.webp",
+          mimeType: "image/webp",
+          size: 512,
+          type: "sticker",
+        }],
+      }));
+      await vi.advanceTimersByTimeAsync(INBOUND_DEBOUNCE_MS + 100);
+
+      expect(mock.callbacks.submitTurn).not.toHaveBeenCalled();
+    });
   });
 
   // ─── Test Mode ───
@@ -791,6 +838,29 @@ describe("WhatsApp Inbound Processor", () => {
       const logEntry = logCalls.find((l) => l.includes("[test] Inbound"));
       expect(logEntry).toBeDefined();
       expect(logEntry).toContain("type=sticker");
+    });
+
+    it("echoes the sticker annotation when present", async () => {
+      const processor = new WhatsAppInboundProcessor({
+        log: () => {},
+        testMode: true,
+        callbacks: mock.callbacks,
+      });
+
+      await processor.processInbound(createEvent("491701234567", "", {
+        media: [{
+          filePath: "/tmp/media/sticker.webp",
+          mimeType: "image/webp",
+          size: 512,
+          type: "sticker",
+        }],
+        annotations: ["[Sticker: pepe — Der Frosch]"],
+      }));
+
+      expect(mock.callbacks.sendOutbound).toHaveBeenCalledWith(
+        "491701234567",
+        "[test] Sticker: [Sticker: pepe — Der Frosch]",
+      );
     });
   });
 
