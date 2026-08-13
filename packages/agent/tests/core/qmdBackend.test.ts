@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { QmdBackend } from "../../src/core/qmdBackend.js";
+import { QmdBackend, resolveQmdFilepath } from "../../src/core/qmdBackend.js";
 import type { QMDStore, SearchResult } from "@tobilu/qmd";
 
 function makeSearchResult(
@@ -56,6 +56,135 @@ function createFakeStore(overrides?: Partial<QMDStore>): QMDStore {
     ...overrides,
   } as QMDStore;
 }
+
+describe("resolveQmdFilepath", () => {
+  const roots = {
+    memory: "/home/me/harness/memory",
+    sources: "/home/me/harness/sources",
+  };
+
+  it("resolves qmd://memory/foo.md against the memory root", () => {
+    expect(resolveQmdFilepath("qmd://memory/foo.md", roots)).toBe(
+      "/home/me/harness/memory/foo.md"
+    );
+  });
+
+  it("resolves qmd://sources/bar.md against the sources root", () => {
+    expect(resolveQmdFilepath("qmd://sources/bar.md", roots)).toBe(
+      "/home/me/harness/sources/bar.md"
+    );
+  });
+
+  it("passes through qmd:// URIs with an unknown collection", () => {
+    expect(resolveQmdFilepath("qmd://unknown/foo.md", roots)).toBe(
+      "qmd://unknown/foo.md"
+    );
+  });
+
+  it("passes through plain filesystem paths", () => {
+    expect(resolveQmdFilepath("/abs/foo.md", roots)).toBe("/abs/foo.md");
+  });
+
+  it("passes through qmd:// URIs without a collection slash", () => {
+    expect(resolveQmdFilepath("qmd://memory", roots)).toBe("qmd://memory");
+  });
+
+  it("passes through qmd:// URIs with an empty relative path", () => {
+    expect(resolveQmdFilepath("qmd://memory/", roots)).toBe("qmd://memory/");
+  });
+
+  it("passes through qmd:// URIs when no roots are provided", () => {
+    expect(resolveQmdFilepath("qmd://memory/foo.md")).toBe("qmd://memory/foo.md");
+  });
+});
+
+describe("QmdBackend qmd:// path resolution", () => {
+  const roots = {
+    memory: "/home/me/harness/memory",
+    sources: "/home/me/harness/sources",
+  };
+
+  it("vsearch resolves qmd:// filepaths to real paths via collectionRoots", async () => {
+    const fakeResult = makeSearchResult(
+      "qmd://memory/note.md",
+      "My Note",
+      0.95,
+      "Hello world"
+    );
+
+    const store = createFakeStore({
+      searchVector: vi.fn(async () => [fakeResult]),
+    });
+
+    const backend = new QmdBackend(store, { collectionRoots: roots });
+    const hits = await backend.vsearch("hello", 3);
+
+    expect(hits[0].source).toBe("/home/me/harness/memory/note.md");
+  });
+
+  it("query resolves qmd:// filepaths to real paths via collectionRoots", async () => {
+    const lexResult = makeSearchResult(
+      "qmd://memory/lex.md",
+      "Lex Hit",
+      0.8,
+      "Lex body"
+    );
+    const vecResult = makeSearchResult(
+      "qmd://sources/vec.md",
+      "Vec Hit",
+      0.9,
+      "Vec body"
+    );
+
+    const store = createFakeStore({
+      searchLex: vi.fn(async () => [lexResult]),
+      searchVector: vi.fn(async () => [vecResult]),
+    });
+
+    const backend = new QmdBackend(store, { collectionRoots: roots });
+    const hits = await backend.query("hello", 5);
+
+    const sources = hits.map((h) => h.source);
+    expect(sources).toContain("/home/me/harness/memory/lex.md");
+    expect(sources).toContain("/home/me/harness/sources/vec.md");
+  });
+
+  it("getAmbientHints resolves qmd:// paths to real paths", async () => {
+    const fakeResult = makeSearchResult(
+      "qmd://memory/note.md",
+      "My Note",
+      0.92,
+      "First line"
+    );
+
+    const store = createFakeStore({
+      searchVector: vi.fn(async () => [fakeResult]),
+    });
+
+    const backend = new QmdBackend(store, { collectionRoots: roots });
+    const hints = await backend.getAmbientHints("hello");
+
+    expect(hints[0].path).toBe("/home/me/harness/memory/note.md");
+  });
+
+  it("leaves unknown-collection qmd:// filepaths untouched", async () => {
+    const fakeResult = makeSearchResult(
+      "qmd://unknown/foo.md",
+      "Unknown",
+      0.9,
+      "body"
+    );
+
+    const store = createFakeStore({
+      searchVector: vi.fn(async () => [fakeResult]),
+    });
+
+    const backend = new QmdBackend(store, { collectionRoots: roots });
+    const hits = await backend.vsearch("test");
+
+    expect(hits[0].source).toBe("qmd://unknown/foo.md");
+  });
+});
 
 describe("QmdBackend (SDK)", () => {
   it("name is 'qmd'", () => {

@@ -6,11 +6,36 @@ import type { MemoryBackend, MemoryHit, MemoryEntry, AmbientHint } from "@harnes
 export interface QmdBackendOptions {
   /** Default number of results. */
   defaultK?: number;
+  /** Collection name → filesystem root. Used to resolve `qmd://` filepaths. */
+  collectionRoots?: Record<string, string>;
 }
 
-function searchResultToHit(r: SearchResult): MemoryHit {
+/**
+ * Resolves a QMD `qmd://<collection>/<path>` filepath to a real filesystem
+ * path using the collection roots map. Any other filepath passes through
+ * unchanged; unknown collections fall back to the original URI.
+ */
+export function resolveQmdFilepath(
+  filepath: string,
+  roots: Record<string, string> = {}
+): string {
+  if (!filepath.startsWith("qmd://")) return filepath;
+  const rest = filepath.slice("qmd://".length);
+  const slash = rest.indexOf("/");
+  if (slash === -1) return filepath;
+  const collection = rest.slice(0, slash);
+  const relativePath = rest.slice(slash + 1);
+  const root = roots[collection];
+  if (!root || !relativePath) return filepath;
+  return `${root}/${relativePath}`;
+}
+
+function searchResultToHit(
+  r: SearchResult,
+  collectionRoots?: Record<string, string>
+): MemoryHit {
   return {
-    source: r.filepath,
+    source: resolveQmdFilepath(r.filepath, collectionRoots),
     title: r.title || r.filepath,
     score: r.score,
     content: (r.body ?? r.title ?? "").trim(),
@@ -72,6 +97,7 @@ function makeSnippet(body: string | undefined): string | undefined {
 export class QmdBackend implements MemoryBackend {
   readonly name = "qmd";
   private readonly defaultK: number;
+  private readonly collectionRoots: Record<string, string>;
   private dirty = false;
   private flushPending = false;
 
@@ -80,6 +106,7 @@ export class QmdBackend implements MemoryBackend {
     options: QmdBackendOptions = {}
   ) {
     this.defaultK = options.defaultK ?? 5;
+    this.collectionRoots = options.collectionRoots ?? {};
   }
 
   /**
@@ -88,7 +115,7 @@ export class QmdBackend implements MemoryBackend {
    */
   async vsearch(query: string, k = this.defaultK): Promise<MemoryHit[]> {
     const results = await this.store.searchVector(query, { limit: k });
-    return results.map(searchResultToHit);
+    return results.map((r) => searchResultToHit(r, this.collectionRoots));
   }
 
   /**
@@ -104,7 +131,7 @@ export class QmdBackend implements MemoryBackend {
     ]);
 
     const fused = reciprocalRankFusion([lexResults, vecResults]).slice(0, k);
-    return fused.map(searchResultToHit);
+    return fused.map((r) => searchResultToHit(r, this.collectionRoots));
   }
 
   /**
@@ -137,7 +164,7 @@ export class QmdBackend implements MemoryBackend {
       .filter((r) => r.score >= minCosine)
       .map((r) => ({
         title: r.title,
-        path: r.filepath,
+        path: resolveQmdFilepath(r.filepath, this.collectionRoots),
         score: r.score,
         snippet: makeSnippet(r.body),
       }));

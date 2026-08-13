@@ -146,7 +146,12 @@ export class MemoryService {
 
     // Create the real backend immediately — it can serve queries
     // using whatever index state already exists in the SQLite DB.
-    this.backend = new QmdBackend(this.store);
+    this.backend = new QmdBackend(this.store, {
+      collectionRoots: {
+        memory: this.config.memoryPath,
+        sources: this.config.sourcesPath,
+      },
+    });
 
     // Fire warmup (update + embed) in the background.
     this.warmupPromise = this.warmup();
