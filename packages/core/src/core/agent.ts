@@ -1,6 +1,7 @@
 import { stream } from "@mariozechner/pi-ai";
 import { randomUUID } from "node:crypto";
 import { resolveModel, getApiKey } from "./resolveModel.js";
+import type { ResolvedModel } from "./resolveModel.js";
 import { prompt } from "../prompts.js";
 import { shouldCompact, compactSession } from "./compaction.js";
 import type { HarnessPaths } from "../config/paths.js";
@@ -633,9 +634,11 @@ export function createAgent(config: AgentConfig): Agent {
         }
 
         const apiKey = getApiKey(resolvedModel);
-        const streamOptions: { apiKey?: string; temperature?: number; maxTokens?: number } = { apiKey };
+        const reasoningEffort = (resolvedModel as ResolvedModel).reasoningEffort;
+        const streamOptions: { apiKey?: string; temperature?: number; maxTokens?: number; reasoningEffort?: string } = { apiKey };
         if (temperature !== undefined) streamOptions.temperature = temperature;
         if (maxTokens !== undefined) streamOptions.maxTokens = maxTokens;
+        if (reasoningEffort) streamOptions.reasoningEffort = reasoningEffort;
         const providerStartMs = Date.now();
 
         // Re-evaluated per turn — setModel() (e.g. /model pro) may have

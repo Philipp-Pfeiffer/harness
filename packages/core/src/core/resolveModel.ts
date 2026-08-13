@@ -11,7 +11,7 @@ const runtimeGetProviders = getProviders as () => string[];
 
 const runtimeGetModels = getModels as (provider: string) => Model<Api>[];
 
-export type ResolvedModel = Model<Api> & { apiKey?: string; inlineThinking?: boolean; supportsVision?: boolean };
+export type ResolvedModel = Model<Api> & { apiKey?: string; inlineThinking?: boolean; supportsVision?: boolean; reasoningEffort?: string };
 
 export function getApiKey(model: Model<Api>): string | undefined {
   return (model as ResolvedModel).apiKey;
@@ -79,6 +79,7 @@ function buildCustomModel(config: ConfigModel): ResolvedModel {
     apiKey: config.apiKey,
     inlineThinking: config.inlineThinking ?? false,
     supportsVision: config.supportsVision,
+    reasoningEffort: config.reasoningEffort,
   } as ResolvedModel;
 }
 

@@ -334,4 +334,22 @@ describe("Agent retry integration", () => {
     expect(result.finalMessage).toBe("ok");
     expect(stream).toHaveBeenCalledTimes(2);
   });
+
+  // 9. reasoningEffort from the model is passed into stream options
+  it("passes model reasoningEffort into stream options", async () => {
+    const successMsg = makeAssistantMessage([{ type: "text", text: "ok" }], "stop");
+    vi.mocked(stream).mockImplementation(() => mockStream(successMsg));
+
+    const reasoningModel: typeof model & { reasoningEffort?: string } = {
+      ...model,
+      reasoningEffort: "high",
+    };
+    const agent = createAgent({ tools: [], model: reasoningModel, retryPolicy: fastRetryPolicy });
+    await agent.run([makeUserMessage("Hi")]);
+
+    const options = vi.mocked(stream).mock.calls[0]?.[2] as
+      | { reasoningEffort?: string }
+      | undefined;
+    expect(options?.reasoningEffort).toBe("high");
+  });
 });

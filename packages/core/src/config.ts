@@ -21,6 +21,9 @@ export type ConfigModel = {
   baseUrl?: string;
   apiKey?: string;
   reasoning?: boolean;
+  /** Expliziter Reasoning-Effort (verhindert pi-ais `effort:"none"`-Default
+   *  bei OpenRouter+reasoning, der Denken ungetaggt streamt). */
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   /** Enable inline `<think>` tag parsing for providers that embed reasoning
    * in the content stream instead of using `reasoning_content`. */
   inlineThinking?: boolean;

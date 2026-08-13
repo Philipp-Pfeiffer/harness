@@ -77,6 +77,31 @@ describe("resolveModelFromConfig", () => {
     expect(getApiKey(model)).toBe("sk-test");
   });
 
+  it("passes reasoningEffort through when set, undefined when not", () => {
+    const withEffort = resolveModelFromConfig({
+      provider: "openrouter",
+      model: "deepseek/deepseek-r1",
+      alias: "DeepSeek R1",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-test",
+      reasoning: true,
+      reasoningEffort: "high",
+    });
+    expect(withEffort.reasoning).toBe(true);
+    expect(withEffort.reasoningEffort).toBe("high");
+
+    const withoutEffort = resolveModelFromConfig({
+      provider: "openrouter",
+      model: "deepseek/deepseek-r1",
+      alias: "DeepSeek R1",
+      baseUrl: "https://openrouter.ai/api/v1",
+      apiKey: "sk-test",
+      reasoning: true,
+    });
+    expect(withoutEffort.reasoning).toBe(true);
+    expect(withoutEffort.reasoningEffort).toBeUndefined();
+  });
+
   it("throws when a custom provider has no baseUrl", () => {
     expect(() =>
       resolveModelFromConfig({
