@@ -295,7 +295,7 @@ describe("Agent", () => {
 
     const result = await agent.run([makeUserMessage("Keep calling tool")]);
 
-    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Turn-Limit von 2 Iterationen erreicht.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 2 });
+    expect(result).toEqual({ aborted: false, turns: 2, finalMessage: "Turn-Limit von 2 Iterationen erreicht.", usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 }, toolCallCount: 2, error: { type: "max_turns_exhausted", message: "Turn-Limit von 2 Iterationen erreicht." } });
     expect(stream).toHaveBeenCalledTimes(2);
   });
 
