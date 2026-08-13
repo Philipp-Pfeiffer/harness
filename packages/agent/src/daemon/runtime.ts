@@ -864,6 +864,7 @@ export class DaemonRuntime {
             filePath: "(hook)",
           }
         : jobOrAgent;
+    const agent = job.agent ?? "default";
 
     const created = await this.handleIpcRequest({
       type: "create-session",
@@ -885,6 +886,19 @@ export class DaemonRuntime {
     });
     if (resp.type === "error") {
       throw new Error(resp.message);
+    }
+
+    // A cron session is single-turn: after a successful turn it is ended
+    // (marker + index) like any other session. The session-end agent only
+    // gets its own marker — it must not trigger another session-end job,
+    // which would recurse forever.
+    if (agent === "session-end") {
+      await this.closeSession(created.sessionId);
+    } else {
+      const transcriptPath = await this.closeSession(created.sessionId);
+      if (transcriptPath !== null) {
+        this.triggerSessionEndJob(transcriptPath);
+      }
     }
     return created.sessionId;
   }
@@ -933,6 +947,28 @@ export class DaemonRuntime {
         });
       },
     );
+  }
+
+  /**
+   * Ends a session: writes the end marker, updates the index and removes
+   * the in-memory entry. Idempotent — an entry whose session is already
+   * ended is left untouched. Returns the transcript path for callers that
+   * need it, or null if the session is unknown.
+   */
+  private async closeSession(sessionId: string): Promise<string | null> {
+    const entry = this.sessions.get(sessionId);
+    if (entry) {
+      if (entry.session.status === "ended") return null;
+      const transcriptPath = entry.session.transcriptPath;
+      entry.session = await endSession(entry.session, this.paths);
+      this.sessions.delete(sessionId);
+      return transcriptPath;
+    }
+    const loaded = await loadSession(sessionId, this.paths);
+    if (!loaded) return null;
+    if (loaded.session.status === "ended") return null;
+    await endSession(loaded.session, this.paths);
+    return loaded.session.transcriptPath;
   }
 
   /**
@@ -1453,26 +1489,14 @@ export class DaemonRuntime {
       case "end-session": {
         const sessionId = req.sessionId;
         try {
-          // If session is in memory, end it and remove from active map
-          const entry = this.sessions.get(sessionId);
-          if (entry) {
-            const transcriptPath = entry.session.transcriptPath;
-            entry.session = await endSession(entry.session, this.paths);
-            this.sessions.delete(sessionId);
-            const log = this.logger.child("session");
+          const transcriptPath = await this.closeSession(sessionId);
+          const log = this.logger.child("session");
+          if (transcriptPath !== null) {
             log.info("session ended via IPC", { id: sessionId });
             this.triggerSessionEndJob(transcriptPath);
           } else {
             // Session not in memory — end it on disk directly
-            const loaded = await loadSession(sessionId, this.paths);
-            if (loaded) {
-              await endSession(loaded.session, this.paths);
-              const log = this.logger.child("session");
-              log.info("session ended via IPC (disk-only)", { id: sessionId });
-              this.triggerSessionEndJob(loaded.session.transcriptPath);
-            } else {
-              return { type: "error", message: `Session not found: ${sessionId}`, sessionId };
-            }
+            log.info("session ended via IPC (disk-only)", { id: sessionId });
           }
           return { type: "session-ended", sessionId };
         } catch (err) {
@@ -2168,10 +2192,10 @@ export class DaemonRuntime {
 
     const oldEntry = this.sessions.get(oldSessionId);
     if (oldEntry) {
-      const transcriptPath = oldEntry.session.transcriptPath;
-      await endSession(oldEntry.session, this.paths);
-      this.sessions.delete(oldSessionId);
-      this.triggerSessionEndJob(transcriptPath);
+      const transcriptPath = await this.closeSession(oldSessionId);
+      if (transcriptPath !== null) {
+        this.triggerSessionEndJob(transcriptPath);
+      }
     }
     this.whatsappSessionToSource.delete(oldSessionId);
     this.whatsappSessions.delete(phone);
@@ -2457,10 +2481,10 @@ export class DaemonRuntime {
     this.voiceCallSessionsBySession.delete(sessionId);
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
-    const transcriptPath = entry.session.transcriptPath;
-    entry.session = await endSession(entry.session, this.paths);
-    this.sessions.delete(sessionId);
-    this.triggerSessionEndJob(transcriptPath);
+    const transcriptPath = await this.closeSession(sessionId);
+    if (transcriptPath !== null) {
+      this.triggerSessionEndJob(transcriptPath);
+    }
   }
 
   /**
@@ -3718,18 +3742,6 @@ export class DaemonRuntime {
       const entry = this.sessions.get(sessionId);
       const oldOrigin = entry?.origin ?? "api";
       const oldTitle = entry?.title ?? "Channel Session";
-      if (entry) {
-        const transcriptPath = entry.session.transcriptPath;
-        entry.session = await endSession(entry.session, this.paths);
-        this.sessions.delete(sessionId);
-        this.triggerSessionEndJob(transcriptPath);
-      } else {
-        const loaded = await loadSession(sessionId, this.paths);
-        if (loaded) {
-          await endSession(loaded.session, this.paths);
-          this.triggerSessionEndJob(loaded.session.transcriptPath);
-        }
-      }
       const session = await createSession(this.paths, {
         model: this.model?.name ?? "unknown",
         title: oldTitle,
@@ -3753,18 +3765,9 @@ export class DaemonRuntime {
 
     // /end — end the current session explicitly
     if (trimmed === "/end") {
-      const entry = this.sessions.get(sessionId);
-      if (entry) {
-        const transcriptPath = entry.session.transcriptPath;
-        entry.session = await endSession(entry.session, this.paths);
-        this.sessions.delete(sessionId);
+      const transcriptPath = await this.closeSession(sessionId);
+      if (transcriptPath !== null) {
         this.triggerSessionEndJob(transcriptPath);
-      } else {
-        const loaded = await loadSession(sessionId, this.paths);
-        if (loaded) {
-          await endSession(loaded.session, this.paths);
-          this.triggerSessionEndJob(loaded.session.transcriptPath);
-        }
       }
       const log = this.logger.child("session");
       log.info("session ended via /end", { id: sessionId });
@@ -3835,10 +3838,10 @@ export class DaemonRuntime {
       const currentEntry = this.sessions.get(sessionId);
       const oldPhone = this.whatsappSessionToSource.get(sessionId);
       if (currentEntry) {
-        const transcriptPath = currentEntry.session.transcriptPath;
-        currentEntry.session = await endSession(currentEntry.session, this.paths);
-        this.sessions.delete(sessionId);
-        this.triggerSessionEndJob(transcriptPath);
+        const transcriptPath = await this.closeSession(sessionId);
+        if (transcriptPath !== null) {
+          this.triggerSessionEndJob(transcriptPath);
+        }
       }
       if (oldPhone) {
         this.whatsappSessionToSource.delete(sessionId);

@@ -412,8 +412,34 @@ describe("cron jobs with agent field", () => {
       content: "Distill today's notes.",
     });
 
-    // The cron session is registered under the job's profile.
-    expect(internals.sessions.get(sessionId)!.profile).toBe("worker");
+    // The cron session is no longer in memory — it was closed after the
+    // successful turn. The closed (ended) entry is visible via list-sessions.
+    expect(internals.sessions.has(sessionId)).toBe(false);
+    const listed = await internals.handleIpcRequest({ type: "list-sessions" });
+    if (listed.type !== "sessions-listed") {
+      throw new Error(`unexpected response: ${listed.type}`);
+    }
+    const summary = listed.sessions.find((s) => s.sessionId === sessionId);
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBe("ended");
+  });
+
+  it("ends the cron session after a successful turn", async () => {
+    const worker = makeProfile({ name: "worker", body: "WORKER PERSONA" });
+    const { runtime, internals } = makeRuntime([worker]);
+
+    const warm = await internals.handleIpcRequest({
+      type: "create-session",
+      profile: "worker",
+    });
+    expect(warm.type).toBe("session-created");
+    internals.profileAgents.get("worker")!.agent = stubAgent([]);
+
+    const sessionId = await runtime.runCronAgentJob(AGENT_JOB);
+    expect(sessionId).toBeTruthy();
+
+    // The in-memory entry was removed — the session is closed.
+    expect(internals.sessions.has(sessionId)).toBe(false);
   });
 
   it("fails cleanly when the job's profile is unknown", async () => {

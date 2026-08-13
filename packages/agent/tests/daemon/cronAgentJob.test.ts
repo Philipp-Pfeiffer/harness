@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -12,8 +12,9 @@ import type { CronJob } from "../../src/daemon/jobs.js";
 
 /**
  * Runtime-level test for agent cron jobs: runCronAgentJob must create a
- * new session with origin "cron" and run the job body as its first turn.
- * The agent is stubbed (no LLM), everything else is the real code path.
+ * new session with origin "cron", run the job body as its first turn and
+ * close the session afterwards (marker + index status "ended"). The
+ * agent is stubbed (no LLM), everything else is the real code path.
  */
 
 interface RuntimeInternals {
@@ -140,6 +141,40 @@ describe("DaemonRuntime.runCronAgentJob", () => {
     expect(summary!.title).toBe("cron: daily-report");
   });
 
+  it("ends the cron session after a successful turn (marker + index ended)", async () => {
+    const { runtime, internals } = makeRuntime();
+    internals.agent = stubAgent([]);
+    internals.model = { name: "test-model" };
+
+    const sessionId = await runtime.runCronAgentJob(AGENT_JOB);
+    expect(sessionId).toBeTruthy();
+
+    const listed = await internals.handleIpcRequest({ type: "list-sessions" });
+    if (listed.type !== "sessions-listed") {
+      throw new Error(`unexpected response: ${listed.type}`);
+    }
+    const summary = listed.sessions.find((s) => s.sessionId === sessionId);
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBe("ended");
+
+    const transcript = await readFile(
+      join(
+        process.env.HARNESS_STATE!,
+        "sessions",
+        sessionId.slice(0, 8).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3"),
+        `${sessionId}.jsonl`,
+      ),
+      "utf-8",
+    );
+    const lines = transcript.trim().split("\n");
+    const marker = JSON.parse(lines[lines.length - 1]!) as {
+      type: string;
+      endedAt: string;
+    };
+    expect(marker.type).toBe("session-end");
+    expect(marker.endedAt).toBeTruthy();
+  });
+
   it("rejects when the daemon agent is not initialized", async () => {
     const { runtime } = makeRuntime();
     await expect(runtime.runCronAgentJob(AGENT_JOB)).rejects.toThrow(
@@ -182,6 +217,46 @@ describe("DaemonRuntime.runCronAgentJob overload", () => {
     expect(firstMsg.role).toBe("user");
     expect(firstMsg.content).toContain("/tmp/x/session.jsonl");
     expect(firstMsg.content).toContain(".protocol.md");
+  });
+
+  it("ends its own session but does not trigger another session-end job", async () => {
+    const { runtime, internals } = makeRuntime();
+    const captured: Array<Array<Record<string, unknown>>> = [];
+    internals.agent = stubAgent(captured);
+    internals.model = { name: "test-model" };
+    internals.profiles.set("session-end", {
+      name: "session-end",
+      frontmatter: { name: "session-end", skills: false },
+      body: "Persona of session-end.",
+      filePath: "/agents/session-end/agent.md",
+      dir: "/agents/session-end",
+      builtin: true,
+    });
+    internals.profileAgents.set("session-end", {
+      agent: stubAgent(captured),
+      model: { name: "test-model" },
+      tools: [],
+      prompt: "session-end prompt",
+      memoryZones: [],
+      cwd: null,
+    });
+
+    const sessionId = await runtime.runCronAgentJob("session-end", {
+      transcript: "/tmp/x/session.jsonl",
+    });
+
+    const listed = await internals.handleIpcRequest({ type: "list-sessions" });
+    if (listed.type !== "sessions-listed") {
+      throw new Error(`unexpected response: ${listed.type}`);
+    }
+    const summary = listed.sessions.find((s) => s.sessionId === sessionId);
+    expect(summary).toBeDefined();
+    expect(summary!.status).toBe("ended");
+
+    // The session-end hook must NOT run again for its own session —
+    // no recursion, no second runCronAgentJob invocation.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(captured).toHaveLength(1);
   });
 
   it("throws when the ad-hoc job input is missing", async () => {
@@ -322,6 +397,9 @@ describe("DaemonRuntime.runCronAgentJob profile cwd", () => {
   });
 });
 
+// Fire-and-forget session-end hook (triggerSessionEndJob) — this test
+// lives in its own file-level scope so its stub runs do not leak into
+// the "ends its own session" assertions above.
 describe("session-end hook after end-session", () => {
   it("starts the session-end agent after a session ends (fire-and-forget)", async () => {
     const { runtime, internals } = makeRuntime();
