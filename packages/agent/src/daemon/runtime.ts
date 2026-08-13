@@ -44,6 +44,8 @@ import {
   type MemoryZone,
   type MemoryBackend,
   type Logger,
+  type AsyncAgentRunner,
+  createAsyncAgentRunner,
 } from "@harness/core";
 import { processSupervisor } from "@harness/core";
 import { buildStatusSummary, formatStatusSummary } from "../core/statusSummary.js";
@@ -219,6 +221,8 @@ export class DaemonRuntime {
   private browserConfig: BrowserConfig | undefined;
   private imageConfig: ImageConfig | undefined;
   private webConfig: WebConfig | undefined;
+  /** Async sub-agent runner (created at init, injected into the subagent tool). */
+  private subagentRunner: AsyncAgentRunner | null = null;
   private memoryService: MemoryService | null = null;
   private readonly sessions = new Map<string, SessionEntry>();
   private ipcServer: Server | null = null;
@@ -1313,6 +1317,7 @@ export class DaemonRuntime {
               channelStickerSender: this.channelStickerSender,
               stickerLibraryDir: this.paths.stickers,
               voiceCallStarter: this.voiceCallStarter,
+              subagentRunner: this.subagentRunner ?? undefined,
               onEvent: (event) => {
                 if (!send) return;
                 let streamEvent: TurnStreamEvent | null = null;
@@ -1638,6 +1643,16 @@ export class DaemonRuntime {
     });
 
     // Load tools (with skills)
+    this.subagentRunner = createAsyncAgentRunner({
+      agentRunsDir: this.paths.agentRuns,
+      loadedTools: this.allTools,
+      models: this.configModels,
+      defaultModel: this.configDefaultModel,
+      injectSystemEvent: (event) => { void this.injectSystemEvent(event); },
+      resolveReportTarget: (sessionId) =>
+        this.whatsappSessionToSource.get(sessionId) ?? this.config.whatsapp?.ownerPhone,
+      logger: this.makeToolLogger(),
+    });
     this.allTools = loadTools({
       memoryBackend: this.memoryService?.getBackend(),
       webConfig: this.webConfig,
@@ -1655,6 +1670,9 @@ export class DaemonRuntime {
         config: this.imageConfig,
         defaultModel: this.configDefaultModel,
         models: this.configModels,
+      },
+      subagent: {
+        runner: this.subagentRunner,
       },
     });
     const defaultZones = defaultProfile?.frontmatter.memory ?? ALL_MEMORY_ZONES;
@@ -1945,6 +1963,7 @@ export class DaemonRuntime {
         stickerLibraryDir: this.paths.stickers,
         requestRestart: this.makeRequestRestartCapability(sessionId),
         voiceCallStarter: this.voiceCallStarter,
+        subagentRunner: this.subagentRunner ?? undefined,
         systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
         onEvent: (event) => {
           if (event.type === "token") {
@@ -2351,6 +2370,7 @@ export class DaemonRuntime {
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
         voiceCallStarter: this.voiceCallStarter,
+        subagentRunner: this.subagentRunner ?? undefined,
         // Capability NUR in Voice-Sessions injizieren: Das Tool schreibt in
         // die Main-Session des Owners und darf nur aus einem Call heraus
         // verwendet werden. Alle anderen Session-Typen bekommen einen
