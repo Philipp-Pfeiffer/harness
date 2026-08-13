@@ -254,6 +254,13 @@ export interface VoiceChannelCallbacks {
    * the daemon started via `startCall()`.
    */
   onOutboundCallEnded?: (callId: string, sessionId: string, reason: string) => Promise<void>;
+  /**
+   * Fired after the final `say` for a turn was pushed to the adapter (or,
+   * for an empty turn, without any `say`). Lets the daemon finalize a
+   * deferred hangup (`pendingHangup`) only once the farewell `say` has been
+   * queued — this guarantees `end_call` is never sent before the farewell.
+   */
+  afterFinalSay?: (callId: string, sessionId: string, finalResponse: string) => Promise<void> | void;
 }
 
 /* ─── IPC Protocol (Unix socket) ─── */

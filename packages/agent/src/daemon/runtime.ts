@@ -105,7 +105,6 @@ import {
   findRegistryContact,
   checkAndRecordRateLimit,
 } from "./voiceOutbound.js";
-import { resolveVoiceContact } from "./voiceRegistry.js";
 import type { ChannelPlugin } from "./types.js";
 import {
   HARNESS_REPO_DIR,
