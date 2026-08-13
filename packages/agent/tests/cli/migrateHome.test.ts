@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import { migrateHome } from "../../src/cli/migrateHome.js";
@@ -30,9 +30,9 @@ describe("migrateHome", () => {
   });
 
   afterEach(() => {
-    try { rmdirSync(projectRoot, { recursive: true }); } catch {}
-    try { rmdirSync(homeDir, { recursive: true }); } catch {}
-    try { rmdirSync(stateDir, { recursive: true }); } catch {}
+    try { rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+    try { rmSync(homeDir, { recursive: true, force: true }); } catch {}
+    try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
   });
 
   it("dry-run shows planned moves without executing", async () => {

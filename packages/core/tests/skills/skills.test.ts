@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -70,7 +70,7 @@ beforeEach(() => {
 
 afterEach(() => {
   try {
-    rmdirSync(baseDir, { recursive: true });
+    rmSync(baseDir, { recursive: true, force: true });
   } catch {
     // ignore
   }

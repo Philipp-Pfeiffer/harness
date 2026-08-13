@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmdirSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HarnessPaths } from "@harness/core";
@@ -66,7 +66,7 @@ describe("Session resume after daemon restart", () => {
 
   afterEach(() => {
     try {
-      rmdirSync(baseDir, { recursive: true });
+      rmSync(baseDir, { recursive: true, force: true });
     } catch {
       // ignore
     }
@@ -273,7 +273,7 @@ describe("lastTurnUsage from persisted transcript", () => {
 
   afterEach(() => {
     try {
-      rmdirSync(baseDir, { recursive: true });
+      rmSync(baseDir, { recursive: true, force: true });
     } catch {
       // ignore
     }
