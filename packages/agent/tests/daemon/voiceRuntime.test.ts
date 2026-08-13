@@ -110,6 +110,10 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
     async run(messages: Message[], options: { systemPromptAddendum?: string }): Promise<RunResult> {
       opts.addendumRecorder(options.systemPromptAddendum);
       agentRunMessages.push({ sessionId: "", callId: "", text: messages.at(-1)?.content?.toString() ?? "", addendum: options.systemPromptAddendum });
+      // Mimic the real agent loop: it appends the assistant answer to the
+      // passed message array (onInboundVoiceRinging relies on this to
+      // persist the greeting).
+      messages.push({ role: "assistant", content: "Antwort im Anruf", timestamp: Date.now() });
       return {
         aborted: false,
         turns: 1,
@@ -526,17 +530,26 @@ describe("Voice turn flow in DaemonRuntime", () => {
     expect(infoCalls.some((c) => c.includes("inbound call ringing — Begrüßung mit Anrufer-Kontext: +499999999999"))).toBe(true);
   });
 
-  it("inbound ringing: KEIN Fake-User-Turn — Opening läuft mit System-Addendum allein", async () => {
+  it("inbound ringing: Opening-Turn bekommt synthetischen User-Turn und persistiert die Begrüßung", async () => {
     const addenda: Array<string | undefined> = [];
     const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: (a) => addenda.push(a) });
     internals.voiceChannel = { say() {}, endCall() {} };
     await internals.onInboundVoiceRinging("c-inbound", "+4915112345678", 1700000000003);
 
-    // Der Agent lief genau EINMAL, und zwar ohne user-Message:
+    // Der Agent lief genau EINMAL, und zwar mit dem synthetischen
+    // User-Turn als letzter Message (kein leerer Opening-Turn mehr):
     expect(agentRunMessages).toHaveLength(1);
-    expect(agentRunMessages[0]?.text).toBe(""); // messages.at(-1) == kein user-content
+    expect(agentRunMessages[0]?.text).toContain("ruft gerade an");
+    expect(agentRunMessages[0]?.text).toContain("+4915112345678");
     expect(agentRunMessages[0]?.addendum).toContain("ruft gerade an");
     expect(agentRunMessages[0]?.addendum).toContain("+4915112345678"); // Nummer im Addendum (keine Registry)
     expect(addenda.some((a) => a?.includes("TTS-verträglich"))).toBe(true);
+
+    // Begrüßung wird persistiert: Session-Entry hat einen abgeschlossenen
+    // Turn und die Messages enthalten User-Turn + Assistant-Antwort.
+    const entry = internals.sessions.get(internals.voiceCallSessions.get("c-inbound")!);
+    expect(entry?.turnsCompleted).toBe(1);
+    expect(entry?.messages.some((m) => m.role === "user" && String(m.content).includes("[Eingehender Anruf] +4915112345678 ruft gerade an"))).toBe(true);
+    expect(entry?.messages.some((m) => m.role === "assistant" && String(m.content).includes("Antwort im Anruf"))).toBe(true);
   });
 });

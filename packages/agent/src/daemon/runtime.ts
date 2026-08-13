@@ -2322,9 +2322,9 @@ export class DaemonRuntime {
   /**
    * Inbound-Cold-Start (Accept-After-Ready): der Adapter meldet
    * `call_ringing` VOR dem Accept. Hier wird die Begrüßung generiert
-   * (Anrufer-Name via Registry → System-Addendum, KEIN Fake-User-Turn) und
-   * als `say` an den Adapter geschickt — der puffert das Audio, nimmt den
-   * Call erst an, wenn die Begrüßung gepuffert ist (oder der Fallback-
+   * (Anrufer-Name via Registry → synthetischer User-Turn + System-Addendum)
+   * und als `say` an den Adapter geschickt — der puffert das Audio, nimmt
+   * den Call erst an, wenn die Begrüßung gepuffert ist (oder der Fallback-
    * Timeout abläuft) und sendet dann `call_started` (accepted).
    *
    * Die Session wird bereits beim Ringing angelegt (callToSession/ts).
@@ -2353,12 +2353,23 @@ export class DaemonRuntime {
     );
     const appliedCtx = this.applyTurnModel(turnCtx, entry.modelRef);
 
-    // KEIN Fake-User-Turn: der Opening-Turn läuft ohne user-Message mit
-    // einem System-Addendum, das Name + Kürze erzwingt (max. 1 Satz).
+    // Synthetischer User-Turn für den Opening-Turn: Ohne eine user-Message
+    // fällt das Modell (DeepSeek Flash) in sein "leere/abgeschnittene
+    // Nachricht"-Verhalten zurück und begrüßt nicht zuverlässig. Der Turn
+    // ist ephemer — er läuft auf der LOKALEN Kopie `openingMessages`, damit
+    // `entry.messages` nicht vor dem Run mit einem Fake-User-Turn
+    // verschmutzt wird. Persistiert wird erst NACH dem Run (Begrüßung).
+    const openingUserMessage = {
+      role: "user" as const,
+      content: `[Eingehender Anruf] ${callerName} ruft gerade an. Begrüße den Anrufer sofort kurz und warte dann auf ihn.`,
+      timestamp: Date.now(),
+    };
+    const openingMessages: Message[] = [...entry.messages, openingUserMessage as Message];
+
     this.currentVoiceSessionCaller = { sessionId };
     this.turnActive = true;
     try {
-      const result = await appliedCtx.agent.run(entry.messages, {
+      const result = await appliedCtx.agent.run(openingMessages, {
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(appliedCtx.memoryZones),
         cwd: appliedCtx.cwd ?? undefined,
@@ -2393,6 +2404,43 @@ export class DaemonRuntime {
         voiceLog.info(`voice-timing: inbound_opening_say callId=${callId} sessionId=${sessionId}`);
         // `say` VOR `call_started` (accepted) — der Adapter puffert es.
         this.voiceChannel?.say(callId, finalMessage);
+
+        // Begrüßung persistieren (spiegelt submitVoiceTurn): User-Turn +
+        // die vom agent.run angehängte Assistant-Antwort in entry.messages
+        // übernehmen und einen Turn aufzeichnen, damit das Modell die
+        // Begrüßung im nächsten Turn erinnert und sie in der Session-Datei
+        // und den Call-Logs auftaucht.
+        const turnSlice = openingMessages.slice(entry.messages.length);
+        entry.messages.push(openingUserMessage as Message);
+        const openingAssistant = openingMessages.at(-1);
+        if (openingAssistant && openingAssistant.role === "assistant") {
+          entry.messages.push(openingAssistant);
+        }
+        const turn = {
+          id: crypto.randomUUID(),
+          role: "assistant" as const,
+          content: finalMessage,
+          userContent: `[Eingehender Anruf] ${callerName}`,
+          tool_calls: [],
+          tool_results: [],
+          tokens: {
+            input: result.usage.inputTokens,
+            output: result.usage.outputTokens,
+            total: result.usage.totalTokens,
+            cacheRead: result.usage.cacheRead,
+            cacheWrite: result.usage.cacheWrite,
+          },
+          timing: {
+            startedAt: new Date().toISOString(),
+            latencyMs: 0,
+          },
+          model: appliedCtx.model?.name ?? "unknown",
+          timestamp: new Date().toISOString(),
+          messages: turnSlice,
+        };
+        entry.session = await recordTurn(entry.session, turn, this.paths);
+        entry.turnsCompleted++;
+        entry.lastActiveAt = new Date().toISOString();
       } else {
         voiceLog.warn("inbound ringing: Agent lieferte leere Begrüßung", { callId, sessionId });
       }
