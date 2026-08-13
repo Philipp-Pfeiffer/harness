@@ -1908,10 +1908,6 @@ export class DaemonRuntime {
     // resolved per session from the config.
     const turnModel = turnCtx.model;
     const visionCapable = turnModel ? this.modelSupportsVision(turnModel) : false;
-    // Reasoning-capable models stream untagged reasoning as text_delta
-    // before any visible answer. Progressive sends of that text would leak
-    // the reasoning to WhatsApp — disable them for such models.
-    const turnReasoning = turnModel?.reasoning === true;
 
     // Build the user message with optional image content blocks.
     // pi-ai's content-block contract is { type: "image", data, mimeType }
@@ -2013,11 +2009,13 @@ export class DaemonRuntime {
             // Text before a tool call ships immediately; the buffer is
             // cleared. Any text after the last tool call is the final
             // response and is sent once by the inbound processor.
-            // For reasoning-capable models the pre-tool text is untagged
-            // reasoning — never send it progressively (leak prevention).
-            if (!turnReasoning) {
-              queueProgressiveSend(progressiveText);
-            }
+            // Reasoning never reaches this buffer: pi-ai parses
+            // `reasoning_content` into separate `thinking` events, which
+            // the agent routes as `thinking` (never `token`). A blanket
+            // suppression for reasoning-capable models was removed — it
+            // swallowed legitimate pre-tool messages (e.g. "Ich delegiere
+            // das…") for models like DeepSeek Pro.
+            queueProgressiveSend(progressiveText);
             progressiveText = "";
           }
         },
@@ -2433,10 +2431,6 @@ export class DaemonRuntime {
       this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!,
     );
     const appliedCtx = this.applyTurnModel(turnCtx, entry.modelRef);
-    // Reasoning-capable models stream untagged reasoning as text_delta
-    // before any visible answer. Progressive speech of that text would leak
-    // the reasoning into the call — disable it for such models.
-    const turnReasoning = appliedCtx.model?.reasoning === true;
 
     // Outbound-Grußverhalten: Beim ERSTEN Final-Transkript eines
     // Outbound-Calls wird das vorgemerkte Briefing als Kontext in diesen
@@ -2519,11 +2513,14 @@ export class DaemonRuntime {
           if (event.type === "token") {
             progressiveText += event.text;
           } else if (event.type === "tool_call_start") {
-            // For reasoning-capable models the pre-tool text is untagged
-            // reasoning — never speak it progressively (leak prevention).
-            if (!turnReasoning) {
-              queueProgressiveSay(progressiveText);
-            }
+            // Text before a tool call is spoken immediately; the buffer is
+            // cleared. Reasoning never reaches this buffer: pi-ai parses
+            // `reasoning_content` into separate `thinking` events, which
+            // the agent routes as `thinking` (never `token`). The blanket
+            // suppression for reasoning-capable models was removed — it
+            // silenced legitimate pre-tool speech for models like
+            // DeepSeek Pro.
+            queueProgressiveSay(progressiveText);
             progressiveText = "";
           }
         },

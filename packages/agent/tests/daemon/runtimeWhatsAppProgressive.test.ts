@@ -210,6 +210,26 @@ describe("WhatsApp progressive outbound", () => {
     expect(sendMock).not.toHaveBeenCalled();
   });
 
+  it("sends pre-tool text progressively even for reasoning-capable models", async () => {
+    const { internals, sendMock, sessionId } = await makeRuntime([
+      { type: "token", text: "Zwischennachricht vor dem Tool." },
+      { type: "tool_call_start", name: "readFile" },
+      { type: "tool_call_done", name: "readFile" },
+    ]);
+    // Reasoning-capable model: the old blanket suppression swallowed the
+    // pre-tool message entirely. It must be delivered regardless — actual
+    // reasoning arrives as separate `thinking` events (routed by the agent
+    // as `thinking`, never as `token`), so the progressive buffer only
+    // ever contains legitimate assistant text.
+    internals.model = { ...createFakeModel(), reasoning: true } as Model<Api>;
+
+    const result = await internals.submitWhatsAppTurn(sessionId, "Test");
+
+    expect(result.finalResponse).toBe("Finale Antwort");
+    const sentTexts = sendMock.mock.calls.map((c) => c[1]!.text);
+    expect(sentTexts).toEqual(["Zwischennachricht vor dem Tool."]);
+  });
+
   it("keeps the final response empty when no channel plugin is registered", async () => {
     const { internals, sessionId } = await makeRuntime([
       { type: "token", text: "Zwischentext" },
