@@ -17,6 +17,7 @@ import type {
   AssistantMessage,
 } from "@mariozechner/pi-ai";
 import type { Tool, ToolCallContext, ToolResult } from "../tools/types.js";
+import type { SubagentRunner } from "../tools/types.js";
 import type { Mailbox } from "./mailbox.js";
 import { formatMemoryHint } from "./memoryBackend.js";
 import type { MemoryBackend } from "./memoryBackend.js";
@@ -167,6 +168,13 @@ export interface RunOptions {
    * error.
    */
   voiceHangUp?: () => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Optional async sub-agent runner for the `subagent` tool. Injected by the
+   * daemon; passed through to the ToolCallContext so the tool can launch
+   * background sub-agents. When absent (no daemon), `subagent` returns an
+   * error.
+   */
+  subagentRunner?: SubagentRunner;
   /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
@@ -481,7 +489,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, voiceReportToMainSession, voiceHangUp, systemPromptAddendum, cwd } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, voiceReportToMainSession, voiceHangUp, subagentRunner, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -524,6 +532,7 @@ export function createAgent(config: AgentConfig): Agent {
         voiceCallStarter,
         voiceReportToMainSession,
         voiceHangUp,
+        subagentRunner,
         onStatus: (status) => onEvent?.({ type: "status", status }),
         signal,
       };
@@ -1112,8 +1121,7 @@ export function createAgent(config: AgentConfig): Agent {
         cacheRead: 0,
         cacheWrite: 0,
       });
-      return { aborted: false, turns: maxIterations, finalMessage: `Turn-Limit von ${maxIterations} Iterationen erreicht.`, usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount };
-
+      return { aborted: false, turns: maxIterations, finalMessage: `Turn-Limit von ${maxIterations} Iterationen erreicht.`, usage: { inputTokens: totalInput, outputTokens: totalOutput, totalTokens, cacheRead: totalCacheRead, cacheWrite: totalCacheWrite }, toolCallCount, error: { type: "max_turns_exhausted", message: `Turn-Limit von ${maxIterations} Iterationen erreicht.` } };
       } catch (err) {
         // Top-level crash catch: any unexpected exception in the loop
         // is injected as a tool_error annotation and the turn returns

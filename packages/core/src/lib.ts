@@ -22,7 +22,7 @@ export {
 export { ThinkingStreamTransformer, type ThinkingStreamOutput } from "./core/thinkingStream.js";
 
 // Tool types and individual tools
-export { type Tool, type ToolCallContext, type ToolResult, ok, err } from "./tools/types.js";
+export { type Tool, type ToolCallContext, type SubagentRunner, type ToolResult, ok, err } from "./tools/types.js";
 export { readFileTool } from "./tools/readFile.js";
 export { execTool } from "./tools/exec.js";
 export { processTool } from "./tools/process.js";
@@ -38,6 +38,7 @@ export { createWebSearchTool } from "./tools/web_search.js";
 export { createWebFetchTool } from "./tools/web_fetch.js";
 export { createBrowserTool } from "./tools/browser.js";
 export { createImageTool } from "./tools/image.js";
+export { subagentTool } from "./tools/subagent.js";
 export { loadTools, findTool } from "./tools/registry.js";
 
 // Process supervisor (singleton — used by exec/process tools, logger-injectable)
@@ -177,6 +178,22 @@ export {
   AgentProfileFrontmatterError,
   loadAgentProfiles,
 } from "./profiles/index.js";
+
+// Subagent roles + async runner (used by @harness/agent daemon)
+export {
+  subagentRoles,
+  resolveRoleModel,
+  resolveRolePrompt,
+  resolveRoleTools,
+  type SubagentRoleConfig,
+  type SubagentRoleName,
+} from "./agent/subagentRoles.js";
+export {
+  createAsyncAgentRunner,
+  type AsyncAgentOptions,
+  type AsyncAgentRunner,
+  type AgentSystemEvent,
+} from "./agent/asyncAgentRunner.js";
 
 // Note on toolChoice (pi-ai 0.70.2):
 // The typed `StreamOptions` interface does not expose a `toolChoice` field.
