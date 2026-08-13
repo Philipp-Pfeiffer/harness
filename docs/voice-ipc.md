@@ -7,6 +7,8 @@
 > STT + TTS + Call-Lifecycle, **rein Text über IPC**. Agent, Sessions,
 > Persona, Memory, Tools und Skills liegen vollständig im Daemon. Voice-Calls
 > sind normale Harness-Sessions im regulären Session-Store.
+>
+> Version: v1.2 (Report-Back + Outbound-Grußverhalten)
 
 ## Transport
 
@@ -87,6 +89,58 @@ ignoriert.
    `no-answer`/`timeout`). Der Daemon injiziert ein System-Event
    ("Anruf an <Name/Nummer> beendet, Dauer X, Grund Y") in die anfordernde
    Chat-Session.
+
+## Outbound-Grußverhalten (v1.2)
+
+Der Agent eröffnet Outbound-Calls NICHT mehr sofort mit dem Briefing — der
+Angerufene soll zuerst bereit sein:
+
+1. `onOutboundCallStarted` merkt das Briefing nur vor (kein `submitVoiceTurn`).
+2. Beim **ersten eingehenden Final-Transkript** wird das Briefing als Kontext
+   in diesen Turn gegeben:
+   `<briefing>\n\n[Der Angerufene sagt:] <transkript>`.
+   Der erste Turn trägt zusätzlich das Outbound-Addendum ("Du hast angerufen.
+   Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach
+   dein Anliegen aus dem Briefing.").
+3. Fallback: meldet sich der Angerufene **30 s lang nicht**, eröffnet der
+   Agent selbst per Timer:
+   `Hallo, hörst du mich?\n\nBriefing:\n<briefing>`.
+
+## Report-Back an die Main-Session (v1.2)
+
+### Tool `report_to_main_session`
+
+Der Voice-Agent kann Inhalte an die Main-WhatsApp-Session des Owners melden —
+es gibt sonst keinen Rückkanal aus einem Call:
+
+- Parameter: `text` (string).
+- Capability `voiceReportToMainSession` wird **nur in Voice-Sessions**
+  injiziert; in jeder anderen Session liefert das Tool einen klaren Error.
+- Delivery: System-Event in die Main-WhatsApp-Session des Owners
+  (Muster: event-bus; bei Outbound die anfordernde Session via
+  `whatsappSessionToSource`, Fallback `ownerPhone`).
+
+### Event-Format
+
+```text
+[Voice-Call voice-<ts>] <text>
+```
+
+`origin` = `Voice-Call`; das Event wird wie jedes System-Event als
+`[System · Voice-Call]` präfixiert und über den regulären Event-Bus injiziert
+(Turn läuft → Mailbox-Steering; Session idle → synthetisches Inbound-Event).
+
+### Abschluss-Event (jeder Call, auch Inbound)
+
+Bei JEDEM Call-Ende injiziert der Daemon ein kompaktes Signal in die
+Main-Session (Outbound: anfordernde Chat-Session):
+
+```text
+Anruf beendet (Dauer X, Grund Y). Transkript: Session voice-<ts>.
+```
+
+Das ist ein **Signal, kein Volltext** — der Main-Agent kann das Transkript bei
+Bedarf über Tools lesen (Session `voice-<ts>` im Session-Store).
 
 ## Session-Mapping
 

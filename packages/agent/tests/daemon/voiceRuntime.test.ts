@@ -72,16 +72,36 @@ type RuntimeInternals = {
   resolveVoiceSession: (callId: string, ts: number, from: string) => Promise<string>;
   submitVoiceTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
   endVoiceSession: (sessionId: string) => Promise<void>;
+  injectSystemEvent: (event: { origin: string; text: string }, phoneOverride?: string) => Promise<void>;
+  outboundVoiceCalls: Map<string, {
+    number: string;
+    name?: string;
+    briefing: string;
+    requesterSessionId: string;
+    callStartTs: number;
+    phoneOverride?: string;
+    briefingConsumed?: boolean;
+  }>;
+  outboundVoiceFallbacks: Map<string, ReturnType<typeof setTimeout>>;
+  whatsappSessionToSource: Map<string, string>;
+  currentVoiceSessionCaller: { sessionId: string; phoneOverride?: string } | null;
+  onVoiceCallEnded: (callId: string, sessionId: string, reason: string, isOutbound: boolean) => Promise<void>;
+  onOutboundVoiceCallStarted: (callId: string, sessionId: string) => Promise<void>;
+  onOutboundVoiceCallEnded: (callId: string, sessionId: string, reason: string) => Promise<void>;
+  voiceReportToMainSession: (text: string) => Promise<{ ok: boolean; error?: string }>;
+  voiceChannel: { say(callId: string, text: string): void } | null;
 };
 
 async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefined) => void }) {
   const runtime = new DaemonRuntime();
   const internals = runtime as unknown as RuntimeInternals;
+  const agentRunMessages: Array<{ sessionId: string; callId: string; text: string; addendum: string | undefined }> = [];
   internals.agent = {
     setModel() {},
     setSystemPrompt() {},
-    async run(_messages: Message[], options: { systemPromptAddendum?: string }): Promise<RunResult> {
+    async run(messages: Message[], options: { systemPromptAddendum?: string }): Promise<RunResult> {
       opts.addendumRecorder(options.systemPromptAddendum);
+      agentRunMessages.push({ sessionId: "", callId: "", text: messages.at(-1)?.content?.toString() ?? "", addendum: options.systemPromptAddendum });
       return {
         aborted: false,
         turns: 1,
@@ -93,6 +113,12 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   } as unknown as Agent;
   internals.model = createFakeModel();
   internals.paths = resolveHarnessPaths();
+  internals.injectSystemEvent = async () => {};
+  internals.whatsappSessionToSource = new Map();
+  internals.currentVoiceSessionCaller = null;
+  internals.outboundVoiceFallbacks = new Map();
+  internals.voiceChannel = null;
+  internals.outboundVoiceCalls = new Map();
 
   // Seed a voice session like resolveVoiceSession does (id = voice-<ts>).
   const session = await createSession(internals.paths, {
@@ -116,7 +142,7 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   });
   internals.voiceCallSessions.set("c1", "voice-123");
 
-  return { runtime, internals };
+  return { runtime, internals, agentRunMessages };
 }
 
 describe("Voice turn flow in DaemonRuntime", () => {
@@ -146,5 +172,171 @@ describe("Voice turn flow in DaemonRuntime", () => {
     await internals.endVoiceSession("voice-123");
     expect(internals.sessions.has("voice-123")).toBe(false);
     expect(internals.voiceCallSessions.has("c1")).toBe(false);
+  });
+
+  it("report_to_main_session delivers into the main WhatsApp session (event format)", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const events: Array<{ origin: string; text: string; phone?: string }> = [];
+    internals.injectSystemEvent = async (event, phone) => {
+      events.push({ ...event, phone });
+    };
+    // Voice turn läuft gerade → Caller-Kontext ist gesetzt.
+    internals.currentVoiceSessionCaller = { sessionId: "voice-123" };
+
+    const result = await internals.voiceReportToMainSession("Der Termin ist am Freitag um 15 Uhr.");
+    expect(result.ok).toBe(true);
+    expect(events).toEqual([
+      {
+        origin: "Voice-Call",
+        text: "[Voice-Call voice-123] Der Termin ist am Freitag um 15 Uhr.",
+        phone: undefined,
+      },
+    ]);
+  });
+
+  it("report_to_main_session routes to the requesting chat for outbound (phoneOverride fallback)", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const events: Array<{ origin: string; text: string; phone?: string }> = [];
+    internals.injectSystemEvent = async (event, phone) => {
+      events.push({ ...event, phone });
+    };
+    internals.currentVoiceSessionCaller = { sessionId: "voice-123", phoneOverride: "4915110619636" };
+
+    const result = await internals.voiceReportToMainSession("Kurzbericht");
+    expect(result.ok).toBe(true);
+    expect(events[0]?.phone).toBe("4915110619636");
+  });
+
+  it("report_to_main_session fails cleanly without an active voice session", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.currentVoiceSessionCaller = null;
+    const result = await internals.voiceReportToMainSession("Test");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Keine aktive Voice-Session");
+  });
+
+  it("onVoiceCallEnded (inbound) injects the closing event with session + duration", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const events: Array<{ origin: string; text: string; phone?: string }> = [];
+    internals.injectSystemEvent = async (event, phone) => {
+      events.push({ ...event, phone });
+    };
+    internals.whatsappSessionToSource.set("whatsapp-1", "491701234567");
+
+    await internals.onVoiceCallEnded("c-in", "voice-1700000000000", "ended: peer", false);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.origin).toBe("Voice-Call");
+    expect(events[0]?.text).toContain("Anruf beendet");
+    expect(events[0]?.text).toContain("Transkript: Session voice-1700000000000");
+    expect(events[0]?.text).toMatch(/Dauer \d+s/);
+    // Inbound → Owner-Main-Session (kein Phone-Override, Event-Bus resolvt selbst).
+    expect(events[0]?.phone).toBeUndefined();
+  });
+
+  it("onVoiceCallEnded (outbound) routes the closing event to the requesting chat", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const events: Array<{ origin: string; text: string; phone?: string }> = [];
+    internals.injectSystemEvent = async (event, phone) => {
+      events.push({ ...event, phone });
+    };
+    internals.whatsappSessionToSource.set("whatsapp-req", "4915110619636");
+    internals.outboundVoiceCalls.set("ob-1", {
+      number: "4915110619636",
+      briefing: "Briefing",
+      requesterSessionId: "whatsapp-req",
+      callStartTs: 1700000000000,
+    });
+
+    await internals.onVoiceCallEnded("ob-1", "voice-1700000000000", "ended: farewell", true);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.text).toContain("Anruf beendet");
+    expect(events[0]?.phone).toBe("4915110619636");
+  });
+
+  it("outbound greeting: no turn before the first transcript, briefing attached to it", async () => {
+    const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.outboundVoiceCalls.set("ob-2", {
+      number: "4915110619636",
+      briefing: "Briefing: Termin Freitag",
+      requesterSessionId: "whatsapp-req",
+      callStartTs: Date.now(),
+    });
+    const fallbackSpy = vi.fn();
+    internals.outboundVoiceFallbacks.set("ob-2", { unref() {}, hasRef() { return true; } } as ReturnType<typeof setTimeout>);
+
+    // onOutboundCallStarted: KEIN sofortiger Turn.
+    await internals.onOutboundVoiceCallStarted("ob-2", "voice-123");
+    expect(agentRunMessages).toHaveLength(0);
+
+    // Erstes Transkript: Briefing als Kontext + Outbound-Addendum.
+    await internals.submitVoiceTurn("voice-123", "ob-2", "Hallo?");
+    expect(agentRunMessages).toHaveLength(1);
+    expect(agentRunMessages[0]?.text).toContain("Briefing: Termin Freitag");
+    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+    expect(agentRunMessages[0]?.addendum).toContain("Du hast angerufen");
+    expect(internals.outboundVoiceFallbacks.has("ob-2")).toBe(false);
+    // Nur der ERSTE Turn trägt das Briefing.
+    await internals.submitVoiceTurn("voice-123", "ob-2", "Nochmal?");
+    expect(agentRunMessages[1]?.text).toBe("Nochmal?");
+    expect(agentRunMessages[1]?.text).not.toContain("Briefing");
+  });
+
+  it("outbound greeting: 30s-Fallback eröffnet mit Hallo + Briefing", async () => {
+    vi.useFakeTimers();
+    try {
+      const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+      internals.outboundVoiceCalls.set("ob-3", {
+        number: "4915110619636",
+        briefing: "Briefing: Paket abholen",
+        requesterSessionId: "whatsapp-req",
+        callStartTs: Date.now(),
+      });
+
+      await internals.onOutboundVoiceCallStarted("ob-3", "voice-123");
+      expect(agentRunMessages).toHaveLength(0);
+      const timer = internals.outboundVoiceFallbacks.get("ob-3")!;
+      expect(timer).toBeDefined();
+
+      // Timer feuert nach 30s → Opening-Turn mit Hallo + Briefing.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(agentRunMessages).toHaveLength(1);
+      expect(agentRunMessages[0]?.text).toContain("Hallo, hörst du mich?");
+      expect(agentRunMessages[0]?.text).toContain("Briefing: Paket abholen");
+      // Timer-Eintrag wurde beim Feuern entfernt.
+      expect(internals.outboundVoiceFallbacks.has("ob-3")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("outbound greeting: erstes Transkript cancelt den Fallback-Timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+      internals.outboundVoiceCalls.set("ob-5", {
+        number: "4915110619636",
+        briefing: "Briefing",
+        requesterSessionId: "whatsapp-req",
+        callStartTs: Date.now(),
+      });
+
+      await internals.onOutboundVoiceCallStarted("ob-5", "voice-123");
+      expect(internals.outboundVoiceFallbacks.has("ob-5")).toBe(true);
+
+      // Transkript kommt nach 10s → Timer wird gecancelt, kein Fallback-Turn.
+      await vi.advanceTimersByTimeAsync(10_000);
+      await internals.submitVoiceTurn("voice-123", "ob-5", "Hallo?");
+      expect(agentRunMessages).toHaveLength(1);
+      expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+      expect(internals.outboundVoiceFallbacks.has("ob-5")).toBe(false);
+
+      // Nach 30s kein zusätzlicher Fallback-Turn.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(agentRunMessages).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -94,7 +94,7 @@ import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
 import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
 import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
-import { channelAddendumAsync } from "./channelAddendum.js";
+import { channelAddendumAsync, outboundVoiceAddendum } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import { VoiceChannel, voiceSessionId } from "./voiceChannel.js";
 import {
@@ -114,6 +114,9 @@ import {
 import { runDeploy, DEPLOY_TIMEOUT_MS } from "./deploy.js";
 import { waitForChannelReady } from "./restartPing.js";
 import { MailPoller } from "../mail/poller.js";
+
+/** Fallback-Frist für den Eröffnungs-Ping bei Outbound-Calls (ms). */
+const OUTBOUND_OPENING_FALLBACK_MS = 30_000;
 
 /** Formats a context window size for user feedback, e.g. 131072 → "128k". */
 function formatContextWindow(contextWindow: number | undefined): string {
@@ -360,6 +363,8 @@ export class DaemonRuntime {
         endSession: (sessionId) => this.endVoiceSession(sessionId),
         onOutboundCallStarted: (callId, sessionId) =>
           this.onOutboundVoiceCallStarted(callId, sessionId),
+        onCallEnded: (callId, sessionId, reason, isOutbound) =>
+          this.onVoiceCallEnded(callId, sessionId, reason, isOutbound),
         onOutboundCallEnded: (callId, sessionId, reason) =>
           this.onOutboundVoiceCallEnded(callId, sessionId, reason),
       },
@@ -2204,7 +2209,18 @@ export class DaemonRuntime {
     briefing: string;
     requesterSessionId: string;
     callStartTs: number;
+    /** Target for system events when the requester is NOT a WhatsApp chat. */
+    phoneOverride?: string;
+    /** Briefing wurde in den ersten Transkript-Turn eingebettet. */
+    briefingConsumed?: boolean;
   }>();
+
+  /**
+   * Laufende 30-s-Fallback-Timer für Outbound-Calls (callId → Timer), die
+   * noch auf ihr erstes Transkript warten. Ein eingehendes Final-Transkript
+   * löscht den Timer; der Timer selbst löscht seinen Eintrag beim Feuern.
+   */
+  private readonly outboundVoiceFallbacks = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Resolves or creates a voice session for a call. On a fresh daemon the
@@ -2255,12 +2271,35 @@ export class DaemonRuntime {
     );
     const appliedCtx = this.applyTurnModel(turnCtx, entry.modelRef);
 
+    // Outbound-Grußverhalten: Beim ERSTEN Final-Transkript eines
+    // Outbound-Calls wird das vorgemerkte Briefing als Kontext in diesen
+    // Turn gegeben (der Agent wartet damit, bis der Angerufene sich meldet),
+    // und der 30-s-Fallback-Timer wird gecancelt.
+    const outbound = this.outboundVoiceCalls.get(callId);
+    let isOutboundOpening = false;
+    if (outbound && !outbound.briefingConsumed) {
+      const fallback = this.outboundVoiceFallbacks.get(callId);
+      if (fallback) {
+        clearTimeout(fallback);
+        this.outboundVoiceFallbacks.delete(callId);
+      }
+      outbound.briefingConsumed = true;
+      isOutboundOpening = true;
+      text = `${outbound.briefing}\n\n[Der Angerufene sagt:] ${text}`;
+    }
+
     const userMessage = {
       role: "user" as const,
       content: text,
       timestamp: Date.now(),
     };
     entry.messages.push(userMessage as Message);
+
+    // Outbound calls: the briefing context is attached to the FIRST turn
+    // (see onOutboundVoiceCallStarted). Resolve the report-back target so
+    // the tool can deliver to the requesting chat during this turn.
+    const phoneOverride = this.outboundVoiceCalls.get(callId)?.phoneOverride;
+    this.currentVoiceSessionCaller = { sessionId, phoneOverride };
 
     // Progressive speech: buffer text tokens, speak them when a tool call
     // begins (the callee must not hear silence during tool work).
@@ -2290,7 +2329,14 @@ export class DaemonRuntime {
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
         voiceCallStarter: this.voiceCallStarter,
-        systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
+        // Capability NUR in Voice-Sessions injizieren: Das Tool schreibt in
+        // die Main-Session des Owners und darf nur aus einem Call heraus
+        // verwendet werden. Alle anderen Session-Typen bekommen einen
+        // klaren Tool-Error.
+        voiceReportToMainSession: this.voiceReportToMainSession,
+        systemPromptAddendum: isOutboundOpening
+          ? outboundVoiceAddendum() + "\n\n" + (await channelAddendumAsync(entry.origin, this.paths.stickers))
+          : await channelAddendumAsync(entry.origin, this.paths.stickers),
         onEvent: (event) => {
           if (event.type === "token") {
             progressiveText += event.text;
@@ -2344,6 +2390,7 @@ export class DaemonRuntime {
 
       return { finalResponse: finalMessage };
     } finally {
+      this.currentVoiceSessionCaller = null;
       this.turnActive = false;
       void this.performPendingRestartIfNeeded();
     }
@@ -2553,6 +2600,50 @@ export class DaemonRuntime {
   private readonly whatsappSessionToSource = new Map<string, string>();
 
   /**
+   * Report-back capability for the `report_to_main_session` tool (voice
+   * sessions only). Delivers the text as a system event
+   * ("[Voice-Call voice-<ts>] <text>") into the owner's main WhatsApp
+   * session via the system event bus.
+   *
+   * Target resolution (Muster: event-bus, NICHT resolveOwnerPhone):
+   *   1. The requesting session's source phone (whatsappSessionToSource) —
+   *      for outbound calls the requester chat is the natural target.
+   *   2. Fallback: config.ownerPhone (digits-only).
+   *   3. Otherwise: error back to the tool.
+   */
+  private readonly voiceReportToMainSession = async (
+    text: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const log = this.logger.child("voice");
+
+    const caller = this.currentVoiceSessionCaller;
+    if (!caller) {
+      return { ok: false, error: "Keine aktive Voice-Session — report_to_main_session erfordert einen laufenden Anruf." };
+    }
+
+    const eventText = `[Voice-Call ${caller.sessionId}] ${text}`;
+    try {
+      await this.injectSystemEvent({ origin: "Voice-Call", text: eventText }, caller.phoneOverride);
+      log.info("report delivered to main session", { sessionId: caller.sessionId, text });
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn("report delivery failed", { error: msg });
+      return { ok: false, error: msg };
+    }
+  };
+
+  /**
+   * Caller context of the voice turn currently being submitted. Tracked so
+   * `report_to_main_session` can resolve the main-session target while the
+   * voice agent runs. `phoneOverride` is undefined when the requester is a
+   * WhatsApp chat (injectSystemEvent uses the session's own source); it is
+   * set for TUI/API requesters, where the event falls back to the owner
+   * phone. Cleared after the turn.
+   */
+  private currentVoiceSessionCaller: { sessionId: string; phoneOverride?: string } | null = null;
+
+  /**
    * Voice-call starter capability for the `call_user` tool. Runs the
    * fail-closed registry gate + rate limit, then sends `start_call` to the
    * adapter and records the outbound call for briefing-seeding + the
@@ -2593,12 +2684,16 @@ export class DaemonRuntime {
     const callStartTs = Date.now();
     const callId = `ob-${callStartTs}-${number}`;
     const jid = `${number}@s.whatsapp.net`;
+    // WhatsApp-Chat-Sessions liefern ihre Quell-Nummer direkt; bei anderen
+    // Requestern (TUI/API) fällt das Event-Routing auf den Owner zurück.
+    const requesterSource = this.whatsappSessionToSource.get(requesterSessionId);
     this.outboundVoiceCalls.set(callId, {
       number,
       name: contact.name,
       briefing: call.briefing,
       requesterSessionId,
       callStartTs,
+      ...(requesterSource ? {} : { phoneOverride: this.config.whatsapp?.ownerPhone }),
     });
 
     this.logger.child("voice").info("starting outbound call", { callId, number, requesterSessionId });
@@ -2608,61 +2703,107 @@ export class DaemonRuntime {
 
   /**
    * Called when the adapter reports `call_started` (direction=outbound) for
-   * a call the daemon initiated. Seeds the briefing as the first turn — the
-   * voice agent greets and reports without waiting for user input.
+   * a call the daemon initiated.
+   *
+   * Grußverhalten: Das Briefing wird NICHT sofort als Turn abgesetzt — der
+   * Agent würde loslegen, bevor der Angerufene bereit ist. Stattdessen wird
+   * das Briefing für die Voice-Session vorgemerkt und beim ERSTEN
+   * eingehenden Final-Transkript als Kontext in diesen Turn gegeben.
+   * Fallback: meldet sich der Angerufene 30 s lang nicht, eröffnet der Agent
+   * selbst ("Hallo, hörst du mich? ..." + Briefing) — einfacher Timer.
    */
   private async onOutboundVoiceCallStarted(callId: string, sessionId: string): Promise<void> {
     const outbound = this.outboundVoiceCalls.get(callId);
     if (!outbound) return;
-    this.logger.child("voice").info("outbound call started — seeding briefing", { callId, sessionId });
-    // Run the briefing as the first turn; progressive text (before tool calls)
-    // is spoken immediately, and the final greeting is spoken once at turn end.
-    void this.submitVoiceTurn(
-      sessionId,
-      callId,
-      outbound.briefing,
-    ).then(({ finalResponse }) => {
-      if (finalResponse) {
-        this.voiceChannel?.say(callId, finalResponse);
-      }
-    }).catch((err) => {
-      this.logger.child("voice").error("briefing turn failed", {
-        callId,
-        error: err instanceof Error ? err.message : String(err),
+    this.logger.child("voice").info("outbound call started — briefing vorgemerkt", { callId, sessionId });
+
+    const briefing = outbound.briefing;
+    const fallback = setTimeout(() => {
+      this.outboundVoiceFallbacks.delete(callId);
+      this.logger.child("voice").info("outbound call: kein Transkript nach 30s — Agent eröffnet", { callId });
+      const userText = `Hallo, hörst du mich?\n\nBriefing:\n${briefing}`;
+      void this.submitVoiceTurn(sessionId, callId, userText).then(({ finalResponse }) => {
+        if (finalResponse) {
+          this.voiceChannel?.say(callId, finalResponse);
+        }
+      }).catch((err) => {
+        this.logger.child("voice").error("outbound opening turn failed", {
+          callId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    });
+    }, OUTBOUND_OPENING_FALLBACK_MS);
+    fallback.unref?.();
+    this.outboundVoiceFallbacks.set(callId, fallback);
   }
 
   /**
-   * Called when an outbound call ends. Injects a system event into the
-   * originating chat session ("Anruf an <Name/Nummer> beendet, Dauer X,
-   * Grund Y") and clears the outbound tracking entry.
+   * Called when a call ends (inbound or outbound). Injects a compact system
+   * event into the owner's main WhatsApp session:
+   * "Anruf beendet (Dauer X, Grund Y). Transkript: Session voice-<ts>."
+   *
+   * Das ist ein Signal, kein Volltext: Der Main-Agent kann das Transkript
+   * bei Bedarf über Tools lesen. Für Outbound-Calls landet das Event in der
+   * anfordernden Chat-Session (via whatsappSessionToSource, Fallback
+   * ownerPhone); für Inbound-Calls in der Main-Session des Owners.
    */
-  private async onOutboundVoiceCallEnded(
+  private async onVoiceCallEnded(
     callId: string,
-    _sessionId: string,
+    sessionId: string,
     reason: string,
+    isOutbound: boolean,
   ): Promise<void> {
     const outbound = this.outboundVoiceCalls.get(callId);
-    if (!outbound) return;
-    this.outboundVoiceCalls.delete(callId);
+    if (outbound) {
+      this.outboundVoiceCalls.delete(callId);
+    }
+    const fallback = this.outboundVoiceFallbacks.get(callId);
+    if (fallback) {
+      clearTimeout(fallback);
+      this.outboundVoiceFallbacks.delete(callId);
+    }
 
-    const durationSec = Math.max(0, Math.round((Date.now() - outbound.callStartTs) / 1000));
-    const label = outbound.name ? `${outbound.name} (${outbound.number})` : outbound.number;
-    const text = `Anruf an ${label} beendet, Dauer ${durationSec}s, Grund ${reason}.`;
+    const sessionIdSafe = sessionId ?? "voice-unbekannt";
+    const callStartTs = /^voice-(\d+)$/.exec(sessionIdSafe)?.[1];
+    const durationMs = callStartTs ? Date.now() - Number(callStartTs) : 0;
+    const durationSec = Math.max(0, Math.round(durationMs / 1000));
+    const text = `Anruf beendet (Dauer ${durationSec}s, Grund ${reason}). Transkript: Session ${sessionIdSafe}.`;
 
-    // Target the requesting session: resolve its source phone. When the
-    // requester is not a WhatsApp chat (e.g. TUI/API), fall back to the
-    // owner phone so the event still lands in the operator chat.
-    const source = this.whatsappSessionToSource.get(outbound.requesterSessionId);
+    // Outbound: anfordernde Session via whatsappSessionToSource, Fallback
+    // ownerPhone (im outbound-Tracking vermerkt — NICHT resolveOwnerPhone
+    // erneut auflösen, das kann die falsche Session treffen).
+    const phoneOverride = isOutbound
+      ? (outbound?.phoneOverride ??
+        this.whatsappSessionToSource.get(outbound?.requesterSessionId ?? ""))
+      : undefined;
+
     try {
-      await this.injectSystemEvent({ origin: "Voice", text }, source);
+      await this.injectSystemEvent({ origin: "Voice-Call", text }, phoneOverride);
     } catch (err) {
-      this.logger.child("voice").warn("failed to inject call_ended event", {
+      this.logger.child("voice").warn("failed to inject call_ended system event", {
         callId,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Called when an outbound call ends. Clears the 30-s-fallback timer and
+   * the outbound tracking entry (the generic `onVoiceCallEnded` handles the
+   * system event for all calls).
+   */
+  private async onOutboundVoiceCallEnded(
+    callId: string,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const fallback = this.outboundVoiceFallbacks.get(callId);
+    if (fallback) {
+      clearTimeout(fallback);
+      this.outboundVoiceFallbacks.delete(callId);
+    }
+    this.outboundVoiceCalls.delete(callId);
+    this.logger.child("voice").info("outbound call ended", { callId, sessionId, reason });
   }
 
   /**

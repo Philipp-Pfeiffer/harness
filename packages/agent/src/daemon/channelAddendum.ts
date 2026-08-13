@@ -47,6 +47,15 @@ export async function channelAddendumAsync(
     : WHATSAPP_ADDENDUM;
 }
 
+/**
+ * Outbound-Call-spezifisches Addendum: schärft das Warten auf den ersten
+ * Kontakt des Angerufenen ein (der Briefing-Kontext kommt erst mit dem
+ * ersten Transkript in den Turn).
+ */
+export function outboundVoiceAddendum(): string {
+  return OUTBOUND_VOICE_ADDENDUM;
+}
+
 /** Legacy sync variant: static addendum (no sticker catalog). */
 export function channelAddendum(origin: SessionOrigin): string | undefined {
   if (origin === "voice") return VOICE_ADDENDUM;
@@ -56,7 +65,15 @@ export function channelAddendum(origin: SessionOrigin): string | undefined {
 
 const VOICE_ADDENDUM = `## Voice-Call
 
-Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, gesprochene Sprache, KEIN Markdown, keine Listen, keine Code-Blöcke, keine URLs vorlesen. Lange Tool-Aktionen kurz verbal ankündigen. Antworten kurz halten. Kündige kurz verbal an, bevor du Tools benutzt (z.B. "Ich schaue kurz nach"), damit dein Gegenüber weiß, dass du arbeitest.`;
+Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, gesprochene Sprache, KEIN Markdown, keine Listen, keine Code-Blöcke, keine URLs vorlesen. Lange Tool-Aktionen kurz verbal ankündigen. Antworten kurz halten. Kündige kurz verbal an, bevor du Tools benutzt (z.B. "Ich schaue kurz nach"), damit dein Gegenüber weiß, dass du arbeitest.
+
+Wenn dein Gegenüber dich bittet, etwas der Main-Session zu übermitteln, nutze sofort report_to_main_session. Fasse am Call-Ende wichtige Ergebnisse/Beschlüsse als kompakten Report für die Main-Session zusammen (wie ein Subagent-Report).
+
+Wenn du angerufen hast: Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing.`;
+
+const OUTBOUND_VOICE_ADDENDUM = `## Voice-Call (Outbound)
+
+Du hast angerufen. Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing.`;
 
 const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 

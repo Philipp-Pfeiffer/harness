@@ -153,6 +153,14 @@ export interface RunOptions {
    */
   voiceCallStarter?: (sessionId: string, call: { number: string; briefing: string }) => Promise<{ ok: boolean; error?: string; callId?: string }>;
   /**
+   * Optional report-to-main-session capability for the
+   * `report_to_main_session` tool. Injected by the daemon ONLY for voice
+   * sessions; it delivers a system event into the owner's main WhatsApp
+   * session via the system event bus. When absent (non-voice sessions),
+   * `report_to_main_session` returns an error.
+   */
+  voiceReportToMainSession?: (text: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
    * per-agent-instance default. Never a process-global scope.
@@ -457,7 +465,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, systemPromptAddendum, cwd } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, voiceReportToMainSession, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -498,6 +506,7 @@ export function createAgent(config: AgentConfig): Agent {
         requestRestart,
         postRestartFollowUp,
         voiceCallStarter,
+        voiceReportToMainSession,
         onStatus: (status) => onEvent?.({ type: "status", status }),
         signal,
       };

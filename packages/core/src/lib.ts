@@ -32,6 +32,7 @@ export { sendFileTool, detectMimeFromExtension } from "./tools/send_file.js";
 export { sendStickerTool } from "./tools/send_sticker.js";
 export { requestRestartTool } from "./tools/requestRestart.js";
 export { callUserTool, normalizeCallNumber } from "./tools/call_user.js";
+export { reportToMainSessionTool } from "./tools/report_to_main_session.js";
 export { createWebSearchTool } from "./tools/web_search.js";
 export { createWebFetchTool } from "./tools/web_fetch.js";
 export { createBrowserTool } from "./tools/browser.js";

@@ -36,6 +36,13 @@ export interface VoiceChannelCallbacks {
    */
   onOutboundCallStarted?: (callId: string, sessionId: string) => Promise<void>;
   /**
+   * Notify the daemon that a call ended (inbound OR outbound) so it can
+   * inject the "Anruf beendet" system event into the main session.
+   * `isOutbound` tells the daemon whether the calling session (requester)
+   * or the owner's main session is the event target.
+   */
+  onCallEnded?: (callId: string, sessionId: string, reason: string, isOutbound: boolean) => Promise<void>;
+  /**
    * Notify the daemon that an outbound call ended, so it can inject a
    * system event into the originating chat session. Only fired for calls
    * the daemon started via `startCall()`.
@@ -218,6 +225,8 @@ export class VoiceChannel {
     this.outboundCallIds.delete(callId);
     this.opts.log(`voice: call ${callId} finished (${reason})`);
     await this.opts.callbacks.endSession(sessionId);
+    // Abschluss-Event bei JEDEM Call-Ende (auch inbound) in die Main-Session.
+    await this.opts.callbacks.onCallEnded?.(callId, sessionId, reason, isOutbound);
     if (isOutbound) {
       await this.opts.callbacks.onOutboundCallEnded?.(callId, sessionId, reason);
     }

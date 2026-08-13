@@ -88,6 +88,14 @@ export interface ToolCallContext {
    */
   voiceCallStarter?: (sessionId: string, call: { number: string; briefing: string }) => Promise<{ ok: boolean; error?: string; callId?: string }>;
   /**
+   * Optional report-to-main-session capability for the `report_to_main_session`
+   * tool. Injected by the daemon ONLY for voice sessions (origin "voice"):
+   * it delivers a system event into the owner's main WhatsApp session via
+   * the system event bus. When absent (any non-voice session),
+   * `report_to_main_session` returns an error.
+   */
+  voiceReportToMainSession?: (text: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
    * Optional status callback for long-running tools (e.g. browser sub-agent).
    * When present, tools may emit progress updates that reach the TUI via IPC.
    */
