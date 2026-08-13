@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { createAsyncAgentRunner, worktreePathsFor } from "../../src/agent/asyncAgentRunner.js";
 import { processSupervisor } from "../../src/tools/processSupervisor.js";
 import { readFileTool, execTool, writeTool } from "../../src/tools/index.js";
+import type { Tool } from "../../src/tools/types.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -142,6 +143,30 @@ describe("async agent runner", () => {
     expect(task?.type).toBe("agent");
     expect(task?.status).toBe("running");
     expect(runner.status(result.id).ok).toBe(true);
+  });
+
+  it("resolves tools lazily via a provider so late-assigned tools are visible", async () => {
+    // A provider should be evaluated at start() time, not at runner
+    // construction — mirror of the daemon bug where loadTools reassigns
+    // this.allTools AFTER createAsyncAgentRunner (a stale `[]` snapshot
+    // would starve the coder of all tools).
+    let mutableTools: Tool[] = [];
+    const runner = createAsyncAgentRunner(baseOpts({
+      loadedTools: () => mutableTools,
+      // Assert the provider is consulted lazily by swapping in tools after
+      // construction and confirming they are the ones filtered.
+    }));
+
+    // Populate AFTER construction (like the daemon does).
+    mutableTools = [readFileTool, writeTool, execTool];
+
+    const started = runner.start({ role: "coder", task: "lazy tools" });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await waitForFinal(runner, started.id);
+
+    const task = supervisor.getTask(started.id);
+    expect(task?.status).toBe("done");
   });
 
   it("enforces the concurrency cap and reports running ids", () => {

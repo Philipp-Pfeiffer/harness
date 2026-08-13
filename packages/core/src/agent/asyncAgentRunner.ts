@@ -22,8 +22,13 @@ export interface AsyncAgentOptions {
   injectSystemEvent?: (event: AgentSystemEvent) => void;
   /** Base directory for sub-agent result artifacts ($HARNESS_STATE/agent-runs). */
   agentRunsDir: string;
-  /** Base tool array; role tool sets are filtered from it. */
-  loadedTools: Tool[];
+  /**
+   * Base tool array (or a lazy provider returning it); role tool sets are
+   * filtered from it at `start()` time. The provider form is required when
+   * the caller can only produce the full tool array AFTER constructing the
+   * runner (e.g. the daemon builds tools that depend on the runner itself).
+   */
+  loadedTools: Tool[] | (() => Tool[]);
   /** Model config for @preset/ refs and fallbacks. */
   models?: ConfigModel[];
   /** Daemon default model (final fallback). */
@@ -231,7 +236,12 @@ export function createAsyncAgentRunner(opts: AsyncAgentOptions): AsyncAgentRunne
 
       try {
         const persona = resolveRolePrompt(input.role);
-        const tools = resolveRoleTools(input.role, opts.loadedTools);
+        // Resolve tools lazily at start time: a provider defers evaluation
+        // until now, so callers that populate the full tool array only after
+        // constructing the runner (see daemon runtime: loadTools assigns
+        // this.allTools AFTER createAsyncAgentRunner) still yield real tools.
+        const loadedTools = typeof opts.loadedTools === "function" ? opts.loadedTools() : opts.loadedTools;
+        const tools = resolveRoleTools(input.role, loadedTools);
         const model = resolveRoleModel(input.role, input.model, {
           models: opts.models,
           defaultModel: opts.defaultModel,

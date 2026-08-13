@@ -1682,7 +1682,11 @@ export class DaemonRuntime {
     // Load tools (with skills)
     this.subagentRunner = createAsyncAgentRunner({
       agentRunsDir: this.paths.agentRuns,
-      loadedTools: this.allTools,
+      // Lazy provider: this.allTools is assigned by loadTools() a few lines
+      // BELOW. Passing the array directly would snapshot the still-empty
+      // `[]` (field init) and starve the coder subagent of ALL tools — it
+      // then emits tool calls as raw text and finishes with zero tool calls.
+      loadedTools: () => this.allTools,
       models: this.configModels,
       defaultModel: this.configDefaultModel,
       injectSystemEvent: (event) => { void this.injectSystemEvent(event); },
