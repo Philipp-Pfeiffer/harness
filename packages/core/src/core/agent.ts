@@ -161,6 +161,13 @@ export interface RunOptions {
    */
   voiceReportToMainSession?: (text: string) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional bot-side hangup capability for the `hang_up` tool. Injected by
+   * the daemon ONLY for voice sessions; sends `end_call` over the voice IPC
+   * to the adapter. When absent (non-voice sessions), `hang_up` returns an
+   * error.
+   */
+  voiceHangUp?: () => Promise<{ ok: boolean; error?: string }>;
+  /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
    * per-agent-instance default. Never a process-global scope.
@@ -474,7 +481,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, voiceReportToMainSession, systemPromptAddendum, cwd } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, voiceReportToMainSession, voiceHangUp, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -516,6 +523,7 @@ export function createAgent(config: AgentConfig): Agent {
         postRestartFollowUp,
         voiceCallStarter,
         voiceReportToMainSession,
+        voiceHangUp,
         onStatus: (status) => onEvent?.({ type: "status", status }),
         signal,
       };

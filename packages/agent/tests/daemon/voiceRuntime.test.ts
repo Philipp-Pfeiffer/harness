@@ -89,7 +89,10 @@ type RuntimeInternals = {
   onOutboundVoiceCallStarted: (callId: string, sessionId: string) => Promise<void>;
   onOutboundVoiceCallEnded: (callId: string, sessionId: string, reason: string) => Promise<void>;
   voiceReportToMainSession: (text: string) => Promise<{ ok: boolean; error?: string }>;
-  voiceChannel: { say(callId: string, text: string): void } | null;
+  voiceHangUp: () => Promise<{ ok: boolean; error?: string }>;
+  voiceChannel: { say(callId: string, text: string): void; endCall(callId: string, reason: string): void } | null;
+  logger: { child(component: string): { info(msg: string): void; error(msg: string): void; warn(msg: string): void } };
+  voiceCallSessionsBySession: Map<string, string>;
 };
 
 async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefined) => void }) {
@@ -119,6 +122,11 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   internals.outboundVoiceFallbacks = new Map();
   internals.voiceChannel = null;
   internals.outboundVoiceCalls = new Map();
+  internals.voiceCallSessionsBySession = new Map();
+  const voiceLogMocks = { info: vi.fn(), error: vi.fn(), warn: vi.fn() };
+  internals.logger = {
+    child: () => voiceLogMocks,
+  } as unknown as typeof internals.logger;
 
   // Seed a voice session like resolveVoiceSession does (id = voice-<ts>).
   const session = await createSession(internals.paths, {
@@ -142,7 +150,7 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   });
   internals.voiceCallSessions.set("c1", "voice-123");
 
-  return { runtime, internals, agentRunMessages };
+  return { runtime, internals, agentRunMessages, voiceLogMocks };
 }
 
 describe("Voice turn flow in DaemonRuntime", () => {
@@ -338,5 +346,38 @@ describe("Voice turn flow in DaemonRuntime", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("hang_up sends end_call via the voice channel and returns ok", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const endCalls: Array<{ callId: string; reason: string }> = [];
+    internals.voiceChannel = {
+      say() {},
+      endCall: (callId, reason) => endCalls.push({ callId, reason }),
+    };
+    internals.currentVoiceSessionCaller = { sessionId: "voice-123" };
+    internals.voiceCallSessionsBySession.set("voice-123", "c1");
+
+    const result = await internals.voiceHangUp();
+    expect(result.ok).toBe(true);
+    expect(endCalls).toEqual([{ callId: "c1", reason: "agent_requested" }]);
+  });
+
+  it("hang_up fails cleanly without an active voice session", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.currentVoiceSessionCaller = null;
+    const result = await internals.voiceHangUp();
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("Keine aktive Voice-Session");
+  });
+
+  it("voice-timing: turn_start + say_sent werden beim Voice-Turn geloggt", async () => {
+    const { internals, voiceLogMocks } = await makeRuntime({ addendumRecorder: () => {} });
+    const result = await internals.submitVoiceTurn("voice-123", "c1", "Hallo");
+    expect(result.finalResponse).toBe("Antwort im Anruf");
+    expect(voiceLogMocks.info).toHaveBeenCalled();
+    const calls = voiceLogMocks.info.mock.calls.map((c) => String(c[0]));
+    expect(calls.some((c) => c.includes("voice-timing: turn_start"))).toBe(true);
+    expect(calls.some((c) => c.includes("voice-timing: say_sent"))).toBe(true);
   });
 });

@@ -2196,6 +2196,8 @@ export class DaemonRuntime {
 
   /** Voice callId → sessionId. Survives adapter reconnects while the daemon lives. */
   private readonly voiceCallSessions = new Map<string, string>();
+  /** Reverse: sessionId → callId (für hang_up). Idempotent gepflegt. */
+  private readonly voiceCallSessionsBySession = new Map<string, string>();
 
   /**
    * Outbound calls initiated via `call_user`: callId → metadata. The
@@ -2245,6 +2247,7 @@ export class DaemonRuntime {
     const entry = this.createSessionEntry(session, "voice", `Voice: ${from}`);
     this.sessions.set(session.id, entry);
     this.voiceCallSessions.set(callId, session.id);
+    this.voiceCallSessionsBySession.set(session.id, callId);
     return session.id;
   }
 
@@ -2287,6 +2290,8 @@ export class DaemonRuntime {
       isOutboundOpening = true;
       text = `${outbound.briefing}\n\n[Der Angerufene sagt:] ${text}`;
     }
+    const voiceLog = this.logger.child("voice");
+    voiceLog.info(`voice-timing: turn_start callId=${callId} sessionId=${sessionId}`);
 
     const userMessage = {
       role: "user" as const,
@@ -2305,10 +2310,15 @@ export class DaemonRuntime {
     // begins (the callee must not hear silence during tool work).
     let progressiveText = "";
     let sendChain: Promise<void> = Promise.resolve();
+    let firstTextBlockSent = false;
     const queueProgressiveSay = (segment: string): void => {
       const trimmed = segment.trim();
       if (!trimmed) return;
       sendChain = sendChain.then(() => {
+        if (!firstTextBlockSent) {
+          firstTextBlockSent = true;
+          voiceLog.info(`voice-timing: first_text_block callId=${callId} sessionId=${sessionId}`);
+        }
         this.voiceChannel?.say(callId, trimmed);
       });
     };
@@ -2334,6 +2344,7 @@ export class DaemonRuntime {
         // verwendet werden. Alle anderen Session-Typen bekommen einen
         // klaren Tool-Error.
         voiceReportToMainSession: this.voiceReportToMainSession,
+        voiceHangUp: this.voiceHangUp,
         systemPromptAddendum: isOutboundOpening
           ? outboundVoiceAddendum() + "\n\n" + (await channelAddendumAsync(entry.origin, this.paths.stickers))
           : await channelAddendumAsync(entry.origin, this.paths.stickers),
@@ -2349,11 +2360,14 @@ export class DaemonRuntime {
 
       // Wait for progressive says so the final say arrives after them.
       await sendChain;
+      const finalMessage = result.aborted ? "" : result.finalMessage;
+      if (finalMessage) {
+        voiceLog.info(`voice-timing: say_sent callId=${callId} sessionId=${sessionId}`);
+      }
 
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();
 
-      const finalMessage = result.aborted ? "" : result.finalMessage;
       const turnStartIndex = Math.max(0, entry.messages.indexOf(userMessage as Message));
       const turnSlice = entry.messages.slice(turnStartIndex);
       const { tool_calls, tool_results } = extractToolData(turnSlice);
@@ -2404,6 +2418,7 @@ export class DaemonRuntime {
     for (const [callId, sid] of this.voiceCallSessions) {
       if (sid === sessionId) this.voiceCallSessions.delete(callId);
     }
+    this.voiceCallSessionsBySession.delete(sessionId);
     const entry = this.sessions.get(sessionId);
     if (!entry) return;
     const transcriptPath = entry.session.transcriptPath;
@@ -2631,6 +2646,27 @@ export class DaemonRuntime {
       log.warn("report delivery failed", { error: msg });
       return { ok: false, error: msg };
     }
+  };
+
+  /**
+   * Bot-side hangup capability for the `hang_up` tool (voice sessions only).
+   * Sends `end_call` over the voice IPC to the adapter; the adapter runs
+   * teardown + voip.endCall. The call's `call_ended` message then flows back
+   * through the normal finishCall path (system event "Anruf beendet …").
+   */
+  private readonly voiceHangUp = async (): Promise<{ ok: boolean; error?: string }> => {
+    const log = this.logger.child("voice");
+    const caller = this.currentVoiceSessionCaller;
+    if (!caller) {
+      return { ok: false, error: "Keine aktive Voice-Session — hang_up erfordert einen laufenden Anruf." };
+    }
+    const callId = this.voiceCallSessionsBySession.get(caller.sessionId);
+    if (!callId || !this.voiceChannel) {
+      return { ok: false, error: "Kein Voice-Channel/Call für diese Session gefunden." };
+    }
+    this.voiceChannel.endCall(callId, "agent_requested");
+    log.info("hang_up ausgeführt (end_call gesendet)", { sessionId: caller.sessionId, callId });
+    return { ok: true };
   };
 
   /**

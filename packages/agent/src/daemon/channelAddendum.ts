@@ -69,11 +69,11 @@ Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, 
 
 Wenn dein Gegenüber dich bittet, etwas der Main-Session zu übermitteln, nutze sofort report_to_main_session. Fasse am Call-Ende wichtige Ergebnisse/Beschlüsse als kompakten Report für die Main-Session zusammen (wie ein Subagent-Report).
 
-Wenn du angerufen hast: Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing.`;
+Wenn dein Gegenüber dich bittet aufzulegen (z.B. "Leg auf", "Ich muss los"), verabschiede dich kurz und beende das Gespräch mit dem Tool hang_up.`;
 
 const OUTBOUND_VOICE_ADDENDUM = `## Voice-Call (Outbound)
 
-Du hast angerufen. Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing.`;
+Du hast angerufen. Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing. Wenn dein Gegenüber dich bittet aufzulegen, verabschiede dich kurz und beende das Gespräch mit dem Tool hang_up.`;
 
 const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 

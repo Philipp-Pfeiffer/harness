@@ -187,8 +187,15 @@ export class VoiceChannel {
           return;
         }
         this.callToSocket.set(msg.callId, socket);
+        this.opts.log(`voice-timing: transcript_final_received callId=${msg.callId} sessionId=${sessionId}`, "info");
+        const turnStartedAt = Date.now();
         const { finalResponse } = await this.opts.callbacks.submitTurn(sessionId, msg.callId, msg.text);
+        this.opts.log(
+          `voice-timing: turn_end callId=${msg.callId} sessionId=${sessionId} turnMs=${Date.now() - turnStartedAt}`,
+          "info",
+        );
         if (finalResponse) {
+          this.opts.log(`voice-timing: say_sent callId=${msg.callId} sessionId=${sessionId}`, "info");
           this.say(msg.callId, finalResponse);
         }
         break;

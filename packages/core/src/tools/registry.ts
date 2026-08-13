@@ -18,6 +18,7 @@ import { sendStickerTool } from "./send_sticker.js";
 import { requestRestartTool } from "./requestRestart.js";
 import { callUserTool } from "./call_user.js";
 import { reportToMainSessionTool } from "./report_to_main_session.js";
+import { hangUpTool } from "./hang_up.js";
 import { createBrowserTool } from "./browser.js";
 import { createImageTool } from "./image.js";
 
@@ -87,6 +88,7 @@ export function loadTools(
     requestRestartTool,
     callUserTool,
     reportToMainSessionTool,
+    hangUpTool,
     createSearchMemoryTool(opts.memoryBackend),
     createWebSearchTool(opts.webConfig),
     createWebFetchTool(opts.webConfig),

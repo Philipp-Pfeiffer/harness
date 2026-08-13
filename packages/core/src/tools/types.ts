@@ -96,6 +96,13 @@ export interface ToolCallContext {
    */
   voiceReportToMainSession?: (text: string) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional bot-side hangup capability for the `hang_up` tool. Injected by
+   * the daemon ONLY for voice sessions (origin "voice"): it sends `end_call`
+   * over the voice IPC to the adapter, which tears down and hangs up.
+   * When absent (any non-voice session), `hang_up` returns an error.
+   */
+  voiceHangUp?: () => Promise<{ ok: boolean; error?: string }>;
+  /**
    * Optional status callback for long-running tools (e.g. browser sub-agent).
    * When present, tools may emit progress updates that reach the TUI via IPC.
    */
