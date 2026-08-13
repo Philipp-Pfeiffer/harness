@@ -242,7 +242,11 @@ export function createAsyncAgentRunner(opts: AsyncAgentOptions): AsyncAgentRunne
           systemPrompt: persona,
           model,
           maxIterations: 100,
-          maxTokens: 4096,
+          // Orient the subagent's output budget at the model's own limit
+          // (e.g. 8192 for the deepseek presets) instead of a hard-coded
+          // 4096 that halved it and starved structured tool calls on long
+          // briefings + reasoning-heavy models.
+          maxTokens: model.maxTokens,
           logger: opts.logger,
         });
 
@@ -282,6 +286,21 @@ export function createAsyncAgentRunner(opts: AsyncAgentOptions): AsyncAgentRunne
           // Provider error / crash / turn limit — the run itself reports
           // the failure; mark the task failed, not done.
           await finalize("error", truncate(runResult.error.message, 200));
+          return;
+        }
+        // Guard: a "done" run that emitted an UNPARSED tool call as raw text
+        // (the model wrote `<tool_call>`-style markup instead of a structured
+        // tool call) did not actually work the task. Without tools the model
+        // falls into prose and the runner previously marked that silently done.
+        // Surface it as an error so the real symptom is visible.
+        if (runResult.toolCallCount === 0 && /<\s*(tool_call|invoke|function_call)\b/i.test(runResult.finalMessage)) {
+          await finalize(
+            "error",
+            truncate(
+              `Lauf endete mit ungeparstem Tool-Call statt strukturiertem Aufruf (${runResult.turns} Turn(s)): ${runResult.finalMessage}`,
+              200,
+            ),
+          );
           return;
         }
         await finalize("done", truncate(runResult.finalMessage, 200));
