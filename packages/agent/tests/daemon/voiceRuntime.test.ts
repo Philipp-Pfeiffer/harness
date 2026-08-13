@@ -70,7 +70,7 @@ type RuntimeInternals = {
   sessions: Map<string, SessionEntry>;
   voiceCallSessions: Map<string, string>;
   resolveVoiceSession: (callId: string, ts: number, from: string) => Promise<string>;
-  submitVoiceTurn: (sessionId: string, text: string) => Promise<{ finalResponse: string }>;
+  submitVoiceTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
   endVoiceSession: (sessionId: string) => Promise<void>;
 };
 
@@ -134,7 +134,7 @@ describe("Voice turn flow in DaemonRuntime", () => {
     let capturedAddendum: string | undefined;
     const { internals } = await makeRuntime({ addendumRecorder: (a) => (capturedAddendum = a) });
 
-    const result = await internals.submitVoiceTurn("voice-123", "Hallo");
+    const result = await internals.submitVoiceTurn("voice-123", "c1", "Hallo");
 
     expect(result.finalResponse).toBe("Antwort im Anruf");
     expect(capturedAddendum).toContain("TTS-verträglich");

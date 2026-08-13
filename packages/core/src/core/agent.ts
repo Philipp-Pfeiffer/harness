@@ -145,6 +145,14 @@ export interface RunOptions {
    */
   postRestartFollowUp?: boolean;
   /**
+   * Optional voice-call starter capability for the `call_user` tool.
+   * Injected by the daemon when the voice channel is active; the tool calls
+   * it with the target number + briefing and the daemon enforces the
+   * registry gate (fail-closed) + rate limit before placing the call.
+   * When absent (no voice channel active), `call_user` returns an error.
+   */
+  voiceCallStarter?: (sessionId: string, call: { number: string; briefing: string }) => Promise<{ ok: boolean; error?: string; callId?: string }>;
+  /**
    * Optional session scope for per-session tool state (read-before-edit
    * guard). Falls back to `compaction.sessionId`, then to a
    * per-agent-instance default. Never a process-global scope.
@@ -449,7 +457,7 @@ export function createAgent(config: AgentConfig): Agent {
       systemPrompt = newPrompt;
     },
     async run(messages: Message[], options: RunOptions = {}): Promise<RunResult> {
-      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, systemPromptAddendum, cwd } = options;
+      const { signal, internalAbortSignal, onEvent, mailbox, memoryBackend, metricsRecorder, compaction, channelFileSender, channelStickerSender, stickerLibraryDir, requestRestart, postRestartFollowUp, voiceCallStarter, systemPromptAddendum, cwd } = options;
       let memoryHintAnchor: Message | undefined;
       let memoryHintBlock: string | undefined;
 
@@ -489,6 +497,7 @@ export function createAgent(config: AgentConfig): Agent {
         stickerLibraryDir,
         requestRestart,
         postRestartFollowUp,
+        voiceCallStarter,
         onStatus: (status) => onEvent?.({ type: "status", status }),
         signal,
       };

@@ -56,9 +56,37 @@ ignoriert.
 // Bot-seitiges Auflegen.
 {"type":"end_call","callId":"...","reason":"..."}
 
-// Outbound-Call — v1 definiert/typiert nur; Implementierung = v1.1.
+// Outbound-Call — IMPLEMENTIERT (v1.1). Der Daemon initiiert den Anruf;
+// der Adapter wählt, meldet call_started (direction=outbound) und später
+// call_ended. jid = <digits>@s.whatsapp.net, briefing = Seed-Text der
+// ersten Voice-Turn (Begrüßung + Bericht).
 {"type":"start_call","callId":"...","jid":"...","briefing":"..."}
 ```
+
+## Outbound-Eventfluss (v1.1)
+
+`call_user`-Tool → Daemon → Adapter → Anruf → zurück:
+
+1. Der Agent ruft das `call_user`-Tool mit `number` (internationales Format)
+   und `briefing` auf.
+2. Der Daemon normalisiert die Nummer auf Ziffern und prüft die
+   **fail-closed Registry** `$HARNESS_HOME/voice-registry.json`. Nicht
+   gelistet / Datei fehlt / kaputt → Tool-Error, **kein** Anruf.
+3. Der Daemon prüft das **Rate-Limit** (max. 1 Call pro Nummer pro 10 Min,
+   persistiert in `$HARNESS_STATE/voice-ratelimit.json`). Verstoß →
+   Tool-Error mit Wartezeit.
+4. Bei Erfolg sendet der Daemon `start_call{callId, jid, briefing}` an den
+   Adapter und legt eine Voice-Session `voice-<ts>` an.
+5. Der Adapter mappt `jid` → `CallRouter.callOutbound`, wählt und meldet
+   `call_started{direction:"outbound"}` zurück.
+6. Der Daemon seedet das `briefing` als erste Turn der Voice-Session — der
+   Agent eröffnet mit Begrüßung + Bericht, ohne auf User-Input zu warten.
+   Progressive `say`-Nachrichten (Zwischen-Texte vor Tool-Calls) und die
+   finale Antwort werden wie bei Inbound-Turns gesprochen.
+7. Beim Auflegen sendet der Adapter `call_ended{reason}` (inkl.
+   `no-answer`/`timeout`). Der Daemon injiziert ein System-Event
+   ("Anruf an <Name/Nummer> beendet, Dauer X, Grund Y") in die anfordernde
+   Chat-Session.
 
 ## Session-Mapping
 

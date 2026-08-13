@@ -80,6 +80,14 @@ export interface ToolCallContext {
    */
   postRestartFollowUp?: boolean;
   /**
+   * Optional voice-call starter capability for the `call_user` tool.
+   * Injected by the daemon when the voice channel is active; the tool calls
+   * it with the target number + briefing and the daemon enforces the
+   * registry gate (fail-closed) + rate limit before placing the call.
+   * When absent (no voice channel active), `call_user` returns an error.
+   */
+  voiceCallStarter?: (sessionId: string, call: { number: string; briefing: string }) => Promise<{ ok: boolean; error?: string; callId?: string }>;
+  /**
    * Optional status callback for long-running tools (e.g. browser sub-agent).
    * When present, tools may emit progress updates that reach the TUI via IPC.
    */

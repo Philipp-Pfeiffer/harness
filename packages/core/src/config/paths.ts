@@ -49,6 +49,10 @@ export interface HarnessPaths {
   socketFile: string;
   /** $state/voice.sock — Voice-Adapter IPC (NDJSON, siehe docs/voice-ipc.md). */
   voiceSocketFile: string;
+  /** $home/voice-registry.json — Outbound-Call-Registry (fail-closed Allowlist). */
+  voiceRegistry: string;
+  /** $state/voice-ratelimit.json — Outbound-Call-Rate-Limit-Persistenz. */
+  voiceRatelimit: string;
 }
 
 /**
@@ -96,6 +100,8 @@ export function resolveHarnessPaths(opts?: { home?: string; state?: string }): H
     pidFile: path.join(state, "daemon.pid"),
     socketFile: path.join(state, "daemon.sock"),
     voiceSocketFile: path.join(state, "voice.sock"),
+    voiceRegistry: path.join(home, "voice-registry.json"),
+    voiceRatelimit: path.join(state, "voice-ratelimit.json"),
   };
 }
 

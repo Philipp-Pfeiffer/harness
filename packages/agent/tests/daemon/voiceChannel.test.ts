@@ -13,13 +13,17 @@ const log = () => {};
 const sessions = new Map<string, { ts: number; from: string }>();
 const turns: Array<{ sessionId: string; text: string }> = [];
 const ended: string[] = [];
+const outboundStarted: Array<{ callId: string; sessionId: string }> = [];
+const outboundEnded: Array<{ callId: string; sessionId: string; reason: string }> = [];
 
 function makeCallbacks() {
   sessions.clear();
   turns.length = 0;
   ended.length = 0;
+  outboundStarted.length = 0;
+  outboundEnded.length = 0;
   return {
-    submitTurn: async (sessionId: string, text: string) => {
+    submitTurn: async (sessionId: string, callId: string, text: string) => {
       turns.push({ sessionId, text });
       return { finalResponse: `reply:${text}` };
     },
@@ -30,6 +34,12 @@ function makeCallbacks() {
     },
     endSession: async (sessionId: string) => {
       ended.push(sessionId);
+    },
+    onOutboundCallStarted: async (callId: string, sessionId: string) => {
+      outboundStarted.push({ callId, sessionId });
+    },
+    onOutboundCallEnded: async (callId: string, sessionId: string, reason: string) => {
+      outboundEnded.push({ callId, sessionId, reason });
     },
   };
 }
@@ -176,6 +186,55 @@ describe("VoiceChannel", () => {
     write(socket, { type: "call_error", callId: "c5", error: "boom" });
     await new Promise((r) => setTimeout(r, 50));
     expect(ended).toEqual(["voice-555"]);
+    socket.destroy();
+  });
+
+  it("startCall broadcasts start_call to a connected adapter (no callId→socket mapping yet)", async () => {
+    const socket = await connect();
+    const replyPromise = readUntil(socket, (m) => m.type === "start_call");
+
+    channel.startCall("ob-1", "4915110619636@s.whatsapp.net", "Hallo, hier ist Philipp.");
+
+    const reply = await replyPromise;
+    expect(reply).toMatchObject({
+      type: "start_call",
+      callId: "ob-1",
+      jid: "4915110619636@s.whatsapp.net",
+      briefing: "Hallo, hier ist Philipp.",
+    });
+    socket.destroy();
+  });
+
+  it("outbound call_started triggers onOutboundCallStarted (briefing seed)", async () => {
+    channel.startCall("ob-2", "4915110619636@s.whatsapp.net", "Briefing");
+    const socket = await connect();
+
+    write(socket, { type: "call_started", callId: "ob-2", from: "4915110619636", direction: "outbound", ts: 777 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(outboundStarted).toEqual([{ callId: "ob-2", sessionId: "voice-777" }]);
+    socket.destroy();
+  });
+
+  it("inbound call_started does NOT trigger onOutboundCallStarted", async () => {
+    const socket = await connect();
+    write(socket, { type: "call_started", callId: "c6", from: "+49123", direction: "inbound", ts: 888 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(outboundStarted).toEqual([]);
+    socket.destroy();
+  });
+
+  it("outbound call_ended triggers onOutboundCallEnded with the reason", async () => {
+    channel.startCall("ob-3", "4915110619636@s.whatsapp.net", "Briefing");
+    const socket = await connect();
+    write(socket, { type: "call_started", callId: "ob-3", from: "4915110619636", direction: "outbound", ts: 999 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    write(socket, { type: "call_ended", callId: "ob-3", reason: "no-answer" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(outboundEnded).toEqual([{ callId: "ob-3", sessionId: "voice-999", reason: "ended: no-answer" }]);
+    expect(ended).toEqual(["voice-999"]);
     socket.destroy();
   });
 });

@@ -16,6 +16,7 @@ import { createFindSkillTool } from "./findSkill.js";
 import { sendFileTool } from "./send_file.js";
 import { sendStickerTool } from "./send_sticker.js";
 import { requestRestartTool } from "./requestRestart.js";
+import { callUserTool } from "./call_user.js";
 import { createBrowserTool } from "./browser.js";
 import { createImageTool } from "./image.js";
 
@@ -83,6 +84,7 @@ export function loadTools(
     sendFileTool,
     sendStickerTool,
     requestRestartTool,
+    callUserTool,
     createSearchMemoryTool(opts.memoryBackend),
     createWebSearchTool(opts.webConfig),
     createWebFetchTool(opts.webConfig),

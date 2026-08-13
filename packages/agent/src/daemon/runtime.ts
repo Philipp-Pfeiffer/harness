@@ -97,6 +97,11 @@ import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
 import { channelAddendumAsync } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import { VoiceChannel, voiceSessionId } from "./voiceChannel.js";
+import {
+  loadVoiceRegistry,
+  findRegistryContact,
+  checkAndRecordRateLimit,
+} from "./voiceOutbound.js";
 import type { ChannelPlugin } from "./types.js";
 import {
   HARNESS_REPO_DIR,
@@ -349,10 +354,14 @@ export class DaemonRuntime {
         else log.info(msg);
       },
       callbacks: {
-        submitTurn: (sessionId, text) => this.submitVoiceTurn(sessionId, text),
+        submitTurn: (sessionId, callId, text) => this.submitVoiceTurn(sessionId, callId, text),
         resolveSession: (callId, callStartTs, from) =>
           this.resolveVoiceSession(callId, callStartTs, from),
         endSession: (sessionId) => this.endVoiceSession(sessionId),
+        onOutboundCallStarted: (callId, sessionId) =>
+          this.onOutboundVoiceCallStarted(callId, sessionId),
+        onOutboundCallEnded: (callId, sessionId, reason) =>
+          this.onOutboundVoiceCallEnded(callId, sessionId, reason),
       },
     });
     await this.voiceChannel.start();
@@ -1298,6 +1307,7 @@ export class DaemonRuntime {
               channelFileSender: this.channelFileSender,
               channelStickerSender: this.channelStickerSender,
               stickerLibraryDir: this.paths.stickers,
+              voiceCallStarter: this.voiceCallStarter,
               onEvent: (event) => {
                 if (!send) return;
                 let streamEvent: TurnStreamEvent | null = null;
@@ -1925,6 +1935,7 @@ export class DaemonRuntime {
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
         requestRestart: this.makeRequestRestartCapability(sessionId),
+        voiceCallStarter: this.voiceCallStarter,
         systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
         onEvent: (event) => {
           if (event.type === "token") {
@@ -2182,6 +2193,20 @@ export class DaemonRuntime {
   private readonly voiceCallSessions = new Map<string, string>();
 
   /**
+   * Outbound calls initiated via `call_user`: callId → metadata. The
+   * briefing is seeded as the first turn once the adapter reports
+   * `call_started`; the requester session receives the `call_ended` system
+   * event. Cleared when the call finishes.
+   */
+  private readonly outboundVoiceCalls = new Map<string, {
+    number: string;
+    name?: string;
+    briefing: string;
+    requesterSessionId: string;
+    callStartTs: number;
+  }>();
+
+  /**
    * Resolves or creates a voice session for a call. On a fresh daemon the
    * map is empty, so a reconnect `hello`/`call_started` creates a new
    * session (`voice-<callStartTs>`) — accepted behavior, no complex resume.
@@ -2210,9 +2235,14 @@ export class DaemonRuntime {
   /**
    * Submits a voice transcript as a normal turn in the voice session. The
    * origin "voice" injects the TTS-voice addendum via channelAddendumAsync.
+   *
+   * Progressive speech: agent text segments produced BEFORE a tool call are
+   * spoken immediately via `say` (so the callee hears an announcement while
+   * tools run); the final response is spoken once at turn end (unchanged).
    */
   private async submitVoiceTurn(
     sessionId: string,
+    callId: string,
     text: string,
   ): Promise<{ finalResponse: string }> {
     const entry = this.sessions.get(sessionId);
@@ -2232,6 +2262,18 @@ export class DaemonRuntime {
     };
     entry.messages.push(userMessage as Message);
 
+    // Progressive speech: buffer text tokens, speak them when a tool call
+    // begins (the callee must not hear silence during tool work).
+    let progressiveText = "";
+    let sendChain: Promise<void> = Promise.resolve();
+    const queueProgressiveSay = (segment: string): void => {
+      const trimmed = segment.trim();
+      if (!trimmed) return;
+      sendChain = sendChain.then(() => {
+        this.voiceChannel?.say(callId, trimmed);
+      });
+    };
+
     this.turnActive = true;
     try {
       const result = await appliedCtx.agent.run(entry.messages, {
@@ -2247,8 +2289,20 @@ export class DaemonRuntime {
         channelFileSender: this.channelFileSender,
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
+        voiceCallStarter: this.voiceCallStarter,
         systemPromptAddendum: await channelAddendumAsync(entry.origin, this.paths.stickers),
+        onEvent: (event) => {
+          if (event.type === "token") {
+            progressiveText += event.text;
+          } else if (event.type === "tool_call_start") {
+            queueProgressiveSay(progressiveText);
+            progressiveText = "";
+          }
+        },
       });
+
+      // Wait for progressive says so the final say arrives after them.
+      await sendChain;
 
       entry.turnsCompleted++;
       entry.lastActiveAt = new Date().toISOString();
@@ -2497,6 +2551,119 @@ export class DaemonRuntime {
 
   /** Reverse map: session ID → source phone number. */
   private readonly whatsappSessionToSource = new Map<string, string>();
+
+  /**
+   * Voice-call starter capability for the `call_user` tool. Runs the
+   * fail-closed registry gate + rate limit, then sends `start_call` to the
+   * adapter and records the outbound call for briefing-seeding + the
+   * `call_ended` system event.
+   */
+  private readonly voiceCallStarter = async (
+    requesterSessionId: string,
+    call: { number: string; briefing: string },
+  ): Promise<{ ok: boolean; error?: string; callId?: string }> => {
+    if (!this.voiceChannel) {
+      return { ok: false, error: "Kein Voice-Channel aktiv — Outbound-Calls sind nicht verfügbar." };
+    }
+
+    const number = call.number.replace(/\D/g, "");
+    if (!number) {
+      return { ok: false, error: "Ungültige Rufnummer (keine Ziffern)." };
+    }
+
+    // Registry-Gate (fail-closed).
+    const registry = await loadVoiceRegistry(this.paths.voiceRegistry);
+    if (!registry.ok) {
+      return { ok: false, error: `Nummer nicht in voice-registry.json — ${registry.error}` };
+    }
+    const contact = findRegistryContact(registry.contacts, number);
+    if (!contact) {
+      return {
+        ok: false,
+        error: `Nummer ${number} nicht in voice-registry.json (fail-closed — nur Registry-Nummern sind erlaubt).`,
+      };
+    }
+
+    // Rate-Limit (max 1 Call pro Nummer pro 10 Minuten, restart-sicher).
+    const rate = await checkAndRecordRateLimit(this.paths.voiceRatelimit, number);
+    if (!rate.ok) {
+      return { ok: false, error: rate.error };
+    }
+
+    const callStartTs = Date.now();
+    const callId = `ob-${callStartTs}-${number}`;
+    const jid = `${number}@s.whatsapp.net`;
+    this.outboundVoiceCalls.set(callId, {
+      number,
+      name: contact.name,
+      briefing: call.briefing,
+      requesterSessionId,
+      callStartTs,
+    });
+
+    this.logger.child("voice").info("starting outbound call", { callId, number, requesterSessionId });
+    this.voiceChannel.startCall(callId, jid, call.briefing);
+    return { ok: true, callId };
+  };
+
+  /**
+   * Called when the adapter reports `call_started` (direction=outbound) for
+   * a call the daemon initiated. Seeds the briefing as the first turn — the
+   * voice agent greets and reports without waiting for user input.
+   */
+  private async onOutboundVoiceCallStarted(callId: string, sessionId: string): Promise<void> {
+    const outbound = this.outboundVoiceCalls.get(callId);
+    if (!outbound) return;
+    this.logger.child("voice").info("outbound call started — seeding briefing", { callId, sessionId });
+    // Run the briefing as the first turn; progressive text (before tool calls)
+    // is spoken immediately, and the final greeting is spoken once at turn end.
+    void this.submitVoiceTurn(
+      sessionId,
+      callId,
+      outbound.briefing,
+    ).then(({ finalResponse }) => {
+      if (finalResponse) {
+        this.voiceChannel?.say(callId, finalResponse);
+      }
+    }).catch((err) => {
+      this.logger.child("voice").error("briefing turn failed", {
+        callId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  /**
+   * Called when an outbound call ends. Injects a system event into the
+   * originating chat session ("Anruf an <Name/Nummer> beendet, Dauer X,
+   * Grund Y") and clears the outbound tracking entry.
+   */
+  private async onOutboundVoiceCallEnded(
+    callId: string,
+    _sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const outbound = this.outboundVoiceCalls.get(callId);
+    if (!outbound) return;
+    this.outboundVoiceCalls.delete(callId);
+
+    const durationSec = Math.max(0, Math.round((Date.now() - outbound.callStartTs) / 1000));
+    const label = outbound.name ? `${outbound.name} (${outbound.number})` : outbound.number;
+    const text = `Anruf an ${label} beendet, Dauer ${durationSec}s, Grund ${reason}.`;
+
+    // Target the requesting session: resolve its source phone. When the
+    // requester is not a WhatsApp chat (e.g. TUI/API), fall back to the
+    // owner phone so the event still lands in the operator chat.
+    const source = this.whatsappSessionToSource.get(outbound.requesterSessionId);
+    try {
+      await this.injectSystemEvent({ origin: "Voice", text }, source);
+    } catch (err) {
+      this.logger.child("voice").warn("failed to inject call_ended event", {
+        callId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   /**
    * Applies a profile's tool policy to the full tool set: an explicit

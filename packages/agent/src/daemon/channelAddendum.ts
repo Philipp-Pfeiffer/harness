@@ -56,7 +56,7 @@ export function channelAddendum(origin: SessionOrigin): string | undefined {
 
 const VOICE_ADDENDUM = `## Voice-Call
 
-Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, gesprochene Sprache, KEIN Markdown, keine Listen, keine Code-Blöcke, keine URLs vorlesen. Lange Tool-Aktionen kurz verbal ankündigen. Antworten kurz halten.`;
+Du bist in einem WhatsApp-Sprachanruf. Antworte TTS-verträglich: kurze Sätze, gesprochene Sprache, KEIN Markdown, keine Listen, keine Code-Blöcke, keine URLs vorlesen. Lange Tool-Aktionen kurz verbal ankündigen. Antworten kurz halten. Kündige kurz verbal an, bevor du Tools benutzt (z.B. "Ich schaue kurz nach"), damit dein Gegenüber weiß, dass du arbeitest.`;
 
 const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 
