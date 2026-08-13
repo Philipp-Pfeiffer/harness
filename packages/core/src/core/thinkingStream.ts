@@ -95,6 +95,23 @@ export class ThinkingStreamTransformer {
   private partialLen = 0;
   /** Accumulated partial tag text (for flushing on mismatch). */
   private partialText = "";
+  /** Total length of all token text emitted during feed() this stream. */
+  private streamedTokenTextLen = 0;
+  /** Accumulated token text emitted during feed() (for re-emission as
+   * thinking when reclassified at flush()). */
+  private capturedTokenText = "";
+  /** True if any explicit `<think>`/`</think>` tag was seen this stream. */
+  private sawVisibleDelimiter = false;
+  /** Set when the last flush() reclassified untagged reasoning — the
+   * caller must rewind the token text already emitted during feed(). */
+  private revokedTokenTextLen = 0;
+  /** Reasoning-capable model: untagged text with no visible delimiter
+   * is reclassified as thinking at flush(). */
+  private readonly assumeUntaggedIsReasoning: boolean;
+
+  constructor(assumeUntaggedIsReasoning = false) {
+    this.assumeUntaggedIsReasoning = assumeUntaggedIsReasoning;
+  }
 
   /**
    * Feed a chunk of text from the LLM stream.
@@ -120,7 +137,11 @@ export class ThinkingStreamTransformer {
             if (partial > 0) {
               // Emit the safe prefix, buffer the partial.
               const safe = remaining.slice(0, remaining.length - partial);
-              if (safe) outputs.push({ type: "token", text: safe });
+              if (safe) {
+                outputs.push({ type: "token", text: safe });
+                this.streamedTokenTextLen += safe.length;
+                this.capturedTokenText += safe;
+              }
               this.partialText = remaining.slice(remaining.length - partial);
               this.partialLen = partial;
               this.state = "text_partial";
@@ -128,11 +149,18 @@ export class ThinkingStreamTransformer {
             } else {
               // No match at all — emit everything.
               outputs.push({ type: "token", text: remaining });
+              this.streamedTokenTextLen += remaining.length;
+              this.capturedTokenText += remaining;
               pos = chunk.length;
             }
           } else {
             // Found the open tag. Emit text before it.
-            if (idx > 0) outputs.push({ type: "token", text: remaining.slice(0, idx) });
+            if (idx > 0) {
+              outputs.push({ type: "token", text: remaining.slice(0, idx) });
+              this.streamedTokenTextLen += idx;
+              this.capturedTokenText += remaining.slice(0, idx);
+            }
+            this.sawVisibleDelimiter = true;
             this.state = "thinking";
             pos += idx + OPEN_TAG.length;
           }
@@ -161,6 +189,7 @@ export class ThinkingStreamTransformer {
           } else {
             // Found the close tag. Emit thinking text before it.
             if (idx > 0) outputs.push({ type: "thinking", text: remaining.slice(0, idx) });
+            this.sawVisibleDelimiter = true;
             this.state = "text";
             pos += idx + CLOSE_TAG.length;
           }
@@ -181,7 +210,12 @@ export class ThinkingStreamTransformer {
             this.partialLen += result.consumed;
           } else {
             // Mismatch — flush the buffered partial as token text.
-            if (this.partialText) outputs.push({ type: "token", text: this.partialText });
+            if (this.partialText) {
+              outputs.push({ type: "token", text: this.partialText });
+              this.streamedTokenTextLen += this.partialText.length;
+              this.capturedTokenText += this.partialText;
+            }
+            this.sawVisibleDelimiter = true;
             this.partialText = "";
             this.partialLen = 0;
             this.state = "text";
@@ -225,6 +259,27 @@ export class ThinkingStreamTransformer {
    */
   flush(): ThinkingStreamOutput[] {
     const outputs: ThinkingStreamOutput[] = [];
+    this.revokedTokenTextLen = 0;
+    // Reasoning-capable models stream their reasoning as *untagged* text
+    // (DeepSeek Pro via OpenRouter). If the whole stream contained no
+    // visible-text delimiter (no `<think>` open, no `</think>` close,
+    // no partial-tag mismatch), everything that passed through as "token"
+    // is actually reasoning — reclassify it as thinking so it can never
+    // leak into the visible assistant output.
+    if (
+      this.assumeUntaggedIsReasoning &&
+      this.streamedTokenTextLen > 0 &&
+      !this.sawVisibleDelimiter
+    ) {
+      // The feed()-emitted token text is revoked: the caller (agent.ts)
+      // rewinds its partial accumulator and downstream listeners truncate
+      // their progressive output by revokedTokenTextLength(). The
+      // reasoning text itself is re-emitted as thinking events so it is
+      // visible as reasoning (e.g. in the CLI), never as assistant text.
+      const thinkingText = this.capturedTokenText;
+      this.revokedTokenTextLen = this.streamedTokenTextLen;
+      outputs.push({ type: "thinking", text: thinkingText });
+    }
     if (this.partialText) {
       const type: "token" | "thinking" =
         this.state === "thinking_partial" ? "thinking" : "token";
@@ -232,9 +287,19 @@ export class ThinkingStreamTransformer {
       this.partialText = "";
       this.partialLen = 0;
     }
+    this.streamedTokenTextLen = 0;
+    this.capturedTokenText = "";
     // Reset to text state — no dangling think blocks.
     this.state = "text";
     return outputs;
+  }
+
+  /** Length of token text emitted during feed() that flush() has since
+   * reclassified as thinking. The caller (agent.ts) rewinds its partial
+   * text accumulator by this amount so the reasoning never becomes part
+   * of the visible assistant output. Valid only after a flush() call. */
+  revokedTokenTextLength(): number {
+    return this.revokedTokenTextLen;
   }
 
   /** Whether the transformer is currently inside a think block. */

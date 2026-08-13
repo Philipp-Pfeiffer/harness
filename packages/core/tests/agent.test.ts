@@ -21,6 +21,17 @@ const echoArgs = Type.Object({ text: Type.String() });
 
 const model = getModel("minimax", "MiniMax-M2.7");
 
+/** A reasoning-capable model (e.g. DeepSeek Pro) — reasoning: true. */
+const reasoningModel = {
+  provider: "minimax",
+  name: "MiniMax-Reasoning",
+  id: "minimax/MiniMax-Reasoning",
+  api: "anthropic-messages",
+  reasoning: true,
+  contextWindow: 128000,
+  maxTokens: 4096,
+} as any;
+
 function makeUserMessage(content: string): Message {
   return {
     role: "user",
@@ -485,6 +496,51 @@ describe("Agent", () => {
       const tokenEvents = events.filter((e) => e.type === "token");
       expect(tokenEvents.length).toBe(1);
       expect(tokenEvents[0].text).toBe("First");
+    });
+
+    it("routes untagged reasoning text_delta as thinking when model is reasoning-capable (leak prevention)", async () => {
+      // Untagged reasoning text — exactly what DeepSeek Pro via OpenRouter
+      // streams when inlineThinking is enabled but the content has no
+      // explicit <think> tags.
+      const tokens = ["Philipp ", "fragt etwas ", "hier ist die Antwort"];
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Nur sichtbarer Text" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse, tokens));
+
+      const events: import("../src/core/agent.js").AgentEvent[] = [];
+      const agent = createAgent({ tools: [], model: reasoningModel });
+      const result = await agent.run([makeUserMessage("Hi")], {
+        onEvent: (e) => events.push(e),
+      });
+
+      // finalMessage derives from the final response content — untagged
+      // streamed reasoning must never become token events or partialText.
+      expect(result.finalMessage).toBe("Nur sichtbarer Text");
+      // The untagged streamed text passes through the transformer as
+      // token events during feed() (indistinguishable mid-stream), but
+      // flush() reclassifies it and the final message derives from the
+      // final assistant content — so the reasoning never reaches output.
+      const tokenEvents = events.filter((e) => e.type === "token");
+      expect(tokenEvents.map((e) => e.text).join("")).toBe("Philipp fragt etwas hier ist die Antwort");
+      const thinkingEvents = events.filter((e) => e.type === "thinking");
+      expect(thinkingEvents.length).toBeGreaterThanOrEqual(1);
+      expect(thinkingEvents.map((e) => e.text).join("")).toBe("Philipp fragt etwas hier ist die Antwort");
+      expect(result.finalMessage).not.toContain("Philipp");
+    });
+
+    it("keeps streamed text as visible tokens when the model has no reasoning capability", async () => {
+      const tokens = ["Sichtbare ", "Antwort"];
+      const mockResponse = makeAssistantMessage([{ type: "text", text: "Sichtbare Antwort" }], "stop");
+      vi.mocked(stream).mockReturnValueOnce(mockStream(mockResponse, tokens));
+
+      const events: import("../src/core/agent.js").AgentEvent[] = [];
+      const agent = createAgent({ tools: [], model });
+      const result = await agent.run([makeUserMessage("Hi")], {
+        onEvent: (e) => events.push(e),
+      });
+
+      expect(result.finalMessage).toBe("Sichtbare Antwort");
+      const tokenEvents = events.filter((e) => e.type === "token");
+      expect(tokenEvents.map((e) => e.text).join("")).toBe("Sichtbare Antwort");
     });
 
     it("emits tool_call_start, tool_call_done and turn_end events", async () => {

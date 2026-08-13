@@ -221,6 +221,7 @@ export type AgentEvent =
   | { type: "tool_call_error"; name: string; error: string }
   | { type: "status"; status: string }
   | { type: "turn_end"; turn: number }
+  | { type: "token_revoke"; length: number }
   | { type: "usage"; inputTokens: number; outputTokens: number; totalTokens: number; callInputTokens: number; callOutputTokens: number; callTotalTokens: number; cacheRead: number; cacheWrite: number; callCacheRead: number; callCacheWrite: number };
 
 function toPiTool(tool: Tool): PiTool {
@@ -411,10 +412,12 @@ export interface AgentConfig {
   maxIterations?: number;
   model?: Model<Api>;
   logger?: Logger;
-  /** Whether the model emits thinking as inline `simd` tags instead of
+  /** Whether the model emits thinking as inline `<think>` tags instead of
    * separate `reasoning_content`. When true, a `ThinkingStreamTransformer`
-   * parses `text_delta` chunks for `simd...` segments and routes them
-   * as `thinking` events. */
+   * parses `text_delta` chunks for `<think>` segments and routes them
+   * as `thinking` events. When false, a reasoning-capable model's
+   * untagged text is treated as reasoning and never becomes visible
+   * output (leak prevention). */
   inlineThinking?: boolean;
   /** Optional sampling parameters forwarded to the provider on every call. */
   temperature?: number;
@@ -444,8 +447,14 @@ export interface Agent {
 }
 
 export function createAgent(config: AgentConfig): Agent {
-  const { tools, maxIterations: configMaxIterations = 100, model, logger, inlineThinking = false, temperature, maxTokens, retryPolicy } = config;
+  const { tools, maxIterations: configMaxIterations = 100, model, logger, inlineThinking, temperature, maxTokens, retryPolicy } = config;
   const maxIterations = configMaxIterations;
+  // Reasoning-capable models that stream their reasoning inline (e.g.
+  // DeepSeek via OpenRouter) must have the ThinkingStreamTransformer
+  // enabled — otherwise reasoning text leaks into the visible output.
+  // Default to enabled for `reasoning` models; explicit opt-out possible.
+  // The effective value is re-evaluated per turn from the current model
+  // (setModel may switch reasoning capability mid-session).
   // Caller must set a system prompt via setSystemPrompt(). Empty default
   // is intentional — the prompt template requires `inboxPath`; calling
   // prompt("system-prompt") without vars triggers a missing-variable warning.
@@ -612,15 +621,25 @@ export function createAgent(config: AgentConfig): Agent {
         if (maxTokens !== undefined) streamOptions.maxTokens = maxTokens;
         const providerStartMs = Date.now();
 
+        // Re-evaluated per turn — setModel() (e.g. /model pro) may have
+        // changed the model's reasoning capability since the last run.
+        const turnInlineThinking = inlineThinking ?? (resolvedModel?.reasoning === true);
+
         let response: AssistantMessage;
         let partialText = "";
-        let thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
+        // Untagged text is treated as reasoning (leak prevention) whenever
+        // the transformer is active for a reasoning-capable model.
+        let thinkingTransformer = turnInlineThinking
+          ? new ThinkingStreamTransformer(resolvedModel?.reasoning === true)
+          : null;
         let retryCount = 0;
 
         retry_loop: for (;;) {
           // Reset per-attempt state
           partialText = "";
-          thinkingTransformer = inlineThinking ? new ThinkingStreamTransformer() : null;
+          thinkingTransformer = turnInlineThinking
+            ? new ThinkingStreamTransformer(resolvedModel?.reasoning === true)
+            : null;
 
           const timeoutController = new TimeoutController(effectiveRetryPolicy.timeoutMs, signal, internalAbortSignal);
 
@@ -652,7 +671,18 @@ export function createAgent(config: AgentConfig): Agent {
 
             // Flush any remaining buffered content from the transformer.
             if (thinkingTransformer) {
-              for (const out of thinkingTransformer.flush()) {
+              const flushOutputs = thinkingTransformer.flush();
+              // A flush may REVOKE token text it already emitted during
+              // feed(): untagged reasoning of a reasoning-capable model
+              // gets reclassified to thinking. Rewind partialText and
+              // notify the streaming layer (runtime.ts's progressiveText)
+              // so reasoning never becomes visible assistant output.
+              const revokeLen = thinkingTransformer.revokedTokenTextLength();
+              if (revokeLen > 0) {
+                partialText = partialText.slice(0, -revokeLen);
+                onEvent?.({ type: "token_revoke", length: revokeLen });
+              }
+              for (const out of flushOutputs) {
                 if (out.type === "token") {
                   partialText += out.text;
                   onEvent?.({ type: "token", text: out.text });

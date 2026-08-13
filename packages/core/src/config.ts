@@ -21,7 +21,7 @@ export type ConfigModel = {
   baseUrl?: string;
   apiKey?: string;
   reasoning?: boolean;
-  /** Enable inline ` simd` tag parsing for providers that embed reasoning
+  /** Enable inline `<think>` tag parsing for providers that embed reasoning
    * in the content stream instead of using `reasoning_content`. */
   inlineThinking?: boolean;
   input?: ("text" | "image")[];
