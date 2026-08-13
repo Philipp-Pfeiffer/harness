@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { rm, mkdir } from "node:fs/promises";
+import { rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Agent, RunResult, Model, HarnessPaths } from "@harness/core";
@@ -77,6 +77,7 @@ type RuntimeInternals = {
   outboundVoiceCalls: Map<string, {
     number: string;
     name?: string;
+    label?: string;
     briefing: string;
     requesterSessionId: string;
     callStartTs: number;
@@ -94,6 +95,9 @@ type RuntimeInternals = {
   voiceChannel: { say(callId: string, text: string): void; endCall(callId: string, reason: string): void } | null;
   logger: { child(component: string): { info(msg: string): void; error(msg: string): void; warn(msg: string): void } };
   voiceCallSessionsBySession: Map<string, string>;
+  pendingHangupSessions: Set<string>;
+  pendingHangupFallbacks: Map<string, ReturnType<typeof setTimeout>>;
+  afterVoiceFinalSay: (callId: string, sessionId: string, finalResponse: string) => void;
 };
 
 async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefined) => void }) {
@@ -124,6 +128,8 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   internals.voiceChannel = null;
   internals.outboundVoiceCalls = new Map();
   internals.voiceCallSessionsBySession = new Map();
+  internals.pendingHangupSessions = new Set();
+  internals.pendingHangupFallbacks = new Map();
   const voiceLogMocks = { info: vi.fn(), error: vi.fn(), warn: vi.fn() };
   internals.logger = {
     child: () => voiceLogMocks,
@@ -272,16 +278,16 @@ describe("Voice turn flow in DaemonRuntime", () => {
       requesterSessionId: "whatsapp-req",
       callStartTs: Date.now(),
     });
-    const fallbackSpy = vi.fn();
     internals.outboundVoiceFallbacks.set("ob-2", { unref() {}, hasRef() { return true; } } as ReturnType<typeof setTimeout>);
 
     // onOutboundCallStarted: KEIN sofortiger Turn.
     await internals.onOutboundVoiceCallStarted("ob-2", "voice-123");
     expect(agentRunMessages).toHaveLength(0);
 
-    // Erstes Transkript: Briefing als Kontext + Outbound-Addendum.
+    // Erstes Transkript: Briefing als Kontext + Outbound-Addendum + Präfix.
     await internals.submitVoiceTurn("voice-123", "ob-2", "Hallo?");
     expect(agentRunMessages).toHaveLength(1);
+    expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110619636 an.");
     expect(agentRunMessages[0]?.text).toContain("Briefing: Termin Freitag");
     expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
     expect(agentRunMessages[0]?.addendum).toContain("Du hast angerufen");
@@ -308,9 +314,10 @@ describe("Voice turn flow in DaemonRuntime", () => {
       const timer = internals.outboundVoiceFallbacks.get("ob-3")!;
       expect(timer).toBeDefined();
 
-      // Timer feuert nach 30s → Opening-Turn mit Hallo + Briefing.
+      // Timer feuert nach 30s → Opening-Turn mit Hallo + Briefing + Präfix.
       await vi.advanceTimersByTimeAsync(30_000);
       expect(agentRunMessages).toHaveLength(1);
+      expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110619636 an.");
       expect(agentRunMessages[0]?.text).toContain("Hallo, hörst du mich?");
       expect(agentRunMessages[0]?.text).toContain("Briefing: Paket abholen");
       // Timer-Eintrag wurde beim Feuern entfernt.
@@ -349,7 +356,43 @@ describe("Voice turn flow in DaemonRuntime", () => {
     }
   });
 
-  it("hang_up sends end_call via the voice channel and returns ok", async () => {
+  it("outbound context prefix: Name aus der Registry", async () => {
+    await mkdir(join(TEST_DIR, "home"), { recursive: true });
+    await writeFile(
+      join(TEST_DIR, "home", "voice-registry.json"),
+      JSON.stringify({ contacts: [{ number: "4915110619636", name: "Philipp" }] }),
+      "utf-8",
+    );
+
+    const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.outboundVoiceCalls.set("ob-known", {
+      number: "4915110619636",
+      briefing: "Briefing: Termin",
+      requesterSessionId: "whatsapp-req",
+      callStartTs: Date.now(),
+    });
+
+    await internals.submitVoiceTurn("voice-123", "ob-known", "Hallo?");
+    expect(agentRunMessages[0]?.text).toContain("Du rufst Philipp an.");
+    expect(agentRunMessages[0]?.text).toContain("Briefing: Termin");
+    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+  });
+
+  it("outbound context prefix: unbekannte Nummer → Nummer-Fallback", async () => {
+    const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.outboundVoiceCalls.set("ob-unknown", {
+      number: "4915110699999",
+      briefing: "Briefing: Termin",
+      requesterSessionId: "whatsapp-req",
+      callStartTs: Date.now(),
+    });
+
+    await internals.submitVoiceTurn("voice-123", "ob-unknown", "Hallo?");
+    expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110699999 an.");
+    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+  });
+
+  it("hang_up setzt nur das pendingHangup-Flag — kein sofortiges end_call", async () => {
     const { internals } = await makeRuntime({ addendumRecorder: () => {} });
     const endCalls: Array<{ callId: string; reason: string }> = [];
     internals.voiceChannel = {
@@ -361,6 +404,72 @@ describe("Voice turn flow in DaemonRuntime", () => {
 
     const result = await internals.voiceHangUp();
     expect(result.ok).toBe(true);
+    // Kein sofortiges end_call — nur das Flag ist gesetzt.
+    expect(endCalls).toEqual([]);
+    expect(internals.pendingHangupSessions.has("voice-123")).toBe(true);
+  });
+
+  it("end_call kommt erst nach der finalen say (afterVoiceFinalSay)", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const endCalls: Array<{ callId: string; reason: string }> = [];
+    const says: Array<{ callId: string; text: string }> = [];
+    internals.voiceChannel = {
+      say: (callId, text) => says.push({ callId, text }),
+      endCall: (callId, reason) => endCalls.push({ callId, reason }),
+    };
+    internals.currentVoiceSessionCaller = { sessionId: "voice-123" };
+    internals.voiceCallSessionsBySession.set("voice-123", "c1");
+    await internals.voiceHangUp();
+
+    // Finale say wurde (vom VoiceChannel) bereits gepusht, danach finalisiert.
+    internals.voiceChannel.say("c1", "Alles klar, tschüss!");
+    internals.afterVoiceFinalSay("c1", "voice-123", "Alles klar, tschüss!");
+
+    expect(endCalls).toEqual([{ callId: "c1", reason: "agent_requested" }]);
+    // Reihenfolge-Garantie: say vor end_call.
+    expect(says.length).toBeGreaterThan(0);
+    expect(internals.pendingHangupSessions.has("voice-123")).toBe(false);
+  });
+
+  it("leerer Turn ohne finale Antwort → end_call nach kurzer Fallback-Frist", async () => {
+    vi.useFakeTimers();
+    try {
+      const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+      const endCalls: Array<{ callId: string; reason: string }> = [];
+      internals.voiceChannel = {
+        say() {},
+        endCall: (callId, reason) => endCalls.push({ callId, reason }),
+      };
+      internals.currentVoiceSessionCaller = { sessionId: "voice-123" };
+      internals.voiceCallSessionsBySession.set("voice-123", "c1");
+      await internals.voiceHangUp();
+
+      internals.afterVoiceFinalSay("c1", "voice-123", "");
+      expect(endCalls).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(endCalls).toEqual([{ callId: "c1", reason: "agent_requested" }]);
+      expect(internals.pendingHangupSessions.has("voice-123")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("kein Doppel-end_call: finalize-Guard verhindert zweites end_call", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const endCalls: Array<{ callId: string; reason: string }> = [];
+    internals.voiceChannel = {
+      say() {},
+      endCall: (callId, reason) => endCalls.push({ callId, reason }),
+    };
+    internals.currentVoiceSessionCaller = { sessionId: "voice-123" };
+    internals.voiceCallSessionsBySession.set("voice-123", "c1");
+    await internals.voiceHangUp();
+
+    internals.afterVoiceFinalSay("c1", "voice-123", "Tschüss!");
+    // Zweiter Aufruf (z.B. konkurrierender Farewell-Pfad) darf nichts senden.
+    internals.afterVoiceFinalSay("c1", "voice-123", "Tschüss!");
+
     expect(endCalls).toEqual([{ callId: "c1", reason: "agent_requested" }]);
   });
 

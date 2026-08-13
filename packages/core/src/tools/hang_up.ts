@@ -3,8 +3,12 @@
  *
  * Deterministischer Gegenpol zur Farewell-Regex im Adapter: Wenn der Anrufer
  * den Bot bittet aufzulegen (oder der Bot aus anderen Gründen beenden will),
- * sendet dieses Tool `end_call` über den Voice-IPC an den Adapter. Der
- * Adapter führt teardown + voip.endCall aus.
+ * signalisiert dieses Tool der Daemon-Capability `voiceHangUp`, dass nach dem
+ * aktuellen Turn aufgelegt werden soll. Die Capability sendet NICHT sofort
+ * `end_call` — stattdessen setzt sie ein per-Session-Flag `pendingHangup`;
+ * das `end_call` wird erst beim Voice-Turn-Abschluss gesendet, NACH der
+ * finalen `say` (dem gesprochenen Abschied). Der Adapter spricht die `say`
+ * und drained die Audio-Queue, bevor er auflegt.
  *
  * Die Daemon-Capability `voiceHangUp` wird NUR in Voice-Sessions (origin
  * "voice") injiziert — wie `voiceReportToMainSession`. In jeder anderen
@@ -38,6 +42,6 @@ export const hangUpTool: Tool<typeof HangUpArgs> = {
     if (!result.ok) {
       return err(result.error ?? "Auflegen fehlgeschlagen.");
     }
-    return ok("Call wird beendet.");
+    return ok("Auflegen wird nach deinem Abschied ausgeführt.");
   },
 };

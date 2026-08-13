@@ -97,9 +97,12 @@ export interface ToolCallContext {
   voiceReportToMainSession?: (text: string) => Promise<{ ok: boolean; error?: string }>;
   /**
    * Optional bot-side hangup capability for the `hang_up` tool. Injected by
-   * the daemon ONLY for voice sessions (origin "voice"): it sends `end_call`
-   * over the voice IPC to the adapter, which tears down and hangs up.
-   * When absent (any non-voice session), `hang_up` returns an error.
+   * the daemon ONLY for voice sessions (origin "voice"): it sets a
+   * per-session `pendingHangup` flag instead of sending `end_call`
+   * immediately. The daemon sends `end_call` at voice-turn completion, AFTER
+   * the final `say` (the spoken farewell), so the adapter speaks the farewell
+   * and drains the audio queue before hanging up. When absent (any non-voice
+   * session), `hang_up` returns an error.
    */
   voiceHangUp?: () => Promise<{ ok: boolean; error?: string }>;
   /**

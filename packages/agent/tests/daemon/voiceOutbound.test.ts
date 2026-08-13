@@ -21,6 +21,7 @@ import {
   normalizeVoiceNumber,
   OUTBOUND_RATE_LIMIT_WINDOW_MS,
 } from "../../src/daemon/voiceOutbound.js";
+import { resolveVoiceContact } from "../../src/daemon/voiceRegistry.js";
 
 const TEST_DIR = join(tmpdir(), `harness-voiceoutbound-test-${process.pid}-${Date.now()}`);
 const REGISTRY = join(TEST_DIR, "voice-registry.json");
@@ -168,5 +169,41 @@ describe("checkAndRecordRateLimit", () => {
     await clearRateLimit(RATELIMIT, "4915110619636");
     const again = await checkAndRecordRateLimit(RATELIMIT, "4915110619636", now + 1);
     expect(again.ok).toBe(true);
+  });
+});
+
+describe("resolveVoiceContact", () => {
+  const savedHome = process.env.HARNESS_HOME;
+
+  beforeEach(() => {
+    process.env.HARNESS_HOME = TEST_DIR;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HARNESS_HOME;
+    else process.env.HARNESS_HOME = savedHome;
+  });
+
+  it("resolves a known number to its name", async () => {
+    await writeFile(
+      REGISTRY,
+      JSON.stringify({ contacts: [{ number: "4915110619636", name: "Philipp" }] }),
+      "utf-8",
+    );
+    expect(await resolveVoiceContact(REGISTRY, "4915110619636")).toBe("Philipp");
+    expect(await resolveVoiceContact(REGISTRY, "+49 151 10619636")).toBe("Philipp");
+  });
+
+  it("returns null for an unknown number", async () => {
+    await writeFile(
+      REGISTRY,
+      JSON.stringify({ contacts: [{ number: "4915110619636", name: "Philipp" }] }),
+      "utf-8",
+    );
+    expect(await resolveVoiceContact(REGISTRY, "4915110699999")).toBeNull();
+  });
+
+  it("returns null when the registry file is missing", async () => {
+    expect(await resolveVoiceContact(REGISTRY, "4915110619636")).toBeNull();
   });
 });

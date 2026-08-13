@@ -181,6 +181,9 @@ export class VoiceChannel {
           this.opts.log(`voice-timing: say_sent callId=${msg.callId} sessionId=${sessionId}`, "info");
           this.say(msg.callId, finalResponse);
         }
+        // Erst NACH der finalen say darf ein aufgeschobenes end_call finalisiert
+        // werden — so geht end_call nie vor dem gesprochenen Abschied raus.
+        await this.opts.callbacks.afterFinalSay?.(msg.callId, sessionId, finalResponse);
         break;
       }
       case "call_ended":

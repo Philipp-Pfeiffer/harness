@@ -105,6 +105,7 @@ import {
   findRegistryContact,
   checkAndRecordRateLimit,
 } from "./voiceOutbound.js";
+import { resolveVoiceContact } from "./voiceRegistry.js";
 import type { ChannelPlugin } from "./types.js";
 import {
   HARNESS_REPO_DIR,
@@ -120,6 +121,13 @@ import { MailPoller } from "../mail/poller.js";
 
 /** Fallback-Frist für den Eröffnungs-Ping bei Outbound-Calls (ms). */
 const OUTBOUND_OPENING_FALLBACK_MS = 30_000;
+
+/**
+ * Fallback-Frist für den aufgeschobenen Hangup (pendingHangup) bei einem
+ * leeren Turn: Hat der Agent keine finale Antwort (Abschied) erzeugt, geht
+ * `end_call` nach dieser kurzen Frist raus, statt sofort im Turn abzubrechen.
+ */
+const PENDING_HANGUP_FALLBACK_MS = 1_500;
 
 /** Formats a context window size for user feedback, e.g. 131072 → "128k". */
 function formatContextWindow(contextWindow: number | undefined): string {
@@ -375,6 +383,8 @@ export class DaemonRuntime {
           this.onVoiceCallEnded(callId, sessionId, reason, isOutbound),
         onOutboundCallEnded: (callId: string, sessionId: string, reason: string) =>
           this.onOutboundVoiceCallEnded(callId, sessionId, reason),
+        afterFinalSay: (callId, sessionId, finalResponse) =>
+          this.afterVoiceFinalSay(callId, sessionId, finalResponse),
       },
     });
     await this.voiceChannel.start();
@@ -2263,6 +2273,8 @@ export class DaemonRuntime {
   private readonly outboundVoiceCalls = new Map<string, {
     number: string;
     name?: string;
+    /** Anzeigename für den Outbound-Kontext-Präfix (Name aus Registry, sonst Nummer). */
+    label?: string;
     briefing: string;
     requesterSessionId: string;
     callStartTs: number;
@@ -2437,7 +2449,9 @@ export class DaemonRuntime {
       }
       outbound.briefingConsumed = true;
       isOutboundOpening = true;
-      text = `${outbound.briefing}\n\n[Der Angerufene sagt:] ${text}`;
+      const label = outbound.label ?? (await this.voiceCallerLabel(outbound.number));
+      outbound.label = label;
+      text = `Du rufst ${label} an.\n\n${outbound.briefing}\n\n[Der Angerufene sagt:] ${text}`;
     }
     const voiceLog = this.logger.child("voice");
     voiceLog.info(`voice-timing: turn_start callId=${callId} sessionId=${sessionId}`);
@@ -2804,9 +2818,14 @@ export class DaemonRuntime {
 
   /**
    * Bot-side hangup capability for the `hang_up` tool (voice sessions only).
-   * Sends `end_call` over the voice IPC to the adapter; the adapter runs
-   * teardown + voip.endCall. The call's `call_ended` message then flows back
-   * through the normal finishCall path (system event "Anruf beendet …").
+   *
+   * WICHTIG: sendet NICHT sofort `end_call`. Stattdessen wird pro Session das
+   * Flag `pendingHangup` gesetzt; das tatsächliche `end_call` wird erst beim
+   * Voice-Turn-Abschluss finalisiert — NACH der finalen `say` (dem gesprochenen
+   * Abschied). Der Adapter spricht die `say` und drained die Audio-Queue, bevor
+   * er auflegt. Ein leerer Turn (kein Abschied) holt das `end_call` nach einer
+   * kurzen Fallback-Frist nach. Der Farewell-Regex-Pfad im Adapter bleibt
+   * unverändert; der einmalige finalize-Guard verhindert doppeltes `end_call`.
    */
   private readonly voiceHangUp = async (): Promise<{ ok: boolean; error?: string }> => {
     const log = this.logger.child("voice");
@@ -2818,10 +2837,64 @@ export class DaemonRuntime {
     if (!callId || !this.voiceChannel) {
       return { ok: false, error: "Kein Voice-Channel/Call für diese Session gefunden." };
     }
-    this.voiceChannel.endCall(callId, "agent_requested");
-    log.info("hang_up ausgeführt (end_call gesendet)", { sessionId: caller.sessionId, callId });
+    this.pendingHangupSessions.add(caller.sessionId);
+    log.info("hang_up ausgeführt (pendingHangup gesetzt — end_call folgt nach finaler say)", {
+      sessionId: caller.sessionId,
+      callId,
+    });
     return { ok: true };
   };
+
+  private async finalizePendingHangup(sessionId: string): Promise<void> {
+    if (!this.pendingHangupSessions.delete(sessionId)) return;
+
+    const existingFallback = this.pendingHangupFallbacks.get(sessionId);
+    if (existingFallback) {
+      clearTimeout(existingFallback);
+      this.pendingHangupFallbacks.delete(sessionId);
+    }
+
+    const callId = this.voiceCallSessionsBySession.get(sessionId);
+    if (!callId || !this.voiceChannel) return;
+
+    this.voiceChannel.endCall(callId, "agent_requested");
+    this.logger
+      .child("voice")
+      .info("end_call nach finaler say gesendet (pendingHangup finalisiert)", { sessionId, callId });
+  }
+
+  /**
+   * Wird nach der finalen `say` eines Voice-Turns aufgerufen (bzw. ohne `say`
+   * bei einem leeren Turn). Finalisiert einen aufgeschobenen Hangup erst NACH
+   * dem `say`; ohne finale Antwort wird ein kurzer Fallback-Timer bewaffnet.
+   */
+  private afterVoiceFinalSay(_callId: string, sessionId: string, finalResponse: string): void {
+    if (!this.pendingHangupSessions.has(sessionId)) return;
+
+    if (finalResponse) {
+      // Finale say wurde bereits an den Adapter geschoben → jetzt end_call.
+      void this.finalizePendingHangup(sessionId);
+      return;
+    }
+
+    // Leerer Turn: end_call nach kurzer Frist nachholen (einmalig).
+    if (this.pendingHangupFallbacks.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.pendingHangupFallbacks.delete(sessionId);
+      void this.finalizePendingHangup(sessionId);
+    }, PENDING_HANGUP_FALLBACK_MS);
+    timer.unref?.();
+    this.pendingHangupFallbacks.set(sessionId, timer);
+  }
+
+  /**
+   * Löst die Zielnummer eines Outbound-Calls zu einem Anzeigenamen auf —
+   * `resolveVoiceContact` liefert den Registry-Namen, unbekannt → Nummer.
+   */
+  private async voiceCallerLabel(number: string): Promise<string> {
+    const name = await resolveVoiceContact(this.paths.voiceRegistry, number);
+    return name ?? number;
+  }
 
   /**
    * Caller context of the voice turn currently being submitted. Tracked so
@@ -2832,6 +2905,21 @@ export class DaemonRuntime {
    * phone. Cleared after the turn.
    */
   private currentVoiceSessionCaller: { sessionId: string; phoneOverride?: string } | null = null;
+
+  /**
+   * sessionId → aufgeschobener Hangup-Wunsch (via `hang_up`). Statt sofort
+   * `end_call` zu senden, setzt `hang_up` nur dieses Flag; das tatsächliche
+   * `end_call` wird erst beim Voice-Turn-Abschluss (nach der finalen `say`)
+   * finalisiert — so geht der Abschied dem Auflegen voraus.
+   */
+  private readonly pendingHangupSessions = new Set<string>();
+
+  /**
+   * Fallback-Timer für einen leeren Turn mit gesetztem pendingHangup: Erzeugt
+   * der Agent keine finale Antwort, wird `end_call` nach kurzer Frist
+   * nachgeholt, damit das Gespräch nicht hängen bleibt.
+   */
+  private readonly pendingHangupFallbacks = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Voice-call starter capability for the `call_user` tool. Runs the
@@ -2907,15 +2995,22 @@ export class DaemonRuntime {
     if (!outbound) return;
     this.logger.child("voice").info("outbound call started — briefing vorgemerkt", { callId, sessionId });
 
+    // Zielnummer → Name (Registry) einmalig auflösen und vormerken, damit der
+    // 30-s-Fallback-Timer den Präfix synchron (ohne erneuten Datei-I/O) bauen
+    // kann. Unbekannt → Nummer.
+    const label = await this.voiceCallerLabel(outbound.number);
+    outbound.label = label;
+
     const briefing = outbound.briefing;
     const fallback = setTimeout(() => {
       this.outboundVoiceFallbacks.delete(callId);
       this.logger.child("voice").info("outbound call: kein Transkript nach 30s — Agent eröffnet", { callId });
-      const userText = `Hallo, hörst du mich?\n\nBriefing:\n${briefing}`;
+      const userText = `Du rufst ${outbound.label ?? outbound.number} an.\n\nHallo, hörst du mich?\n\nBriefing:\n${briefing}`;
       void this.submitVoiceTurn(sessionId, callId, userText).then(({ finalResponse }) => {
         if (finalResponse) {
           this.voiceChannel?.say(callId, finalResponse);
         }
+        this.afterVoiceFinalSay(callId, sessionId, finalResponse);
       }).catch((err) => {
         this.logger.child("voice").error("outbound opening turn failed", {
           callId,

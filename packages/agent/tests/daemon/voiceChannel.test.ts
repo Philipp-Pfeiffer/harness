@@ -16,6 +16,7 @@ const ended: string[] = [];
 const outboundStarted: Array<{ callId: string; sessionId: string }> = [];
 const outboundEnded: Array<{ callId: string; sessionId: string; reason: string }> = [];
 const callEndedEvents: Array<{ callId: string; sessionId: string; reason: string; isOutbound: boolean }> = [];
+const afterFinalSayEvents: Array<{ callId: string; sessionId: string; finalResponse: string }> = [];
 
 function makeCallbacks() {
   sessions.clear();
@@ -24,6 +25,7 @@ function makeCallbacks() {
   outboundStarted.length = 0;
   outboundEnded.length = 0;
   callEndedEvents.length = 0;
+  afterFinalSayEvents.length = 0;
   return {
     submitTurn: async (sessionId: string, callId: string, text: string) => {
       turns.push({ sessionId, text });
@@ -45,6 +47,9 @@ function makeCallbacks() {
     },
     onOutboundCallEnded: async (callId: string, sessionId: string, reason: string) => {
       outboundEnded.push({ callId, sessionId, reason });
+    },
+    afterFinalSay: async (callId: string, sessionId: string, finalResponse: string) => {
+      afterFinalSayEvents.push({ callId, sessionId, finalResponse });
     },
   };
 }
@@ -124,6 +129,39 @@ describe("VoiceChannel", () => {
     expect(reply).toMatchObject({ type: "say", callId: "c1", text: "reply:hallo" });
 
     expect(turns).toEqual([{ sessionId: "voice-111", text: "hallo" }]);
+    expect(afterFinalSayEvents).toEqual([{ callId: "c1", sessionId: "voice-111", finalResponse: "reply:hallo" }]);
+    socket.destroy();
+  });
+
+  it("fires afterFinalSay AFTER the say was sent (say before finalize)", async () => {
+    const socket = await connect();
+    const sayPromise = readUntil(socket, (m) => m.type === "say");
+
+    write(socket, { type: "call_started", callId: "c9", from: "+49123", direction: "inbound", ts: 9999 });
+    await new Promise((r) => setTimeout(r, 50));
+    write(socket, { type: "transcript", callId: "c9", text: "hallo" });
+
+    await sayPromise;
+    // Der say-Event ist über den Socket gelaufen; der afterFinalSay-Callback
+    // wird im VoiceChannel unmittelbar danach aufgerufen.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(afterFinalSayEvents).toEqual([{ callId: "c9", sessionId: "voice-9999", finalResponse: "reply:hallo" }]);
+    socket.destroy();
+  });
+
+  it("fires afterFinalSay with empty finalResponse when the turn is empty", async () => {
+    // Temporärer Callback mit leerem finalResponse.
+    (channel as unknown as { opts: { callbacks: Record<string, unknown> } }).opts.callbacks.submitTurn = async () => ({
+      finalResponse: "",
+    });
+
+    const socket = await connect();
+    write(socket, { type: "call_started", callId: "c10", from: "+49123", direction: "inbound", ts: 1010 });
+    await new Promise((r) => setTimeout(r, 50));
+    write(socket, { type: "transcript", callId: "c10", text: "hallo" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(afterFinalSayEvents).toEqual([{ callId: "c10", sessionId: "voice-1010", finalResponse: "" }]);
     socket.destroy();
   });
 
