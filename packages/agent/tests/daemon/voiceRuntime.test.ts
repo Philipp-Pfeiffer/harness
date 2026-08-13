@@ -72,6 +72,7 @@ type RuntimeInternals = {
   resolveVoiceSession: (callId: string, ts: number, from: string) => Promise<string>;
   submitVoiceTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
   endVoiceSession: (sessionId: string) => Promise<void>;
+  onInboundVoiceRinging: (callId: string, from: string, ts: number) => Promise<void>;
   injectSystemEvent: (event: { origin: string; text: string }, phoneOverride?: string) => Promise<void>;
   outboundVoiceCalls: Map<string, {
     number: string;
@@ -379,5 +380,54 @@ describe("Voice turn flow in DaemonRuntime", () => {
     const calls = voiceLogMocks.info.mock.calls.map((c) => String(c[0]));
     expect(calls.some((c) => c.includes("voice-timing: turn_start"))).toBe(true);
     expect(calls.some((c) => c.includes("voice-timing: say_sent"))).toBe(true);
+  });
+
+  it("inbound ringing: Opening-Turn mit Registry-Name im System-Addendum, say VOR call_started", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const says: Array<{ callId: string; text: string }> = [];
+    internals.voiceChannel = {
+      say: (callId, text) => says.push({ callId, text }),
+      endCall() {},
+    };
+    // Registry: Nummer → Philipp (Tests laufen mit HARNESS_HOME=TEST_DIR/home).
+    const { writeFile, mkdir } = await import("node:fs/promises");
+    await mkdir(internals.paths.home, { recursive: true });
+    await writeFile(join(internals.paths.home, "voice-registry.json"),
+      JSON.stringify({ contacts: [{ number: "4915112345678", name: "Philipp" }] }), "utf-8");
+
+    // Kein Session-Mapping für diesen Call — onInboundVoiceRinging legt es an.
+    expect(internals.voiceCallSessions.has("c-inbound")).toBe(false);
+    await internals.onInboundVoiceRinging("c-inbound", "+4915112345678", 1700000000001);
+
+    // Session wurde angelegt und der Opening-Turn geloggt.
+    expect(internals.voiceCallSessions.get("c-inbound")).toBe("voice-1700000000001");
+    const voiceLog = internals.logger.child("voice");
+    const infoCalls = (voiceLog.info as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(infoCalls.some((c) => c.includes("inbound call ringing — Begrüßung mit Anrufer-Kontext: Philipp"))).toBe(true);
+    expect(infoCalls.some((c) => c.includes("voice-timing: inbound_opening_say"))).toBe(true);
+    // say ging raus (der Adapter puffert es bis zum Accept).
+    expect(says).toEqual([{ callId: "c-inbound", text: "Antwort im Anruf" }]);
+  });
+
+  it("inbound ringing: unbekannte Nummer → Fallback auf die Roh-Nummer", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    await internals.onInboundVoiceRinging("c-unknown", "+499999999999", 1700000000002);
+    const voiceLog = internals.logger.child("voice");
+    const infoCalls = (voiceLog.info as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(infoCalls.some((c) => c.includes("inbound call ringing — Begrüßung mit Anrufer-Kontext: +499999999999"))).toBe(true);
+  });
+
+  it("inbound ringing: KEIN Fake-User-Turn — Opening läuft mit System-Addendum allein", async () => {
+    const addenda: Array<string | undefined> = [];
+    const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: (a) => addenda.push(a) });
+    internals.voiceChannel = { say() {}, endCall() {} };
+    await internals.onInboundVoiceRinging("c-inbound", "+4915112345678", 1700000000003);
+
+    // Der Agent lief genau EINMAL, und zwar ohne user-Message:
+    expect(agentRunMessages).toHaveLength(1);
+    expect(agentRunMessages[0]?.text).toBe(""); // messages.at(-1) == kein user-content
+    expect(agentRunMessages[0]?.addendum).toContain("ruft gerade an");
+    expect(agentRunMessages[0]?.addendum).toContain("+4915112345678"); // Nummer im Addendum (keine Registry)
+    expect(addenda.some((a) => a?.includes("TTS-verträglich"))).toBe(true);
   });
 });

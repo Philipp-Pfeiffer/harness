@@ -6,6 +6,7 @@ import type {
   VoiceInboundMessage,
   VoiceOutboundMessage,
   VoiceActiveCall,
+  VoiceChannelCallbacks,
 } from "./types.js";
 
 const DELIMITER = "\n";
@@ -16,38 +17,6 @@ type LogFn = (msg: string, level?: "info" | "warn" | "error") => void;
 /** callId → Session-ID (`voice-<ts>`). */
 export function voiceSessionId(callStartTs: number): string {
   return `voice-${callStartTs}`;
-}
-
-export interface VoiceChannelCallbacks {
-  /**
-   * Submit a transcript as a normal agent turn in the given session.
-   * `callId` lets the daemon route progressive `say` messages mid-turn.
-   * Returns the agent's final response text (empty when aborted).
-   */
-  submitTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
-  /** Resolve or create a fresh session for a call; returns its session id. */
-  resolveSession: (callId: string, callStartTs: number, from: string) => Promise<string>;
-  /** End the session for a call (idempotent). */
-  endSession: (sessionId: string) => Promise<void>;
-  /**
-   * Trigger the initial briefing turn for an outbound call once the adapter
-   * reported `call_started` (direction=outbound). The daemon seeds the
-   * briefing and speaks the greeting without waiting for user input.
-   */
-  onOutboundCallStarted?: (callId: string, sessionId: string) => Promise<void>;
-  /**
-   * Notify the daemon that a call ended (inbound OR outbound) so it can
-   * inject the "Anruf beendet" system event into the main session.
-   * `isOutbound` tells the daemon whether the calling session (requester)
-   * or the owner's main session is the event target.
-   */
-  onCallEnded?: (callId: string, sessionId: string, reason: string, isOutbound: boolean) => Promise<void>;
-  /**
-   * Notify the daemon that an outbound call ended, so it can inject a
-   * system event into the originating chat session. Only fired for calls
-   * the daemon started via `startCall()`.
-   */
-  onOutboundCallEnded?: (callId: string, sessionId: string, reason: string) => Promise<void>;
 }
 
 export interface VoiceChannelOptions {
@@ -167,12 +136,26 @@ export class VoiceChannel {
       case "hello":
         await this.handleHello(socket, msg.activeCalls ?? []);
         break;
-      case "call_started": {
+      case "call_ringing": {
+        // VOR acceptCall: Session bereits hier anlegen und den Socket
+        // binden, damit die Begrüßung (say) sofort zugestellt werden kann.
         const sessionId = await this.opts.callbacks.resolveSession(
           msg.callId,
           msg.ts,
           msg.from,
         );
+        this.callToSession.set(msg.callId, sessionId);
+        this.callToSocket.set(msg.callId, socket);
+        this.opts.log(`voice: call ${msg.callId} ringing (from ${msg.from}) — Begrüßung wird generiert`);
+        await this.opts.callbacks.onInboundRinging?.(msg.callId, msg.from, msg.ts);
+        break;
+      }
+      case "call_started": {
+        const sessionId = this.callToSession.get(msg.callId) ?? (await this.opts.callbacks.resolveSession(
+          msg.callId,
+          msg.ts,
+          msg.from,
+        ));
         this.callToSession.set(msg.callId, sessionId);
         this.callToSocket.set(msg.callId, socket);
         if (msg.direction === "outbound" && this.outboundCallIds.has(msg.callId)) {

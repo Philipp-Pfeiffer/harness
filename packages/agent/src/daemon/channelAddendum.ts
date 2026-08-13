@@ -56,6 +56,16 @@ export function outboundVoiceAddendum(): string {
   return OUTBOUND_VOICE_ADDENDUM;
 }
 
+/**
+ * Inbound-Cold-Start-Addendum: der Anrufer klingelt, der Agent soll SOFORT
+ * (ohne User-Input) eine KURZE Begrüßung mit dem Anrufer-Namen sprechen.
+ */
+export function inboundVoiceOpeningAddendum(callerName: string): string {
+  return `## Voice-Call (Inbound, Opening)
+
+${callerName} ruft gerade an. Sprich sofort eine kurze Begrüßung (max. EIN Satz, ohne Markdown, TTS-verträglich), die den Namen enthält, z.B. "Hallo ${callerName}, was kann ich für dich tun?". Danach warte auf den Anrufer — antworte erst wieder, wenn er etwas gesagt hat.`;
+}
+
 /** Legacy sync variant: static addendum (no sticker catalog). */
 export function channelAddendum(origin: SessionOrigin): string | undefined {
   if (origin === "voice") return VOICE_ADDENDUM;

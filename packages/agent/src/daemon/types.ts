@@ -200,6 +200,10 @@ export interface VoiceActiveCall {
 /** Nachrichten vom Adapter an den Daemon. */
 export type VoiceInboundMessage =
   | { type: "hello"; activeCalls: VoiceActiveCall[] }
+  // Inbound-Call klingelt (VOR dem Accept): der Daemon generiert die
+  // Begrüßung (mit Anrufer-Kontext) und sendet sie als `say`, BEVOR die
+  // `call_started`-Meldung des Adapters eintrifft.
+  | { type: "call_ringing"; callId: string; from: string; ts: number }
   | { type: "call_started"; callId: string; from: string; direction: "inbound" | "outbound"; ts: number }
   | { type: "transcript"; callId: string; text: string }
   | { type: "call_ended"; callId: string; reason: string }
@@ -211,6 +215,46 @@ export type VoiceOutboundMessage =
   | { type: "end_call"; callId: string; reason: string }
   // v1: nur definiert/typiert, Implementierung folgt in v1.1.
   | { type: "start_call"; callId: string; jid: string; briefing: string };
+
+/** Callbacks, die der Daemon dem VoiceChannel bereitstellt. */
+export interface VoiceChannelCallbacks {
+  /**
+   * Submit a transcript as a normal agent turn in the given session.
+   * `callId` lets the daemon route progressive `say` messages mid-turn.
+   * Returns the agent's final response text (empty when aborted).
+   */
+  submitTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
+  /** Resolve or create a fresh session for a call; returns its session id. */
+  resolveSession: (callId: string, callStartTs: number, from: string) => Promise<string>;
+  /** End the session for a call (idempotent). */
+  endSession: (sessionId: string) => Promise<void>;
+  /**
+   * Inbound-Call klingelt (VOR dem Accept): der Daemon generiert die
+   * Begrüßung (mit Anrufer-Kontext) und sendet sie als `say` — BEVOR die
+   * `call_started`-Meldung des Adapters eintrifft (Accept-After-Ready).
+   * `from` ist die Anrufer-Rufnummer des Adapters (raw).
+   */
+  onInboundRinging?: (callId: string, from: string, ts: number) => Promise<void>;
+  /**
+   * Trigger the initial briefing turn for an outbound call once the adapter
+   * reported `call_started` (direction=outbound). The daemon seeds the
+   * briefing and speaks the greeting without waiting for user input.
+   */
+  onOutboundCallStarted?: (callId: string, sessionId: string) => Promise<void>;
+  /**
+   * Notify the daemon that a call ended (inbound OR outbound) so it can
+   * inject the "Anruf beendet" system event into the main session.
+   * `isOutbound` tells the daemon whether the calling session (requester)
+   * or the owner's main session is the event target.
+   */
+  onCallEnded?: (callId: string, sessionId: string, reason: string, isOutbound: boolean) => Promise<void>;
+  /**
+   * Notify the daemon that an outbound call ended, so it can inject a
+   * system event into the originating chat session. Only fired for calls
+   * the daemon started via `startCall()`.
+   */
+  onOutboundCallEnded?: (callId: string, sessionId: string, reason: string) => Promise<void>;
+}
 
 /* ─── IPC Protocol (Unix socket) ─── */
 

@@ -96,9 +96,10 @@ import { SESSION_INACTIVITY_THRESHOLD_MS } from "../whatsapp/limits.js";
 import { shouldNotifyWhatsAppSessionReset } from "../whatsapp/sessionPolicy.js";
 import { extractPhoneNumber, formatJid } from "../whatsapp/whitelist.js";
 import { WhatsAppInboundProcessor } from "../whatsapp/inbound.js";
-import { channelAddendumAsync, outboundVoiceAddendum } from "./channelAddendum.js";
+import { channelAddendumAsync, outboundVoiceAddendum, inboundVoiceOpeningAddendum } from "./channelAddendum.js";
 import { PerKeyLock } from "../util/perKeyLock.js";
 import { VoiceChannel, voiceSessionId } from "./voiceChannel.js";
+import { resolveVoiceContact } from "./voiceRegistry.js";
 import {
   loadVoiceRegistry,
   findRegistryContact,
@@ -361,15 +362,18 @@ export class DaemonRuntime {
         else log.info(msg);
       },
       callbacks: {
-        submitTurn: (sessionId, callId, text) => this.submitVoiceTurn(sessionId, callId, text),
-        resolveSession: (callId, callStartTs, from) =>
+        submitTurn: (sessionId: string, callId: string, text: string) =>
+          this.submitVoiceTurn(sessionId, callId, text),
+        resolveSession: (callId: string, callStartTs: number, from: string) =>
           this.resolveVoiceSession(callId, callStartTs, from),
-        endSession: (sessionId) => this.endVoiceSession(sessionId),
-        onOutboundCallStarted: (callId, sessionId) =>
+        endSession: (sessionId: string) => this.endVoiceSession(sessionId),
+        onInboundRinging: (callId: string, from: string, ts: number) =>
+          this.onInboundVoiceRinging(callId, from, ts),
+        onOutboundCallStarted: (callId: string, sessionId: string) =>
           this.onOutboundVoiceCallStarted(callId, sessionId),
-        onCallEnded: (callId, sessionId, reason, isOutbound) =>
+        onCallEnded: (callId: string, sessionId: string, reason: string, isOutbound: boolean) =>
           this.onVoiceCallEnded(callId, sessionId, reason, isOutbound),
-        onOutboundCallEnded: (callId, sessionId, reason) =>
+        onOutboundCallEnded: (callId: string, sessionId: string, reason: string) =>
           this.onOutboundVoiceCallEnded(callId, sessionId, reason),
       },
     });
@@ -2300,6 +2304,96 @@ export class DaemonRuntime {
     this.voiceCallSessions.set(callId, session.id);
     this.voiceCallSessionsBySession.set(session.id, callId);
     return session.id;
+  }
+
+  /**
+   * Inbound-Cold-Start (Accept-After-Ready): der Adapter meldet
+   * `call_ringing` VOR dem Accept. Hier wird die Begrüßung generiert
+   * (Anrufer-Name via Registry → System-Addendum, KEIN Fake-User-Turn) und
+   * als `say` an den Adapter geschickt — der puffert das Audio, nimmt den
+   * Call erst an, wenn die Begrüßung gepuffert ist (oder der Fallback-
+   * Timeout abläuft) und sendet dann `call_started` (accepted).
+   *
+   * Die Session wird bereits beim Ringing angelegt (callToSession/ts).
+   */
+  private async onInboundVoiceRinging(callId: string, from: string, ts: number): Promise<void> {
+    const voiceLog = this.logger.child("voice");
+    const sessionId = await this.resolveVoiceSession(callId, ts, from);
+
+    // Nummer → Name (voice-registry.json); unbekannt → Roh-Nummer.
+    const callerName =
+      (await resolveVoiceContact(this.paths.voiceRegistry, from)) ?? from;
+    voiceLog.info(`inbound call ringing — Begrüßung mit Anrufer-Kontext: ${callerName}`, {
+      callId,
+      sessionId,
+      from,
+    });
+
+    const entry = this.sessions.get(sessionId);
+    if (!entry) {
+      voiceLog.error("inbound ringing: Session fehlt", { callId, sessionId });
+      return;
+    }
+
+    const turnCtx = this.agentContextFor(
+      this.resolveProfile(entry.profile) ?? this.resolveProfile("default")!,
+    );
+    const appliedCtx = this.applyTurnModel(turnCtx, entry.modelRef);
+
+    // KEIN Fake-User-Turn: der Opening-Turn läuft ohne user-Message mit
+    // einem System-Addendum, das Name + Kürze erzwingt (max. 1 Satz).
+    this.currentVoiceSessionCaller = { sessionId };
+    this.turnActive = true;
+    try {
+      const result = await appliedCtx.agent.run(entry.messages, {
+        metricsRecorder: entry.metricsRecorder,
+        memoryBackend: this.ambientMemoryBackend(appliedCtx.memoryZones),
+        cwd: appliedCtx.cwd ?? undefined,
+        compaction: {
+          paths: this.paths,
+          sessionId,
+          threshold: DEFAULT_COMPACTION_THRESHOLD,
+        },
+        mailbox: entry.mailbox,
+        channelFileSender: this.channelFileSender,
+        channelStickerSender: this.channelStickerSender,
+        stickerLibraryDir: this.paths.stickers,
+        voiceCallStarter: this.voiceCallStarter,
+        voiceReportToMainSession: this.voiceReportToMainSession,
+        voiceHangUp: this.voiceHangUp,
+        systemPromptAddendum:
+          inboundVoiceOpeningAddendum(callerName) +
+          "\n\n" +
+          (await channelAddendumAsync(entry.origin, this.paths.stickers)),
+        onEvent: (event) => {
+          if (event.type === "tool_call_start") {
+            voiceLog.warn("inbound opening: Tool-Call im Opening-Turn — nicht erwartet", {
+              callId,
+              sessionId,
+            });
+          }
+        },
+      });
+
+      const finalMessage = result.aborted ? "" : result.finalMessage;
+      if (finalMessage) {
+        voiceLog.info(`voice-timing: inbound_opening_say callId=${callId} sessionId=${sessionId}`);
+        // `say` VOR `call_started` (accepted) — der Adapter puffert es.
+        this.voiceChannel?.say(callId, finalMessage);
+      } else {
+        voiceLog.warn("inbound ringing: Agent lieferte leere Begrüßung", { callId, sessionId });
+      }
+    } catch (err) {
+      voiceLog.error("inbound opening turn failed", {
+        callId,
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.currentVoiceSessionCaller = null;
+      this.turnActive = false;
+      void this.performPendingRestartIfNeeded();
+    }
   }
 
   /**

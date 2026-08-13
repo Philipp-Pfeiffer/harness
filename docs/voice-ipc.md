@@ -8,7 +8,7 @@
 > Persona, Memory, Tools und Skills liegen vollständig im Daemon. Voice-Calls
 > sind normale Harness-Sessions im regulären Session-Store.
 >
-> Version: v1.2 (Report-Back + Outbound-Grußverhalten)
+> Version: v1.3 (Voice Cold-Start: Accept-After-Ready + Begrüßung mit Anrufer-Kontext)
 
 ## Transport
 
@@ -35,6 +35,13 @@ ignoriert.
 // Nach jedem (Re)Connect — Resync der aktiven Calls. Der Daemon nimmt
 // laufende Calls mit einer frischen Session wieder auf.
 {"type":"hello","activeCalls":[{"callId":"...","from":"+49...","since":1699999999999}]}
+
+// Inbound-Call klingelt (VOR dem Accept): der Daemon generiert die
+// Begrüßung (Anrufer-Kontext → System-Addendum) und antwortet mit `say`,
+// BEVOR `call_started` (accepted) eintrifft. Der Adapter puffert das
+// Greeting-Audio und nimmt den Call erst an, wenn es gepuffert ist oder
+// das Fallback-Timeout abläuft (Accept-After-Ready, v1.3).
+{"type":"call_ringing","callId":"...","from":"+49...","ts":1699999999999}
 
 // Neuer Call (nach Accept).
 {"type":"call_started","callId":"...","from":"+49...","direction":"inbound","ts":1699999999999}
@@ -142,13 +149,48 @@ Anruf beendet (Dauer X, Grund Y). Transkript: Session voice-<ts>.
 Das ist ein **Signal, kein Volltext** — der Main-Agent kann das Transkript bei
 Bedarf über Tools lesen (Session `voice-<ts>` im Session-Store).
 
+## Inbound-Cold-Start: Accept-After-Ready + Begrüßung mit Anrufer-Kontext (v1.3)
+
+Ziel: Der Anrufer hört die Begrüßung sofort nach dem Accept (≤ ~0,5 s), und
+die Begrüßung kennt den Anrufer ("Hallo Philipp …").
+
+Ablauf (Inbound):
+
+1. Der Adapter empfängt `call_incoming` (Ringing) — **noch kein** `acceptCall`.
+2. Der Adapter sendet `call_ringing{callId, from, ts}` und wärmt STT auf
+   (best-effort).
+3. Der Daemon legt die Voice-Session bereits hier an (`voice-<ts>`), löst die
+   Nummer über `resolveVoiceContact` (`$HARNESS_HOME/voice-registry.json`;
+   unbekannt → `null` → Fallback auf die Roh-Nummer) auf und startet einen
+   **Opening-Turn OHNE Fake-User-Message**: der Name wird als
+   System-Addendum injiziert ("X ruft gerade an. Sprich sofort eine kurze
+   Begrüßung …"), das Voice-Addendum kommt dazu.
+4. Der Daemon sendet die Begrüßung als `say` — **VOR** `call_started`.
+5. Der Adapter synthetisiert die Begrüßung per TTS und **puffert** das Audio
+   (kein `feedLiveAudio` vor dem Accept — der VoIP-Stack verwirft das).
+6. Der Adapter ruft `acceptCall` genau dann auf, wenn (a) Begrüßungs-Audio
+   gepuffert ist ODER (b) das Fallback-Timeout abläuft
+   (`INBOUND_GREETING_TIMEOUT_MS`, Default 3 s — damit klingelt es nie endlos,
+   auch wenn der Daemon hängt).
+7. Danach sendet der Adapter `call_started{..., direction:"inbound"}` und
+   feedet das gepufferte Audio sofort; ab dann normaler Live-Betrieb
+   (transcript → say).
+8. Bricht der Anrufer vor der Annahme ab, sendet der Adapter `call_ended`
+   ohne jemals `acceptCall` gerufen zu haben.
+
+Bekommt der Daemon ein `call_ringing` für eine Nummer, die er kennt, nutzt er
+`voice-registry.json` (gleiches Format wie das Outbound-Gate, aber **fail-open**:
+unbekannt ist kein Fehler, nur ein Namens-Fallback).
+
 ## Session-Mapping
 
 - Ein Call ist eine Session mit der ID `voice-<callStartTs>` (ms-Epoch des
   `call_started`-`ts`). `origin = "voice"`.
-- `call_started` legt die Session an; `transcript`-Nachrichten werden als
-  normale Turns über die reguläre submit-turn-Queue des Daemons verarbeitet
-  (kein Sonderpfad — Persona, Memory, Tools, Skills greifen automatisch).
+- `call_ringing` legt die Session bereits an (Begrüßung kann sofort
+  zugestellt werden); `call_started` nutzt die bestehende Session.
+- `transcript`-Nachrichten werden als normale Turns über die reguläre
+  submit-turn-Queue des Daemons verarbeitet (kein Sonderpfad — Persona,
+  Memory, Tools, Skills greifen automatisch).
 - `call_ended` beendet die Session; In-Call-History ergibt sich aus der
   normalen Session, keine Sonderbehandlung.
 - Der Agent-Antworttext einer abgeschlossenen Turn wird als `say` an den

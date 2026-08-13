@@ -243,6 +243,41 @@ describe("VoiceChannel", () => {
     socket.destroy();
   });
 
+  it("call_ringing resolves the session, fires onInboundRinging, and delivers say before call_started", async () => {
+    const ringing: Array<{ callId: string; from: string; ts: number }> = [];
+    channel = new VoiceChannel({
+      socketPath: SOCKET_PATH,
+      log,
+      callbacks: {
+        ...makeCallbacks(),
+        onInboundRinging: async (callId: string, from: string, ts: number) => {
+          ringing.push({ callId, from, ts });
+          // Die Begrüßung wird VOR call_started gesendet (Accept-After-Ready).
+          channel.say(callId, "Hallo Philipp!");
+        },
+      },
+    });
+    await channel.start();
+
+    const socket = await connect();
+    const sayPromise = readUntil(socket, (m) => m.type === "say");
+    write(socket, { type: "call_ringing", callId: "c8", from: "+49123", ts: 1414 });
+    const say = await sayPromise;
+    expect(say).toMatchObject({ type: "say", callId: "c8", text: "Hallo Philipp!" });
+    expect(ringing).toEqual([{ callId: "c8", from: "+49123", ts: 1414 }]);
+    expect(sessions.get("c8")).toEqual({ ts: 1414, from: "+49123" });
+
+    // call_started für denselben Call nutzt die beim Ringing angelegte Session.
+    write(socket, { type: "call_started", callId: "c8", from: "+49123", direction: "inbound", ts: 1414 });
+    await new Promise((r) => setTimeout(r, 50));
+    const replyPromise = readUntil(socket, (m) => m.type === "say");
+    write(socket, { type: "transcript", callId: "c8", text: "hallo" });
+    const reply = await replyPromise;
+    expect(reply).toMatchObject({ type: "say", callId: "c8", text: "reply:hallo" });
+    expect(turns).toEqual([{ sessionId: "voice-1414", text: "hallo" }]);
+    socket.destroy();
+  });
+
   it("call_ended fires onCallEnded for INBOUND calls too (generalized closing event)", async () => {
     const socket = await connect();
     write(socket, { type: "call_started", callId: "c7", from: "+49123", direction: "inbound", ts: 1212 });
