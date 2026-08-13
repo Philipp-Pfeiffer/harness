@@ -21,6 +21,8 @@ import { reportToMainSessionTool } from "./report_to_main_session.js";
 import { hangUpTool } from "./hang_up.js";
 import { createBrowserTool } from "./browser.js";
 import { createImageTool } from "./image.js";
+import { subagentTool } from "./subagent.js";
+import type { SubagentRunner } from "./types.js";
 
 export interface LoadToolsOptions {
   memoryBackend?: MemoryBackend;
@@ -51,6 +53,10 @@ export interface LoadToolsOptions {
     defaultModel?: ConfigModel;
     models?: ConfigModel[];
   };
+  /** Sub-agent runner (daemon-side). When set, registers the `subagent` tool. */
+  subagent?: {
+    runner: SubagentRunner;
+  };
 }
 
 export function loadTools(opts?: LoadToolsOptions): Tool[];
@@ -70,7 +76,8 @@ export function loadTools(
       "skillsDir" in arg1 ||
       "findSkillStore" in arg1 ||
       "browser" in arg1 ||
-      "image" in arg1)
+      "image" in arg1 ||
+      "subagent" in arg1)
       ? (arg1 as LoadToolsOptions)
       : {
           memoryBackend: arg1 as MemoryBackend | undefined,
@@ -121,6 +128,10 @@ export function loadTools(
       models: opts.image.models,
       webConfig: opts.webConfig,
     }));
+  }
+
+  if (opts.subagent?.runner) {
+    tools.push(subagentTool);
   }
 
   return tools;

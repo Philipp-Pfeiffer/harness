@@ -103,6 +103,12 @@ export interface ToolCallContext {
    */
   voiceHangUp?: () => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Optional async sub-agent runner for the `subagent` tool. Injected by the
+   * daemon for running sessions; when absent (e.g. TUI in-process without a
+   * daemon), `subagent` returns an error.
+   */
+  subagentRunner?: SubagentRunner;
+  /**
    * Optional status callback for long-running tools (e.g. browser sub-agent).
    * When present, tools may emit progress updates that reach the TUI via IPC.
    */
@@ -130,3 +136,29 @@ export interface Tool<TParameters extends TSchema = TSchema> {
    */
   conflictKey?(args: Static<TParameters>): string | null | undefined;
 }
+
+/** Optional async sub-agent capability, injected by the daemon. */
+export interface SubagentRunner {
+  start(input: {
+    role: string;
+    task: string;
+    repo?: string;
+    model?: string;
+    /** Session that requested the task — used for completion routing. */
+    requesterSessionId?: string;
+  }): StartAgentResult | Promise<StartAgentResult>;
+  status(id: string): AgentStatusResult | Promise<AgentStatusResult>;
+  stop(id: string): StopAgentResult | Promise<StopAgentResult>;
+}
+
+export type StartAgentResult =
+  | { ok: true; id: string; worktree?: string; branch?: string }
+  | { ok: false; error: string; runningIds: string[] };
+
+export type AgentStatusResult =
+  | { ok: true; status: string; text: string }
+  | { ok: false; error: string };
+
+export type StopAgentResult =
+  | { ok: true; status: string; text: string }
+  | { ok: false; error: string };

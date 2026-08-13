@@ -1,1 +1,10 @@
 export { readFileTool } from "./readFile.js";
+export { execTool } from "./exec.js";
+export { writeTool } from "./write_file.js";
+export { editTool } from "./edit_file.js";
+export { processTool } from "./process.js";
+export { sendFileTool } from "./send_file.js";
+export { sendStickerTool } from "./send_sticker.js";
+export { reportToMainSessionTool } from "./report_to_main_session.js";
+export { callUserTool } from "./call_user.js";
+export { requestRestartTool } from "./requestRestart.js";

@@ -37,6 +37,8 @@ export interface HarnessPaths {
   inboundMedia: string;
   /** $state/browser-runs/ — JSONL traces for browser sub-agent runs */
   browserRuns: string;
+  /** $state/agent-runs/ — result.json artifacts for sub-agent runs */
+  agentRuns: string;
   /** $state/whatsapp/ — Baileys Session-Persistence und Auth-State */
   whatsapp: string;
   /** $state/stickers/ — Sticker-Library (index.json + WebP-Dateien) */
@@ -94,6 +96,7 @@ export function resolveHarnessPaths(opts?: { home?: string; state?: string }): H
     jobs: path.join(state, "jobs"),
     inboundMedia: path.join(state, "inbound-media"),
     browserRuns: path.join(state, "browser-runs"),
+    agentRuns: path.join(state, "agent-runs"),
     whatsapp: path.join(state, "whatsapp"),
     stickers: path.join(state, "stickers"),
     stickersIncoming: path.join(state, "stickers", "incoming"),
@@ -121,6 +124,7 @@ export async function ensureDirs(paths: HarnessPaths): Promise<void> {
   await mkdir(paths.jobs, { recursive: true });
   await mkdir(paths.inboundMedia, { recursive: true });
   await mkdir(paths.browserRuns, { recursive: true });
+  await mkdir(paths.agentRuns, { recursive: true });
   await mkdir(paths.whatsapp, { recursive: true });
   await mkdir(paths.stickers, { recursive: true });
   await mkdir(paths.stickersIncoming, { recursive: true });

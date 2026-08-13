@@ -23,7 +23,7 @@ export type Session = {
   stderrRing: RingBuffer;
 };
 
-export type TaskType = "browser";
+export type TaskType = "browser" | "agent";
 
 export type TaskStatus = "running" | "done" | "error" | "stopped";
 
