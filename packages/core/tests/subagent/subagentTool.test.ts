@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { subagentTool } from "../../src/tools/subagent.js";
 import type { SubagentRunner } from "../../src/tools/types.js";
+import { processSupervisor } from "../../src/tools/processSupervisor.js";
 
 function makeRunner(overrides: Partial<SubagentRunner> = {}): SubagentRunner {
   return {
@@ -24,7 +25,7 @@ describe("subagent tool", () => {
   it("dispatches start and returns the id immediately", async () => {
     const runner = makeRunner();
     const result = await subagentTool.execute(
-      { action: "start", role: "coder", task: "fix it", repo: "/repo" },
+      { action: "start", role: "coder", task: "Fix the bug — run pnpm test, fertig wenn grün", repo: "/repo" },
       { subagentRunner: runner },
     );
     expect(result.isError).toBe(false);
@@ -47,7 +48,7 @@ describe("subagent tool", () => {
       start: () => ({ ok: false, error: "Max 2 concurrent", runningIds: ["a"] }),
     });
     const result = await subagentTool.execute(
-      { action: "start", role: "coder", task: "x" },
+      { action: "start", role: "coder", task: "Fix the bug — run pnpm test, fertig wenn grün" },
       { subagentRunner: runner },
     );
     expect(result.isError).toBe(true);
@@ -100,9 +101,127 @@ describe("subagent tool", () => {
       },
     });
     await subagentTool.execute(
-      { action: "start", role: "coder", task: "x" },
+      { action: "start", role: "coder", task: "Fix the bug — run pnpm test, fertig wenn grün" },
       { subagentRunner: runner, sessionId: "session-9" },
     );
-    expect(received).toMatchObject({ role: "coder", task: "x", requesterSessionId: "session-9" });
+    expect(received).toMatchObject({ role: "coder", task: "Fix the bug — run pnpm test, fertig wenn grün", requesterSessionId: "session-9" });
+  });
+
+  it("rejects a relative repo path (fail-closed) without calling the runner", async () => {
+    let called = false;
+    const runner = makeRunner({
+      start: () => {
+        called = true;
+        return { ok: true, id: "should-not-start" };
+      },
+    });
+    const result = await subagentTool.execute(
+      { action: "start", role: "coder", task: "Fix the bug — run tests, fertig wenn grün", repo: "relative/repo" },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("absoluter Pfad");
+    expect(called).toBe(false);
+  });
+
+  it("rejects a ~ path (fail-closed) without calling the runner", async () => {
+    let called = false;
+    const runner = makeRunner({
+      start: () => {
+        called = true;
+        return { ok: true, id: "should-not-start" };
+      },
+    });
+    const result = await subagentTool.execute(
+      { action: "start", role: "coder", task: "Fix the bug — run tests, fertig wenn grün", repo: "~/repos/harness" },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("absoluter Pfad");
+    expect(called).toBe(false);
+  });
+
+  it("rejects a task briefing without a done criterion (fail-closed)", async () => {
+    const runner = makeRunner({
+      start: () => ({ ok: true, id: "should-not-start" }),
+    });
+    const result = await subagentTool.execute(
+      { action: "start", role: "coder", task: "Fix the bug in src/main.ts and run the tests" },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Done-Kriterium");
+  });
+
+  it("accepts an absolute repo path with verification + done criterion", async () => {
+    const runner = makeRunner();
+    const result = await subagentTool.execute(
+      {
+        action: "start",
+        role: "coder",
+        task: "Fix the bug in src/main.ts — run pnpm test, fertig wenn alle Tests grün sind",
+        repo: "/home/user/harness",
+      },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain("task-1");
+  });
+
+  it("warns (not blocks) when an overlapping running task exists in the same repo", async () => {
+    const runner = makeRunner();
+    const runningTask = {
+      id: "existing-1",
+      type: "agent" as const,
+      status: "running" as const,
+      summary: "Fix the bug in src/main.ts — run pnpm test, fertig wenn grün",
+      artifactPaths: [],
+      startedAt: new Date(),
+      stop: () => {},
+    };
+    processSupervisor.registerTask(runningTask);
+
+    const result = await subagentTool.execute(
+      {
+        action: "start",
+        role: "coder",
+        task: "Fix the bug in src/main.ts — run pnpm test, fertig wenn grün",
+        repo: "/home/user/harness",
+      },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain("Überlappende laufende Subagent-Tasks");
+
+    // Clean up the registered task so the test leaves the supervisor clean.
+    runningTask.status = "stopped";
+    runningTask.finishedAt = new Date();
+  });
+
+  it("does not warn when running tasks have a disjoint topic", async () => {
+    const runner = makeRunner();
+    const runningTask = {
+      id: "existing-2",
+      type: "agent" as const,
+      status: "stopped" as const,
+      summary: "Refactor the voice channel — run pnpm test, fertig wenn grün",
+      artifactPaths: [],
+      startedAt: new Date(),
+      finishedAt: new Date(),
+      stop: () => {},
+    };
+    processSupervisor.registerTask(runningTask);
+
+    const result = await subagentTool.execute(
+      {
+        action: "start",
+        role: "coder",
+        task: "Refactor the voice channel — run pnpm test, fertig wenn grün",
+        repo: "/home/user/harness",
+      },
+      { subagentRunner: runner },
+    );
+    expect(result.isError).toBe(false);
+    expect(result.content).not.toContain("Überlappende laufende Subagent-Tasks");
   });
 });

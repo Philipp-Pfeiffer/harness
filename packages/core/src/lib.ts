@@ -194,6 +194,7 @@ export {
   type AsyncAgentRunner,
   type AgentSystemEvent,
 } from "./agent/asyncAgentRunner.js";
+export { git, type GitResult } from "./agent/gitUtil.js";
 
 // Note on toolChoice (pi-ai 0.70.2):
 // The typed `StreamOptions` interface does not expose a `toolChoice` field.

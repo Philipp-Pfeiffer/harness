@@ -6,6 +6,7 @@ import type { Tool } from "../../src/tools/types.js";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 // The runner's agent loop is fully exercised elsewhere (agent.test.ts).
 // Here we mock the pi-ai stream so runs resolve with a known final message —
@@ -397,6 +398,100 @@ describe("async agent runner", () => {
     expect(events[0]!.text).toContain("fehlgeschlagen");
     expect(events[0]!.text).toContain("worktree");
   }, 15_000);
+
+  it("finalizes error when the coder worktree has no commit (empty diff guard)", async () => {
+    const agentRunsDir = await mkdtemp(path.join(tmpdir(), "harness-agent-runs-"));
+    const repoDir = await mkdtemp(path.join(tmpdir(), "harness-repo-"));
+    execFileSync("git", ["init", "-q", repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@test"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "Test"]);
+    await writeFile(path.join(repoDir, "main.txt"), "main", "utf-8");
+    execFileSync("git", ["-C", repoDir, "add", "."]);
+    execFileSync("git", ["-C", repoDir, "commit", "-qm", "init"]);
+
+    const events: { origin: string; text: string }[] = [];
+    const runner = createAsyncAgentRunner(baseOpts({
+      agentRunsDir,
+      injectSystemEvent: (e) => events.push(e),
+    }));
+
+    // The mocked stream finishes "done" but the worktree has NO commit.
+    const started = runner.start({ role: "coder", task: "Fix the bug", repo: repoDir });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    await waitForFinal(runner, started.id);
+    const task = supervisor.getTask(started.id);
+    expect(task?.status).toBe("error");
+    expect(task?.summary).toContain("kein Commit");
+    // The completion event is delivered asynchronously after the task is
+    // finalized — settle once so the event has arrived.
+    await settle();
+    expect(events[0]!.text).toContain("fehlgeschlagen");
+    expect(events[0]!.text).toContain("kein Commit");
+  }, 15_000);
+
+  it("stays done when a commit exists on the task branch", async () => {
+    const agentRunsDir = await mkdtemp(path.join(tmpdir(), "harness-agent-runs-"));
+    const repoDir = await mkdtemp(path.join(tmpdir(), "harness-repo-"));
+    execFileSync("git", ["init", "-q", repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "test@test"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "Test"]);
+    await writeFile(path.join(repoDir, "main.txt"), "main", "utf-8");
+    execFileSync("git", ["-C", repoDir, "add", "."]);
+    execFileSync("git", ["-C", repoDir, "commit", "-qm", "init"]);
+
+    const events: { origin: string; text: string }[] = [];
+    const runner = createAsyncAgentRunner(baseOpts({
+      agentRunsDir,
+      injectSystemEvent: (e) => events.push(e),
+    }));
+
+    const started = runner.start({ role: "coder", task: "Fix the bug", repo: repoDir });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    // The worktree is created asynchronously by the runner. Wait for it
+    // to exist before seeding the commit.
+    const worktreePath = `${repoDir}-coder-${started.id}`;
+    await waitFor(() => {
+      try {
+        return execFileSync("git", ["-C", worktreePath, "rev-parse", "--is-inside-work-tree"], { stdio: "pipe" }).toString().trim() === "true";
+      } catch {
+        return false;
+      }
+    }, 5_000);
+
+    // Seed the commit in the worktree the runner actually created.
+    await writeFile(path.join(worktreePath, "fix.txt"), "fixed", "utf-8");
+    execFileSync("git", ["-C", worktreePath, "add", "."]);
+    execFileSync("git", ["-C", worktreePath, "commit", "-qm", "fix: the bug"]);
+
+    await waitForFinal(runner, started.id);
+    const task = supervisor.getTask(started.id);
+    expect(task?.status).toBe("done");
+    expect(task?.summary).toContain("Task erledigt");
+    await settle();
+    expect(events[0]!.text).toContain("abgeschlossen");
+
+    execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath]);
+  }, 15_000);
+
+  it("injects the exact tool schema into the system prompt (no invented param names)", async () => {
+    const { resolveRolePrompt, resolveRoleTools } = await import("../../src/agent/subagentRoles.js");
+    const { buildCoderSystemPrompt } = await import("../../src/agent/asyncAgentRunner.js");
+    const persona = resolveRolePrompt("coder");
+    const tools = resolveRoleTools("coder", [readFileTool, writeTool, execTool]);
+    const systemPrompt = buildCoderSystemPrompt(persona, tools);
+
+    // The injected block must name every tool and its real parameter names.
+    expect(systemPrompt).toContain("## Available tools");
+    expect(systemPrompt).toContain("- readFile");
+    expect(systemPrompt).toContain("path (required): string");
+    expect(systemPrompt).toContain("- exec");
+    expect(systemPrompt).toContain("command (required): string");
+    expect(systemPrompt).not.toContain("exec_command");
+  });
 });
 
 describe("worktreePathsFor", () => {

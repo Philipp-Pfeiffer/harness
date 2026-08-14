@@ -8,6 +8,7 @@ import { processSupervisor, type Task } from "../tools/processSupervisor.js";
 import type { Tool } from "../tools/types.js";
 import type { ConfigModel } from "../config.js";
 import { resolveRoleModel, resolveRolePrompt, resolveRoleTools } from "./subagentRoles.js";
+import { git } from "./gitUtil.js";
 
 /** Minimal system-event shape shared with the daemon's event bus. */
 export interface AgentSystemEvent {
@@ -74,6 +75,102 @@ export interface AsyncAgentRunner {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * Serialize a typebox schema into a flat list of `name (type): description`
+ * lines. The subagent prompt does NOT auto-embed tool schemas (unlike the
+ * main agent), so the model previously guessed parameter names — that's how
+ * invented names like `exec_command` slipped in. Injecting the exact schema
+ * into the system prompt fixes this structurally.
+ */
+function formatToolSchema(tool: Tool): string {
+  const lines = [`- ${tool.name}`];
+  const props = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+  for (const [name, prop] of Object.entries(props)) {
+    const p = prop as { type?: string; description?: string };
+    const type = p.type ? String(p.type) : "object";
+    const required = (tool.parameters as { required?: string[] }).required?.includes(name) ? " (required)" : "";
+    lines.push(`  - ${name}${required}: ${type} — ${p.description ?? ""}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Assemble the full coder system prompt: persona + injected tool schema
+ * block. Exported so tests can assert the tool list is present without
+ * poking the agent internals.
+ */
+export function buildCoderSystemPrompt(persona: string, tools: Tool[]): string {
+  const toolList = tools.map((t) => formatToolSchema(t)).join("\n\n");
+  return (
+    `${persona}\n\n## Available tools\n\n` +
+    `You have EXACTLY these tools. Use the tool names and parameter names as listed — do not invent or rename parameters.\n\n` +
+    `${toolList}`
+  );
+}
+
+/**
+ * True when the model reported DONE but the worktree has no commit on the
+ * task branch (empty diff: no committed change). The check is defensive:
+ * a fresh worktree is created from the repo HEAD, so `git log <base>..HEAD`
+ * is empty until the subagent commits.
+ */
+async function verifyWorktreeCommit(
+  repo: string,
+  worktreePath: string,
+  branch: string,
+  id: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  void branch;
+  void id;
+  const porcelain = await git(repo, ["-C", worktreePath, "status", "--porcelain"]);
+  if (porcelain.exitCode !== 0) {
+    return { ok: false, reason: `git status --porcelain im Worktree fehlgeschlagen (exit ${porcelain.exitCode}): ${truncate(porcelain.stderr, 200)}` };
+  }
+  const porcelainLines = porcelain.stdout.split("\n").filter((l) => l.trim() !== "");
+  if (porcelainLines.length === 0) {
+    return { ok: false, reason: "kein Commit / leerer Diff — git status --porcelain im Worktree ist leer" };
+  }
+
+  // Compare the task branch tip against the repo's base HEAD. The worktree
+  // is created from the repo HEAD, so `git log <base>..HEAD` is empty until
+  // the subagent commits. The default branch may be `main` or `master` —
+  // resolve it dynamically so fresh local repos (tests) work too.
+  const symbolicRef = await git(repo, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+  const defaultBranch = symbolicRef.exitCode === 0
+    ? symbolicRef.stdout.trim().replace(/^refs\/remotes\/origin\//, "")
+    : (await git(repo, ["rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+  if (!defaultBranch) {
+    return { ok: false, reason: "Basis-Branch des Repos nicht bestimmbar" };
+  }
+  const baseRev = await git(repo, ["rev-parse", defaultBranch]);
+  if (baseRev.exitCode !== 0) {
+    return { ok: false, reason: `git rev-parse ${defaultBranch} fehlgeschlagen (exit ${baseRev.exitCode}): ${truncate(baseRev.stderr, 200)}` };
+  }
+  const base = baseRev.stdout.trim();
+  const log = await git(repo, ["-C", worktreePath, "log", "--oneline", `${base}..HEAD`]);
+  if (log.exitCode !== 0) {
+    return { ok: false, reason: `git log fehlgeschlagen (exit ${log.exitCode}): ${truncate(log.stderr, 200)}` };
+  }
+  if (log.stdout.trim() === "") {
+    return { ok: false, reason: "kein Commit / leerer Diff — keine Commits auf dem Task-Branch" };
+  }
+  return { ok: true };
+}
+
+/** Post-run guard: a DONE claim requires a commit on the task branch. */
+async function verifyPostRunCommit(
+  repo: string | undefined,
+  worktreePath: string | undefined,
+  branch: string | undefined,
+  id: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (!repo || !worktreePath || !branch) {
+    // No worktree — nothing to verify against; coder tasks always get one.
+    return { ok: true };
+  }
+  return verifyWorktreeCommit(repo, worktreePath, branch, id);
 }
 
 /**
@@ -260,6 +357,13 @@ export function createAsyncAgentRunner(opts: AsyncAgentOptions): AsyncAgentRunne
           logger: opts.logger,
         });
 
+        // Inject the exact tool list (name + parameter names + types) into
+        // the system prompt. The subagent's prompt does NOT auto-embed
+        // schemas — without this the model guesses parameter names and
+        // calls e.g. "exec_command" instead of "exec". Cheap models follow
+        // the briefing literally, so give them the ground truth.
+        agent.setSystemPrompt(buildCoderSystemPrompt(persona, tools));
+
         const taskMessage = input.role === "coder" && worktreePath && branch
           ? `Worktree: ${worktreePath} (Branch ${branch}). Arbeite ausschließlich hier.\n\n${input.task}`
           : input.task;
@@ -310,6 +414,18 @@ export function createAsyncAgentRunner(opts: AsyncAgentOptions): AsyncAgentRunne
               `Lauf endete mit ungeparstem Tool-Call statt strukturiertem Aufruf (${runResult.turns} Turn(s)): ${runResult.finalMessage}`,
               200,
             ),
+          );
+          return;
+        }
+        // Runner-guard: a DONE claim requires a real commit on the task
+        // branch. Without this, the subagent can report "done" while the
+        // worktree has an empty diff (no commit, or only uncommitted
+        // changes) — the "done without commit" symptom.
+        const commitCheck = await verifyPostRunCommit(input.repo, worktreePath, branch, id);
+        if (!commitCheck.ok) {
+          await finalize(
+            "error",
+            truncate(`Kein nachweisbarer Commit im Worktree: ${commitCheck.reason}. Agent-Report: ${runResult.finalMessage}`, 200),
           );
           return;
         }

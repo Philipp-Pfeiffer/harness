@@ -1,6 +1,8 @@
 import { Type } from "@sinclair/typebox";
+import path from "node:path";
 import type { Tool, ToolCallContext } from "./types.js";
 import { ok, err } from "./types.js";
+import { processSupervisor } from "./processSupervisor.js";
 
 const SubagentArgs = Type.Object({
   action: Type.Union([
@@ -41,6 +43,75 @@ type SubagentArgsType = {
   model?: string;
   handle?: string;
 };
+
+/**
+ * Verification keywords for the task-briefing heuristic. A briefing MUST
+ * name both a verification command AND a done criterion, otherwise the
+ * subagent will declare "done" without any evidence.
+ */
+const VERIFY_PATTERNS = [
+  /\b(test|tests|typecheck|build|lint|check|verify|verifiziere|prüfe|pruefe|validate)\b/i,
+];
+
+const DONE_PATTERNS = [
+  /\b(done wenn|fertig wenn|done when|fertig, wenn|abgeschlossen wenn)\b/i,
+  /\b(done\s*kriterium|done\s*criterion|done-kriterium|fertig-?kriterium)\b/i,
+  /\b(verifikation|verification)\b/i,
+];
+
+function hasPattern(text: string, patterns: RegExp[]): boolean {
+  return patterns.some((re) => re.test(text));
+}
+
+function isAbsoluteRepoPath(repo: string): boolean {
+  return path.isAbsolute(repo) && !repo.startsWith("~") && !repo.includes("..");
+}
+
+function findOverlappingRunningTasks(repo: string, task: string, running: { id: string; summary: string; type: string }[]): string[] {
+  void repo;
+  const taskWords = new Set(
+    task.toLowerCase().split(/\W+/).filter((w) => w.length > 3),
+  );
+  return running
+    .filter((t) => t.type === "agent")
+    .filter((t) => {
+      if (!t.summary) return false;
+      const summaryWords = new Set(t.summary.toLowerCase().split(/\W+/).filter((w) => w.length > 3));
+      let overlap = 0;
+      for (const w of taskWords) {
+        if (summaryWords.has(w)) overlap++;
+      }
+      const wordCount = taskWords.size || 1;
+      return (overlap / wordCount) >= 0.3;
+    })
+    .map((t) => t.id);
+}
+
+function buildSubagentStartValidation(
+  args: SubagentArgsType,
+  running: { id: string; summary: string; type: string }[],
+): { error?: string; warning?: string } {
+  if (args.repo && !isAbsoluteRepoPath(args.repo)) {
+    return { error: `repo muss ein absoluter Pfad sein (kein "~", kein relativer Pfad): ${args.repo}` };
+  }
+  if (args.task) {
+    const hasVerify = hasPattern(args.task, VERIFY_PATTERNS);
+    const hasDone = hasPattern(args.task, DONE_PATTERNS);
+    if (!hasVerify || !hasDone) {
+      const missing: string[] = [];
+      if (!hasVerify) missing.push("Verifikationskommando (z.B. test/typecheck/build/verifiziere)");
+      if (!hasDone) missing.push("Done-Kriterium (z.B. 'fertig wenn')");
+      return { error: `Task-Briefing unvollständig — fehlt: ${missing.join(", ")}. Aufgabe muss Verifikation UND Done-Kriterium enthalten.` };
+    }
+  }
+  if (args.repo && args.task) {
+    const overlap = findOverlappingRunningTasks(args.repo, args.task, running);
+    if (overlap.length > 0) {
+      return { warning: `Überlappende laufende Subagent-Tasks im selben Repo erkannt: ${overlap.join(", ")}. Fortsetzen, aber Ergebnis ggf. doppelt.` };
+    }
+  }
+  return {};
+}
 
 const SUBAGENT_TOOL_DESCRIPTION = `Delegate a well-defined task to a dedicated background sub-agent and return immediately.
 
@@ -88,6 +159,11 @@ export const subagentTool: Tool<typeof SubagentArgs> = {
         if (!args.task) {
           return err("task ist für action 'start' erforderlich.");
         }
+        const running = processSupervisor.listTasks().running;
+        const validation = buildSubagentStartValidation(args, running);
+        if (validation.error) {
+          return err(validation.error);
+        }
         const result = await context.subagentRunner.start({
           role: args.role,
           task: args.task,
@@ -101,10 +177,11 @@ export const subagentTool: Tool<typeof SubagentArgs> = {
         const location = result.worktree && result.branch
           ? ` Worktree: ${result.worktree} (Branch ${result.branch}).`
           : "";
+        const dedupNote = validation.warning ? `\nHinweis: ${validation.warning}` : "";
         return ok(
           `Subagent gestartet (id: ${result.id}, Rolle: ${args.role}).${location} ` +
           `Poll mit action "status" und dieser id, oder warte auf das Completion-Event. ` +
-          `Sage dem User, dass der Task läuft und du dich meldest.`,
+          `Sage dem User, dass der Task läuft und du dich meldest.${dedupNote}`,
         );
       }
       case "status": {
