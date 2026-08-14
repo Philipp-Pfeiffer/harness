@@ -2346,7 +2346,13 @@ export class DaemonRuntime {
       title: `Voice: ${from}`,
       origin: "voice",
     });
-    const entry = this.createSessionEntry(session, "voice", `Voice: ${from}`);
+    const entry = this.createSessionEntry(
+      session,
+      "voice",
+      `Voice: ${from}`,
+      "default",
+      this.config.voiceModel,
+    );
     this.sessions.set(session.id, entry);
     this.voiceCallSessions.set(callId, session.id);
     this.voiceCallSessionsBySession.set(session.id, callId);

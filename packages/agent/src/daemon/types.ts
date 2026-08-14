@@ -383,6 +383,12 @@ export interface DaemonConfig {
     model: string;
     alias?: string;
   };
+  /**
+   * Model reference for voice-call sessions (resolved via the same matcher
+   * as `/model`: config keyword, alias, model id, or provider/model).
+   * Absent = voice uses the daemon default model.
+   */
+  voiceModel?: string;
   /** Enabled gateway names (e.g. ["whatsapp"]). Empty array = none. */
   gateways: string[];
   /** Skill names to enable. */
