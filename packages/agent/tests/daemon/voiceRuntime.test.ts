@@ -106,16 +106,30 @@ type RuntimeInternals = {
   afterVoiceFinalSay: (callId: string, sessionId: string, finalResponse: string) => void;
 };
 
-async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefined) => void }) {
+async function makeRuntime(opts: {
+  addendumRecorder: (addendum: string | undefined) => void;
+  runEvents?: Array<{ type: string; text?: string; name?: string; length?: number }>;
+}) {
   const runtime = new DaemonRuntime();
   const internals = runtime as unknown as RuntimeInternals;
   const agentRunMessages: Array<{ sessionId: string; callId: string; text: string; addendum: string | undefined }> = [];
   internals.agent = {
     setModel() {},
     setSystemPrompt() {},
-    async run(messages: Message[], options: { systemPromptAddendum?: string }): Promise<RunResult> {
+    async run(
+      messages: Message[],
+      options: { systemPromptAddendum?: string; onEvent?: (e: { type: string; text?: string; name?: string; length?: number }) => void },
+    ): Promise<RunResult> {
       opts.addendumRecorder(options.systemPromptAddendum);
       agentRunMessages.push({ sessionId: "", callId: "", text: messages.at(-1)?.content?.toString() ?? "", addendum: options.systemPromptAddendum });
+      for (const event of opts.runEvents ?? []) {
+        options.onEvent?.(event);
+        if (event.type === "tool_call_start") {
+          // Tool execution runs between the text segments — the turn is
+          // still active and the next text must be spoken AFTER it.
+          await new Promise((r) => setImmediate(r));
+        }
+      }
       // Mimic the real agent loop: it appends the assistant answer to the
       // passed message array (onInboundVoiceRinging relies on this to
       // persist the greeting).
@@ -135,7 +149,6 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   internals.whatsappSessionToSource = new Map();
   internals.currentVoiceSessionCaller = null;
   internals.outboundVoiceFallbacks = new Map();
-  internals.voiceChannel = null;
   internals.outboundVoiceCalls = new Map();
   internals.voiceCallSessionsBySession = new Map();
   internals.pendingHangupSessions = new Set();
@@ -144,6 +157,12 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   internals.logger = {
     child: () => voiceLogMocks,
   } as unknown as typeof internals.logger;
+  const says: Array<{ callId: string; text: string }> = [];
+  internals.voiceChannel = {
+    say: (callId, text) => says.push({ callId, text }),
+    endCall() {},
+  } as unknown as RuntimeInternals["voiceChannel"];
+  const voiceChannel = internals.voiceChannel;
 
   // Seed a voice session like resolveVoiceSession does (id = voice-<ts>).
   const session = await createSession(internals.paths, {
@@ -167,7 +186,9 @@ async function makeRuntime(opts: { addendumRecorder: (addendum: string | undefin
   });
   internals.voiceCallSessions.set("c1", "voice-123");
 
-  return { runtime, internals, agentRunMessages, voiceLogMocks };
+  // Jeder Test meldet eine eigene Call-Id an (kein "c1"-Hardcoding),
+  // damit VoiceChannel-say-Aufrufe pro Turn getrennt bleiben.
+  return { runtime, internals, agentRunMessages, voiceLogMocks, says, voiceChannel };
 }
 
 describe("Voice turn flow in DaemonRuntime", () => {
@@ -213,7 +234,10 @@ describe("Voice turn flow in DaemonRuntime", () => {
     internals.voiceAgent = {
       setModel() {},
       setSystemPrompt() {},
-      async run(messages: Message[]): Promise<RunResult> {
+      async run(
+        messages: Message[],
+        options: { onEvent?: (e: { type: string; text?: string; name?: string; length?: number }) => void },
+      ): Promise<RunResult> {
         voiceRuns.push(messages.at(-1)?.content?.toString() ?? "");
         messages.push({ role: "assistant", content: "Antwort im Voice-Agent", timestamp: Date.now() });
         return {
@@ -665,5 +689,144 @@ describe("Voice turn flow in DaemonRuntime", () => {
     expect(entry?.turnsCompleted).toBe(1);
     expect(entry?.messages.some((m) => m.role === "user" && String(m.content).includes("[Eingehender Anruf] +4915112345678 ruft gerade an"))).toBe(true);
     expect(entry?.messages.some((m) => m.role === "assistant" && String(m.content).includes("Antwort im Anruf"))).toBe(true);
+  });
+
+  it("progressive speech: reine Textantwort wird satzweise gesprochen (TTFT)", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        // Drei Sätze in einzelnen Token-Deltas — kein Tool-Call im Turn.
+        { type: "token", text: "Der Termin ist " },
+        { type: "token", text: "bestätigt. " },
+        { type: "token", text: "Wir treffen uns " },
+        { type: "token", text: "am Freitag! " },
+        { type: "token", text: "Alles " },
+        { type: "token", text: "klar." },
+      ],
+    });
+
+    const result = await internals.submitVoiceTurn("voice-123", "c1", "Wann treffen wir uns?");
+
+    expect(result.finalResponse).toBe("Antwort im Anruf");
+    // Jeder Satz wird als eigener Chunk gesprochen — der Angerufene hört
+    // den ersten Satz, während das Modell noch weiter generiert.
+    const spoken = says.map((s) => s.text).join(" ");
+    expect(spoken).toBe("Der Termin ist bestätigt. Wir treffen uns am Freitag! Alles klar.");
+    expect(says.length).toBeGreaterThanOrEqual(3);
+    // Kein Chunk beginnt mit einem Whitespace (TTS-sauber).
+    for (const s of says) expect(s.text.startsWith(" ")).toBe(false);
+  });
+
+  it("progressive speech: lange Antwort ohne Satzgrenze wird nach Mindestgröße geflusht", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        // Erstes Delta < 80 Zeichen (kein Boundary) → bleibt gepuffert.
+        { type: "token", text: "Das ist ein sehr langer Satz ohne Satzzeichen " },
+        // Zweites Delta überschreitet die Mindestgröße → Flush.
+        { type: "token", text: "der trotzdem früh genug gesprochen wird damit niemand schweigt" },
+      ],
+    });
+
+    await internals.submitVoiceTurn("voice-123", "c1", "Erkläre");
+
+    const spoken = says.map((s) => s.text).join(" ");
+    expect(spoken).toContain("Das ist ein sehr langer Satz");
+    expect(says.length).toBeGreaterThan(0);
+  });
+
+  it("progressive speech: Thinking-Tokens werden nie gesprochen", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        // Reasoning-Deltas (vom Agent als `thinking` geroutet) + finale
+        // Antwort-Tokens: Nur die Antwort darf gesprochen werden.
+        { type: "thinking", text: "Der Nutzer fragt nach dem Termin. Ich muss in der Datenbank nachsehen." },
+        { type: "token", text: "Der Termin " },
+        { type: "token", text: "steht." },
+      ],
+    });
+
+    await internals.submitVoiceTurn("voice-123", "c1", "Termin?");
+
+    const spoken = says.map((s) => s.text).join(" ");
+    expect(spoken).toContain("Der Termin steht.");
+    expect(spoken).not.toContain("Datenbank");
+    expect(spoken).not.toContain("Ich muss");
+  });
+
+  it("progressive speech: token_revoke entfernt zurückgenommenes Reasoning aus der Sprache", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        // Inline-`<think>`-Modell: Der Transformer klassifiziert den Text
+        // zunächst als Token und nimmt ihn via token_revoke zurück. Der
+        // Revoke kommt VOR einer Satzgrenze (kein Flush dazwischen),
+        // sodass der zurückgenommene Text noch im Puffer liegt.
+        // Achtung: `token_revoke.length` zählt UTF-8-BYTES, "Ich überlege
+        // kurz." hat 18 UTF-16-Zeichen = 19 Bytes (ü = 2 Bytes).
+        { type: "token", text: "Ich überlege kurz." },
+        { type: "token_revoke", length: 18 },
+        { type: "token", text: "Das ist die Antwort." },
+      ],
+    });
+
+    await internals.submitVoiceTurn("voice-123", "c1", "Frage");
+
+    const spoken = says.map((s) => s.text).join(" ");
+    expect(spoken).toContain("Das ist die Antwort.");
+    // Der Reasoning-Text wurde zurückgenommen, BEVOR er gesprochen wurde.
+    expect(spoken).not.toContain("Ich überlege kurz.");
+  });
+
+  it("progressive speech: token_revoke nach Satzgrenze zieht nur den Rest zurück", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        // Der erste Satz passiert die Satzgrenze und wird sofort
+        // gesprochen; der Folge-Token liegt noch im Puffer, als der Revoke
+        // kommt. `token_revoke` entfernt die letzten N Zeichen des Puffers
+        // (das vom Transformer zurückgenommene Reasoning-Delta).
+        { type: "token", text: "Ich überlege kurz." },
+        { type: "token", text: " Nächster " },
+        { type: "token_revoke", length: 11 },
+        { type: "token", text: "Satz." },
+      ],
+    });
+
+    await internals.submitVoiceTurn("voice-123", "c1", "Frage");
+
+    const spoken = says.map((s) => s.text).join(" ");
+    // Der erste Satz wurde vor dem Revoke bereits (gepuffert) gehalten,
+    // ist aber durch den Revoke teilweise zurückgezogen: Der Revoke
+    // entfernt die letzten 11 Zeichen des Puffers (' Nächster ' + 1
+    // Zeichen des ersten Satzes). Analog zum WhatsApp-Pfad kann nur der
+    // noch nicht gesprochene Teil zurückgenommen werden.
+    expect(spoken).not.toContain("Nächster");
+    expect(spoken).toContain("Satz.");
+    // Der zurückgenommene Teil des ersten Satzes erscheint nicht.
+    expect(spoken).not.toContain("Ich überlege kurz.");
+  });
+
+  it("progressive speech: Tool-Call-Markup wird nicht gesprochen, Pre-Tool-Text sofort", async () => {
+    const { internals, says } = await makeRuntime({
+      addendumRecorder: () => {},
+      runEvents: [
+        { type: "token", text: "Ich schaue kurz nach." },
+        { type: "tool_call_start", name: "readFile" },
+        { type: "tool_call_done", name: "readFile" },
+        { type: "token", text: "Das Ergebnis ist 42." },
+      ],
+    });
+
+    await internals.submitVoiceTurn("voice-123", "c1", "Wie viele?");
+
+    const spoken = says.map((s) => s.text).join(" ");
+    // Pre-Tool-Text wird sofort gesprochen (bestehendes Verhalten).
+    expect(spoken).toContain("Ich schaue kurz nach.");
+    // Nach dem Tool-Call generierte finale Antwort-Tokens werden ebenfalls
+    // progressiv gesprochen — aber KEIN Tool-Name/Argumente.
+    expect(spoken).toContain("Das Ergebnis ist 42.");
+    expect(spoken).not.toContain("readFile");
   });
 });

@@ -100,6 +100,7 @@ import { channelAddendumAsync, outboundVoiceAddendum, inboundVoiceOpeningAddendu
 import { PerKeyLock } from "../util/perKeyLock.js";
 import { VoiceChannel, voiceSessionId } from "./voiceChannel.js";
 import { resolveVoiceContact } from "./voiceRegistry.js";
+import { takeProgressiveChunk } from "./progressiveSpeech.js";
 import {
   loadVoiceRegistry,
   findRegistryContact,
@@ -2496,8 +2497,9 @@ export class DaemonRuntime {
    * origin "voice" injects the TTS-voice addendum via channelAddendumAsync.
    *
    * Progressive speech: agent text segments produced BEFORE a tool call are
-   * spoken immediately via `say` (so the callee hears an announcement while
-   * tools run); the final response is spoken once at turn end (unchanged).
+   * spoken immediately via `say`; final-answer tokens are spoken chunked as
+   * they arrive (sentence boundaries / min chunk size). The final response
+   * is spoken once at turn end by the voice channel (unchanged).
    */
   private async submitVoiceTurn(
     sessionId: string,
@@ -2548,8 +2550,10 @@ export class DaemonRuntime {
     const phoneOverride = this.outboundVoiceCalls.get(callId)?.phoneOverride;
     this.currentVoiceSessionCaller = { sessionId, phoneOverride };
 
-    // Progressive speech: buffer text tokens, speak them when a tool call
-    // begins (the callee must not hear silence during tool work).
+    // Progressive speech: buffer text tokens and speak them in chunks as
+    // they arrive — at sentence boundaries (`.`, `!`, `?`, newline) or once
+    // a minimum chunk size is reached — and whenever a tool call begins
+    // (the callee must not hear silence during tool work).
     let progressiveText = "";
     let sendChain: Promise<void> = Promise.resolve();
     let firstTextBlockSent = false;
@@ -2594,7 +2598,30 @@ export class DaemonRuntime {
           : await channelAddendumAsync(entry.origin, this.paths.stickers),
         onEvent: (event) => {
           if (event.type === "token") {
+            // Speak the final-answer tokens progressively so the callee
+            // hears the first sentence while the model is still
+            // generating. Reasoning never reaches this buffer: pi-ai
+            // parses `reasoning_content` into separate `thinking` events,
+            // which the agent routes as `thinking` (never `token`) — and
+            // for inline `<think>` models the ThinkingStreamTransformer
+            // reclassifies untagged reasoning via `token_revoke` (see
+            // submitWhatsAppTurn). Tool-call arguments arrive as
+            // `toolcall_delta`, not `token`, so they can't leak into
+            // speech either.
             progressiveText += event.text;
+            const chunk = takeProgressiveChunk(progressiveText);
+            if (chunk) {
+              queueProgressiveSay(chunk);
+              progressiveText = progressiveText.slice(chunk.length);
+            }
+          } else if (event.type === "token_revoke") {
+            // Thinking-Leak-Schutz: reasoning text, das der Transformer
+            // zunächst als Token klassifiziert hat, wird nachträglich
+            // zurückgenommen — aus dem Sprach-Puffer entfernen, damit es
+            // nie gesprochen wird. Nur der noch nicht geflushte Rest kann
+            // zurückgezogen werden; bereits gesprochene Chunks lassen sich
+            // nicht mehr ungesagt machen (wie beim WhatsApp-Pfad).
+            progressiveText = progressiveText.slice(0, -event.length);
           } else if (event.type === "tool_call_start") {
             // Text before a tool call is spoken immediately; the buffer is
             // cleared. Reasoning never reaches this buffer: pi-ai parses
@@ -2603,14 +2630,24 @@ export class DaemonRuntime {
             // suppression for reasoning-capable models was removed — it
             // silenced legitimate pre-tool speech for models like
             // DeepSeek Pro.
-            queueProgressiveSay(progressiveText);
+            const remaining = takeProgressiveChunk(progressiveText, true);
+            queueProgressiveSay(remaining);
             progressiveText = "";
           }
         },
       });
 
       // Wait for progressive says so the final say arrives after them.
+      // Note: `voiceChannel?.say` in the final-message path above is the
+      // only say for this turn — the transcript handler pushes it once.
       await sendChain;
+      // Turn-Ende: ein im Puffer verbliebener Rest (kein Satzende im
+      // Stream) wird nachgeholt, damit keine Antwortteile verloren gehen.
+      const tail = takeProgressiveChunk(progressiveText, true);
+      if (tail) {
+        queueProgressiveSay(tail);
+        await sendChain;
+      }
       const finalMessage = result.aborted ? "" : result.finalMessage;
       if (finalMessage) {
         voiceLog.info(`voice-timing: say_sent callId=${callId} sessionId=${sessionId}`);

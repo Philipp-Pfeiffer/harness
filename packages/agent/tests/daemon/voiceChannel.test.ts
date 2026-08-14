@@ -133,6 +133,33 @@ describe("VoiceChannel", () => {
     socket.destroy();
   });
 
+  it("delivers progressive says mid-turn in order (multiple say frames)", async () => {
+    const socket = await connect();
+    const says: string[] = [];
+    const collect = (m: Record<string, unknown>) => {
+      if (m.type === "say") says.push(String(m.text));
+      return false;
+    };
+    const reader = readUntil(socket, collect);
+    // Der Daemon spricht progressive Chunks direkt via channel.say()
+    // während der Turn noch läuft; der Transcript-Handler pusht die finale
+    // Antwort danach. Reihenfolge: Chunks, dann final.
+    write(socket, { type: "call_started", callId: "c11", from: "+49123", direction: "inbound", ts: 1111 });
+    await new Promise((r) => setTimeout(r, 50));
+    channel.say("c11", "Der Termin ist bestätigt.");
+    channel.say("c11", "Wir treffen uns am Freitag!");
+    write(socket, { type: "transcript", callId: "c11", text: "wann" });
+    // Der Collector löst nie auf (predicate = false); warte, bis die
+    // finale Antwort verarbeitet wurde, und stoppe dann.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(says).toEqual([
+      "Der Termin ist bestätigt.",
+      "Wir treffen uns am Freitag!",
+      "reply:wann",
+    ]);
+    socket.destroy();
+  });
+
   it("fires afterFinalSay AFTER the say was sent (say before finalize)", async () => {
     const socket = await connect();
     const sayPromise = readUntil(socket, (m) => m.type === "say");
