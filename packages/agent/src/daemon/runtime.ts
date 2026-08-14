@@ -218,6 +218,15 @@ interface ProfileAgentContext {
   cwd: string | null;
 }
 
+/**
+ * Tool list for voice-call sessions: the given tool set minus call_user.
+ * An active call must never start a new outbound call from inside the
+ * call. report_to_main_session and hang_up remain available.
+ */
+export function voiceToolsForCall(tools: Tool[]): Tool[] {
+  return tools.filter((t) => t.name !== "call_user");
+}
+
 export class DaemonRuntime {
   private readonly paths: HarnessPaths;
   private readonly logger: DaemonLogger;
@@ -254,6 +263,10 @@ export class DaemonRuntime {
   private allTools: Tool[] = [];
   /** Tool set of the default profile (== this.agent's tools). */
   private defaultTools: Tool[] = [];
+  /** Voice-call tool set: default profile tools minus call_user. */
+  private voiceTools: Tool[] = [];
+  /** Voice agent — same config as this.agent but WITHOUT call_user. */
+  private voiceAgent: Agent | null = null;
   /** Bare base prompt (runtime conventions), prefix of every profile prompt. */
   private basePrompt = "";
   /** Rendered skill hot-set block, shared by profiles with skills enabled. */
@@ -1754,9 +1767,28 @@ export class DaemonRuntime {
     });
     this.agent.setSystemPrompt(this.defaultPrompt);
 
+    // Voice sessions must never start a new outbound call from inside an
+    // active call: the voice agent gets the same tools as the default
+    // agent minus call_user. report_to_main_session and hang_up stay
+    // available to the voice agent.
+    this.voiceTools = voiceToolsForCall(this.defaultTools);
+    this.voiceAgent = createAgent({
+      tools: this.voiceTools,
+      model: this.model,
+      logger: this.makeToolLogger(),
+      inlineThinking:
+        defaultProfile?.frontmatter.thinking ??
+        (this.model as ResolvedModel).inlineThinking ??
+        (this.model as ResolvedModel).reasoning === true,
+      temperature: defaultProfile?.frontmatter.temperature,
+      maxTokens: defaultProfile?.frontmatter.maxTokens,
+    });
+    this.voiceAgent.setSystemPrompt(this.defaultPrompt);
+
     log.info("agent initialized", {
       model: this.model.name,
       profiles: this.profiles.size,
+      voiceTools: this.voiceTools.length,
     });
   }
 
@@ -2369,7 +2401,7 @@ export class DaemonRuntime {
     this.currentVoiceSessionCaller = { sessionId };
     this.turnActive = true;
     try {
-      const result = await appliedCtx.agent.run(openingMessages, {
+      const result = await this.voiceAgentFor(appliedCtx).run(openingMessages, {
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(appliedCtx.memoryZones),
         cwd: appliedCtx.cwd ?? undefined,
@@ -2382,7 +2414,8 @@ export class DaemonRuntime {
         channelFileSender: this.channelFileSender,
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
-        voiceCallStarter: this.voiceCallStarter,
+        // call_user ist im Voice-Toolset nicht enthalten — kein
+        // voiceCallStarter-Inject nötig (kein neuer Call aus einem Call).
         voiceReportToMainSession: this.voiceReportToMainSession,
         voiceHangUp: this.voiceHangUp,
         systemPromptAddendum:
@@ -2533,7 +2566,7 @@ export class DaemonRuntime {
 
     this.turnActive = true;
     try {
-      const result = await appliedCtx.agent.run(entry.messages, {
+      const result = await this.voiceAgentFor(appliedCtx).run(entry.messages, {
         metricsRecorder: entry.metricsRecorder,
         memoryBackend: this.ambientMemoryBackend(appliedCtx.memoryZones),
         cwd: appliedCtx.cwd ?? undefined,
@@ -2546,7 +2579,8 @@ export class DaemonRuntime {
         channelFileSender: this.channelFileSender,
         channelStickerSender: this.channelStickerSender,
         stickerLibraryDir: this.paths.stickers,
-        voiceCallStarter: this.voiceCallStarter,
+        // call_user ist im Voice-Toolset nicht enthalten — kein
+        // voiceCallStarter-Inject nötig (kein neuer Call aus einem Call).
         subagentRunner: this.subagentRunner ?? undefined,
         // Capability NUR in Voice-Sessions injizieren: Das Tool schreibt in
         // die Main-Session des Owners und darf nur aus einem Call heraus
@@ -3456,6 +3490,22 @@ export class DaemonRuntime {
       return { ...turnCtx, model: turnModel };
     }
     return turnCtx;
+  }
+
+  /**
+   * Agent for voice turns: a dedicated voice agent (default agent config
+   * minus the call_user tool) so an active call can never start a new
+   * outbound call. Keeps its model in sync with the turn's resolved model
+   * (applyTurnModel mutates only the shared default agent). Falls back to
+   * the shared agent when initAgent has not run (e.g. unit tests that
+   * stub the agent directly).
+   */
+  private voiceAgentFor(appliedCtx: ProfileAgentContext): Agent {
+    if (!this.voiceAgent) return appliedCtx.agent;
+    if (appliedCtx.model && typeof this.voiceAgent.setModel === "function") {
+      this.voiceAgent.setModel(appliedCtx.model);
+    }
+    return this.voiceAgent;
   }
 
   /** Ambient L2 hints — gated by config and profile memory zone. */

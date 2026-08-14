@@ -10,10 +10,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Agent, RunResult, Model, HarnessPaths } from "@harness/core";
+import { loadTools, type Agent, type RunResult, type Model, type HarnessPaths, type Tool } from "@harness/core";
 import type { Message } from "@mariozechner/pi-ai";
 import type { Api } from "@mariozechner/pi-ai";
-import { DaemonRuntime } from "../../src/daemon/runtime.js";
+import { DaemonRuntime, voiceToolsForCall } from "../../src/daemon/runtime.js";
 import { resolveHarnessPaths } from "@harness/core";
 import { createSession } from "../../src/core/session.js";
 
@@ -69,6 +69,8 @@ type RuntimeInternals = {
   paths: HarnessPaths;
   sessions: Map<string, SessionEntry>;
   voiceCallSessions: Map<string, string>;
+  voiceAgent: Agent | null;
+  voiceTools: Tool[];
   resolveVoiceSession: (callId: string, ts: number, from: string) => Promise<string>;
   submitVoiceTurn: (sessionId: string, callId: string, text: string) => Promise<{ finalResponse: string }>;
   endVoiceSession: (sessionId: string) => Promise<void>;
@@ -184,6 +186,53 @@ describe("Voice turn flow in DaemonRuntime", () => {
     expect(result.finalResponse).toBe("Antwort im Anruf");
     expect(capturedAddendum).toContain("TTS-verträglich");
     expect(capturedAddendum).not.toContain("Sticker");
+  });
+
+  it("voice tool list: no call_user, but hang_up + report_to_main_session stay", () => {
+    const defaultTools = loadTools();
+    // Sanity: the default tool set DOES include call_user — only the voice
+    // session tool list must drop it (an active call must never start a
+    // new outbound call).
+    expect(defaultTools.some((t) => t.name === "call_user")).toBe(true);
+
+    const voiceTools = voiceToolsForCall(defaultTools);
+    expect(voiceTools.some((t) => t.name === "call_user")).toBe(false);
+    expect(voiceTools.some((t) => t.name === "hang_up")).toBe(true);
+    expect(voiceTools.some((t) => t.name === "report_to_main_session")).toBe(true);
+  });
+
+  it("submitVoiceTurn routes through the dedicated voice agent (no call_user)", async () => {
+    const { internals, agentRunMessages } = await makeRuntime({ addendumRecorder: () => {} });
+    const voiceRuns: string[] = [];
+    const voiceTools = voiceToolsForCall(loadTools());
+    internals.voiceTools = voiceTools;
+    internals.voiceAgent = {
+      setModel() {},
+      setSystemPrompt() {},
+      async run(messages: Message[]): Promise<RunResult> {
+        voiceRuns.push(messages.at(-1)?.content?.toString() ?? "");
+        messages.push({ role: "assistant", content: "Antwort im Voice-Agent", timestamp: Date.now() });
+        return {
+          aborted: false,
+          turns: 1,
+          finalMessage: "Antwort im Voice-Agent",
+          toolCallCount: 0,
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 },
+        };
+      },
+    } as unknown as Agent;
+
+    const result = await internals.submitVoiceTurn("voice-123", "c1", "Hallo");
+
+    // Der Turn lief über den Voice-Agenten, nicht über den geteilten Agenten.
+    expect(result.finalResponse).toBe("Antwort im Voice-Agent");
+    expect(voiceRuns).toEqual(["Hallo"]);
+    expect(agentRunMessages).toHaveLength(0);
+    // Tool-Liste des Voice-Agenten: kein call_user, aber hang_up +
+    // report_to_main_session.
+    expect(internals.voiceTools.some((t) => t.name === "call_user")).toBe(false);
+    expect(internals.voiceTools.some((t) => t.name === "hang_up")).toBe(true);
+    expect(internals.voiceTools.some((t) => t.name === "report_to_main_session")).toBe(true);
   });
 
   it("endVoiceSession ends the session and clears the call mapping", async () => {
