@@ -369,6 +369,9 @@ describe("async agent runner", () => {
     // result is returned before the async worktree creation completes. The
     // completion event carries the final values.
     await waitForFinal(runner, started.id);
+    // The completion event is delivered asynchronously after the task is
+    // finalized — settle once so the event has arrived.
+    await settle();
 
     const expectedWorktree = `${repoDir}-coder-${started.id}`;
     const worktrees = execFileSync("git", ["-C", repoDir, "worktree", "list"], { encoding: "utf-8" });
