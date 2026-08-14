@@ -104,6 +104,7 @@ import {
   loadVoiceRegistry,
   findRegistryContact,
   checkAndRecordRateLimit,
+  isOwnerContact,
 } from "./voiceOutbound.js";
 import type { ChannelPlugin } from "./types.js";
 import {
@@ -2529,7 +2530,7 @@ export class DaemonRuntime {
       isOutboundOpening = true;
       const label = outbound.label ?? (await this.voiceCallerLabel(outbound.number));
       outbound.label = label;
-      text = `Du rufst ${label} an.\n\n${outbound.briefing}\n\n[Der Angerufene sagt:] ${text}`;
+      text = `Du bist der Anrufer: Du hast ${label} angerufen und bist jetzt mit ${label} im Gespräch. ${label} ist der Angerufene und hat dich NICHT angerufen — sag nicht 'Danke für den Rückruf' oder Ähnliches.\n\nDein Anliegen für dieses Gespräch:\n${outbound.briefing}\n\n[${label} sagt:] ${text}`;
     }
     const voiceLog = this.logger.child("voice");
     voiceLog.info(`voice-timing: turn_start callId=${callId} sessionId=${sessionId}`);
@@ -3036,9 +3037,14 @@ export class DaemonRuntime {
     }
 
     // Rate-Limit (max 1 Call pro Nummer pro 10 Minuten, restart-sicher).
-    const rate = await checkAndRecordRateLimit(this.paths.voiceRatelimit, number);
-    if (!rate.ok) {
-      return { ok: false, error: rate.error };
+    // Der Owner (Registry-Kontakt mit note "Betreiber") ist ausgenommen:
+    // Für ihn wird kein Rate-Limit geprüft UND kein Eintrag in den
+    // Rate-Limit-State geschrieben.
+    if (!isOwnerContact(contact)) {
+      const rate = await checkAndRecordRateLimit(this.paths.voiceRatelimit, number);
+      if (!rate.ok) {
+        return { ok: false, error: rate.error };
+      }
     }
 
     const callStartTs = Date.now();
@@ -3087,7 +3093,7 @@ export class DaemonRuntime {
     const fallback = setTimeout(() => {
       this.outboundVoiceFallbacks.delete(callId);
       this.logger.child("voice").info("outbound call: kein Transkript nach 30s — Agent eröffnet", { callId });
-      const userText = `Du rufst ${outbound.label ?? outbound.number} an.\n\nHallo, hörst du mich?\n\nBriefing:\n${briefing}`;
+      const userText = `Du bist der Anrufer: Du hast ${outbound.label ?? outbound.number} angerufen und bist jetzt mit ${outbound.label ?? outbound.number} im Gespräch. ${outbound.label ?? outbound.number} hat dich NICHT angerufen — sag nicht 'Danke für den Rückruf' oder Ähnliches.\n\nHallo, hörst du mich?\n\nBriefing:\n${briefing}`;
       void this.submitVoiceTurn(sessionId, callId, userText).then(({ finalResponse }) => {
         if (finalResponse) {
           this.voiceChannel?.say(callId, finalResponse);

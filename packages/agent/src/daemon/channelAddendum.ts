@@ -83,7 +83,7 @@ Wenn dein Gegenüber dich bittet aufzulegen (z.B. "Leg auf", "Ich muss los"), ve
 
 const OUTBOUND_VOICE_ADDENDUM = `## Voice-Call (Outbound)
 
-Du hast angerufen. Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing. Wenn dein Gegenüber dich bittet aufzulegen, verabschiede dich kurz und beende das Gespräch mit dem Tool hang_up.`;
+Du bist der ANRUFER: Du hast angerufen — dein Gegenüber ist der Angerufene und hat dich NICHT angerufen. Sag niemals 'Danke für den Rückruf' oder Ähnliches (du rufst an, du wirst nicht angerufen). Warte, bis dein Gegenüber sich zuerst meldet. Dann: kurze Begrüßung, danach dein Anliegen aus dem Briefing. Wenn dein Gegenüber dich bittet aufzulegen, verabschiede dich kurz und beende das Gespräch mit dem Tool hang_up.`;
 
 const WHATSAPP_ADDENDUM = `## WhatsApp格式化
 

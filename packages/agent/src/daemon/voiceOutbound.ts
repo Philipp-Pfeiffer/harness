@@ -91,6 +91,16 @@ export function findRegistryContact(
   return contacts.find((c) => c.number === normalized);
 }
 
+/**
+ * Erkennt den Owner/Betreiber der Installation anhand des Registry-Kontakts
+ * (note === "Betreiber", normalisiert: trim + lowercase). Der Owner ist vom
+ * Outbound-Rate-Limit ausgenommen — er darf jederzeit anrufen.
+ */
+export function isOwnerContact(contact: VoiceRegistryContact): boolean {
+  if (!contact.note) return false;
+  return contact.note.trim().toLowerCase() === "betreiber";
+}
+
 /* ─── Rate-Limit ─── */
 
 interface VoiceRateLimitState {

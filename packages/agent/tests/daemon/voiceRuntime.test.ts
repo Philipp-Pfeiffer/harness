@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { rm, mkdir, writeFile } from "node:fs/promises";
+import { rm, mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadTools, type Agent, type RunResult, type Model, type HarnessPaths, type Tool } from "@harness/core";
@@ -86,6 +86,10 @@ type RuntimeInternals = {
     phoneOverride?: string;
     briefingConsumed?: boolean;
   }>;
+  voiceCallStarter: (
+    requesterSessionId: string,
+    call: { number: string; briefing: string },
+  ) => Promise<{ ok: boolean; error?: string; callId?: string }>;
   outboundVoiceFallbacks: Map<string, ReturnType<typeof setTimeout>>;
   whatsappSessionToSource: Map<string, string>;
   currentVoiceSessionCaller: { sessionId: string; phoneOverride?: string } | null;
@@ -340,9 +344,9 @@ describe("Voice turn flow in DaemonRuntime", () => {
     // Erstes Transkript: Briefing als Kontext + Outbound-Addendum + Präfix.
     await internals.submitVoiceTurn("voice-123", "ob-2", "Hallo?");
     expect(agentRunMessages).toHaveLength(1);
-    expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110619636 an.");
+    expect(agentRunMessages[0]?.text).toContain("Du bist der Anrufer: Du hast 4915110619636 angerufen");
     expect(agentRunMessages[0]?.text).toContain("Briefing: Termin Freitag");
-    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+    expect(agentRunMessages[0]?.text).toContain("[4915110619636 sagt:] Hallo?");
     expect(agentRunMessages[0]?.addendum).toContain("Du hast angerufen");
     expect(internals.outboundVoiceFallbacks.has("ob-2")).toBe(false);
     // Nur der ERSTE Turn trägt das Briefing.
@@ -370,7 +374,7 @@ describe("Voice turn flow in DaemonRuntime", () => {
       // Timer feuert nach 30s → Opening-Turn mit Hallo + Briefing + Präfix.
       await vi.advanceTimersByTimeAsync(30_000);
       expect(agentRunMessages).toHaveLength(1);
-      expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110619636 an.");
+      expect(agentRunMessages[0]?.text).toContain("Du bist der Anrufer: Du hast 4915110619636 angerufen");
       expect(agentRunMessages[0]?.text).toContain("Hallo, hörst du mich?");
       expect(agentRunMessages[0]?.text).toContain("Briefing: Paket abholen");
       // Timer-Eintrag wurde beim Feuern entfernt.
@@ -398,7 +402,7 @@ describe("Voice turn flow in DaemonRuntime", () => {
       await vi.advanceTimersByTimeAsync(10_000);
       await internals.submitVoiceTurn("voice-123", "ob-5", "Hallo?");
       expect(agentRunMessages).toHaveLength(1);
-      expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+      expect(agentRunMessages[0]?.text).toContain("[4915110619636 sagt:] Hallo?");
       expect(internals.outboundVoiceFallbacks.has("ob-5")).toBe(false);
 
       // Nach 30s kein zusätzlicher Fallback-Turn.
@@ -426,9 +430,9 @@ describe("Voice turn flow in DaemonRuntime", () => {
     });
 
     await internals.submitVoiceTurn("voice-123", "ob-known", "Hallo?");
-    expect(agentRunMessages[0]?.text).toContain("Du rufst Philipp an.");
+    expect(agentRunMessages[0]?.text).toContain("Du bist der Anrufer: Du hast Philipp angerufen");
     expect(agentRunMessages[0]?.text).toContain("Briefing: Termin");
-    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+    expect(agentRunMessages[0]?.text).toContain("[Philipp sagt:] Hallo?");
   });
 
   it("outbound context prefix: unbekannte Nummer → Nummer-Fallback", async () => {
@@ -441,8 +445,69 @@ describe("Voice turn flow in DaemonRuntime", () => {
     });
 
     await internals.submitVoiceTurn("voice-123", "ob-unknown", "Hallo?");
-    expect(agentRunMessages[0]?.text).toContain("Du rufst 4915110699999 an.");
-    expect(agentRunMessages[0]?.text).toContain("[Der Angerufene sagt:] Hallo?");
+    expect(agentRunMessages[0]?.text).toContain("Du bist der Anrufer: Du hast 4915110699999 angerufen");
+    expect(agentRunMessages[0]?.text).toContain("[4915110699999 sagt:] Hallo?");
+  });
+
+  it("voiceCallStarter: Owner (note 'Betreiber') umgeht das Rate-Limit ohne State-Eintrag", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    const started: Array<{ callId: string; jid: string; briefing: string }> = [];
+    internals.voiceChannel = {
+      startCall: (callId, jid, briefing) => started.push({ callId, jid, briefing }),
+      say() {},
+      endCall() {},
+    } as unknown as RuntimeInternals["voiceChannel"];
+
+    // Registry: Philipp mit note "Betreiber" (Owner).
+    await mkdir(internals.paths.home, { recursive: true });
+    await writeFile(
+      join(internals.paths.home, "voice-registry.json"),
+      JSON.stringify({ contacts: [{ number: "4915110619636", name: "Philipp", note: "Betreiber" }] }),
+      "utf-8",
+    );
+    // Frisch gesetzter letzter-Call-Zeitstempel: ein Rate-Limit-Gate würde
+    // hier blocken — der Owner muss trotzdem durchkommen.
+    const seededTs = Date.now();
+    await writeFile(internals.paths.voiceRatelimit, JSON.stringify({ "4915110619636": seededTs }), "utf-8");
+
+    const result = await internals.voiceCallStarter("whatsapp-req", {
+      number: "+49 151 10619636",
+      briefing: "Briefing: Termin",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(started).toHaveLength(1);
+    expect(started[0]?.jid).toBe("4915110619636@s.whatsapp.net");
+    // Kein neuer Eintrag im Rate-Limit-State (Zeitstempel unverändert).
+    const raw = await readFile(internals.paths.voiceRatelimit, "utf-8");
+    const state = JSON.parse(raw) as Record<string, number>;
+    expect(state["4915110619636"]).toBe(seededTs);
+  });
+
+  it("voiceCallStarter: Nicht-Owner wird weiterhin rate-limited", async () => {
+    const { internals } = await makeRuntime({ addendumRecorder: () => {} });
+    internals.voiceChannel = {
+      startCall() {},
+      say() {},
+      endCall() {},
+    } as unknown as RuntimeInternals["voiceChannel"];
+
+    await mkdir(internals.paths.home, { recursive: true });
+    await writeFile(
+      join(internals.paths.home, "voice-registry.json"),
+      JSON.stringify({ contacts: [{ number: "4915110619636", name: "Markus", note: "Freund" }] }),
+      "utf-8",
+    );
+    // Frischer letzter-Call-Zeitstempel → Nicht-Owner wird geblockt.
+    await writeFile(internals.paths.voiceRatelimit, JSON.stringify({ "4915110619636": Date.now() }), "utf-8");
+
+    const result = await internals.voiceCallStarter("whatsapp-req", {
+      number: "+49 151 10619636",
+      briefing: "Briefing: Termin",
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("Rate-Limit");
   });
 
   it("hang_up setzt nur das pendingHangup-Flag — kein sofortiges end_call", async () => {

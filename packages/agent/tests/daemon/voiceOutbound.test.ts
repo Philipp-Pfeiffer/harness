@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import {
   loadVoiceRegistry,
   findRegistryContact,
+  isOwnerContact,
   checkAndRecordRateLimit,
   clearRateLimit,
   normalizeVoiceNumber,
@@ -107,6 +108,23 @@ describe("findRegistryContact", () => {
     expect(findRegistryContact(contacts, "+49 151 10619636")?.name).toBe("Philipp");
     expect(findRegistryContact(contacts, "4915110619636")?.name).toBe("Philipp");
     expect(findRegistryContact(contacts, "4915110610000")).toBeUndefined();
+  });
+});
+
+describe("isOwnerContact", () => {
+  it("returns true for note 'Betreiber'", () => {
+    expect(isOwnerContact({ number: "4915110619636", note: "Betreiber" })).toBe(true);
+  });
+
+  it("normalizes whitespace and case", () => {
+    expect(isOwnerContact({ number: "4915110619636", note: "  BETREIBER " })).toBe(true);
+    expect(isOwnerContact({ number: "4915110619636", note: " betreiber " })).toBe(true);
+  });
+
+  it("returns false for non-owner contacts (missing/other note)", () => {
+    expect(isOwnerContact({ number: "4915110619636" })).toBe(false);
+    expect(isOwnerContact({ number: "4915110619636", note: "Freund" })).toBe(false);
+    expect(isOwnerContact({ number: "4915110619636", note: " " })).toBe(false);
   });
 });
 
